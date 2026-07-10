@@ -1,0 +1,9 @@
+name: file_read
+display_name: Read Workspace File
+category: workspace
+description: Read a file within the current run workspace only.
+risk_level: low
+enabled: true
+parameters: {path: {type: string, required: true}}
+limits: {max_output_bytes: 1048576}
+permissions: {workspace_only: true}

@@ -1,0 +1,14 @@
+name: web-ctf-solver
+display_name: Web CTF Solver
+description: Solver for explicitly authorized CTF Web challenges.
+enabled: true
+tools: [http_request, file_read, file_search, python_run]
+skills: [demo-web-analysis]
+limits:
+  max_tool_calls: 40
+  max_runtime_seconds: 900
+system_rules:
+  - Only interact with explicitly allowed challenge hosts.
+  - Record evidence for every important conclusion.
+  - Never claim a flag is solved before verification.
+  - Do not use arbitrary shell commands or public targets.

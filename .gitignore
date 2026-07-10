@@ -1,0 +1,16 @@
+.env
+.venv/
+node_modules/
+dist/
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+*.tsbuildinfo
+local-dev.db
+data/workspaces/*
+!data/workspaces/.gitkeep
+backend/e2e.db
+backend/e2e.*.log
+backend/local-dev.db
+data/runtime-logs/

@@ -1,0 +1,9 @@
+name: python_run
+display_name: Run Workspace Python Script
+category: workspace
+description: Run an existing scripts/*.py file using a fixed interpreter and argument vector.
+risk_level: medium
+enabled: true
+parameters: {path: {type: string, required: true}, args: {type: array, required: false}}
+limits: {timeout_seconds: 30, max_output_bytes: 1048576}
+permissions: {workspace_only: true, shell_forbidden: true}

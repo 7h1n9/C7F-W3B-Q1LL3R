@@ -1,0 +1,9 @@
+name: file_search
+display_name: Search Workspace Files
+category: workspace
+description: Search names and text within the current run workspace only.
+risk_level: low
+enabled: true
+parameters: {query: {type: string, required: true}, max_results: {type: integer, required: false}}
+limits: {max_output_bytes: 1048576}
+permissions: {workspace_only: true}
