@@ -1,4 +1,6 @@
-# CTF Web Agent (initial foundation)
+# C7F-W3B-Q1LL3R
+
+> CTF Web Agent 初版基础架构
 
 An authorization-bound monorepo for a CTF Web solving workflow. It is designed only for local practice ranges, CTF competitions, and explicitly authorized testing. It does **not** enable arbitrary shell commands, public-target automation, persistence, automatic exploitation, broad scanning, or automated payload libraries.
 
