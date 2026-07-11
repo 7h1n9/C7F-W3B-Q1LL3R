@@ -1,4 +1,6 @@
-from pydantic import BaseModel, ConfigDict, HttpUrl, field_validator
+from pydantic import BaseModel, ConfigDict, HttpUrl, model_validator
+
+from app.core.config import validate_service_host
 
 
 class ServiceSettingsUpdate(BaseModel):
@@ -7,9 +9,8 @@ class ServiceSettingsUpdate(BaseModel):
     runner_url: HttpUrl
     codex_bridge_url: HttpUrl
 
-    @field_validator("runner_url", "codex_bridge_url")
-    @classmethod
-    def require_local_service(cls, value: HttpUrl) -> HttpUrl:
-        if value.host not in {"localhost", "127.0.0.1", "[::1]"}:
-            raise ValueError("Only local service endpoints can be changed from the browser.")
-        return value
+    @model_validator(mode="after")
+    def validate_endpoints(self) -> "ServiceSettingsUpdate":
+        validate_service_host(self.codex_bridge_url.host, allow_private_runner=False)
+        validate_service_host(self.runner_url.host, allow_private_runner=True)
+        return self

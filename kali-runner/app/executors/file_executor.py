@@ -7,7 +7,7 @@ from app.workspace.paths import safe_child, workspace_for
 
 
 async def file_read(request: JobRequest) -> dict:
-    workspace = workspace_for(request.run_id, request.workspace_path)
+    workspace = workspace_for(request.run_id)
     path = safe_child(workspace, str(request.arguments.get("path", "")))
     if not path.is_file():
         raise HTTPException(404, detail="file not found")
@@ -17,7 +17,7 @@ async def file_read(request: JobRequest) -> dict:
 
 
 async def file_search(request: JobRequest) -> dict:
-    workspace = workspace_for(request.run_id, request.workspace_path)
+    workspace = workspace_for(request.run_id)
     needle = str(request.arguments.get("query", "")).lower()
     maximum = min(int(request.arguments.get("max_results", 20)), 100)
     results = []

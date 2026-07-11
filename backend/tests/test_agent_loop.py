@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import json
 from pathlib import Path
 
@@ -101,6 +102,8 @@ async def test_openai_loop_verifies_flag_and_generates_report(monkeypatch: pytes
             return FinishAction(type="finish", result="solved", summary="Flag is present", flag_candidate="flag{verified}")
 
     monkeypatch.setattr("app.orchestration.orchestrator.SessionLocal", sessions)
+    async def sync_workspace(*_: object) -> None: pass
+    monkeypatch.setattr("app.orchestration.orchestrator.runner_client.sync_workspace", sync_workspace)
     await SolveOrchestrator(engine_factory=lambda _: ScriptedEngine()).start(run_id)
     async with sessions() as session:
         completed = await session.get(SolveRun, run_id)
@@ -127,7 +130,6 @@ async def test_openai_compatible_tool_to_artifact_flag_e2e(monkeypatch: pytest.M
         json.dumps({"type": "tool", "tool_name": "http_request", "arguments": {"method": "GET", "url": "http://challenge.local/"}, "reason": "Inspect the authorized target", "hypothesis_id": None}),
         json.dumps({"type": "finish", "result": "solved", "summary": "Found a flag", "flag_candidate": "flag{e2e}"}),
     ]
-    state: dict[str, str] = {}
 
     class Response:
         def __init__(self, body: dict) -> None: self.body = body
@@ -141,22 +143,25 @@ async def test_openai_compatible_tool_to_artifact_flag_e2e(monkeypatch: pytest.M
         async def post(self, url: str, **kwargs: object) -> Response:
             if "provider.test" in url:
                 return Response({"choices": [{"message": {"content": actions.pop(0)}}]})
-            payload = kwargs["json"]
-            assert isinstance(payload, dict)
-            workspace_path = Path(str(payload["workspace_path"]))
-            artifact = workspace_path / "responses" / "http_0001.json"
-            artifact.parent.mkdir(exist_ok=True); artifact.write_text('{"body":"flag{e2e}"}', encoding="utf-8")
-            state["artifact"] = "responses/http_0001.json"
             return Response({"job_id": "runner-job"})
         async def get(self, _url: str, **_: object) -> Response:
-            return Response({"job_id": "runner-job", "status": "COMPLETED", "result": {"artifact_path": state["artifact"], "summary": "HTTP 200", "status_code": 200}})
+            return Response({"job_id": "runner-job", "status": "COMPLETED", "result": {}})
 
     monkeypatch.setattr("app.engines.openai_compatible.httpx.AsyncClient", Client)
     monkeypatch.setattr("app.orchestration.orchestrator.SessionLocal", sessions)
+    async def sync_workspace(*_: object) -> None: pass
+    async def create_job(*_: object) -> str: return "runner-job"
+    async def wait_job(*_: object) -> dict: return {"job_id": "runner-job", "status": "COMPLETED", "artifact_path": "responses/http.json", "artifact_sha256": hashlib.sha256(b'{"body":"flag{e2e}"}').hexdigest(), "summary": "HTTP 200", "structured_result": {"status_code": 200, "body": "flag{e2e}"}}
+    async def download_artifact(_run: str, _path: str, destination: Path, _sha: str | None = None) -> tuple[int, str]:
+        raw = b'{"body":"flag{e2e}"}'; destination.parent.mkdir(parents=True, exist_ok=True); destination.write_bytes(raw); return len(raw), hashlib.sha256(raw).hexdigest()
+    monkeypatch.setattr("app.orchestration.orchestrator.runner_client.sync_workspace", sync_workspace)
+    monkeypatch.setattr("app.tools.gateway.runner_client.create_job", create_job)
+    monkeypatch.setattr("app.tools.gateway.runner_client.wait_job", wait_job)
+    monkeypatch.setattr("app.tools.gateway.runner_client.download_artifact", download_artifact)
     await SolveOrchestrator(engine_factory=lambda _: OpenAICompatibleEngine("http://provider.test/v1", "secret", "test-model")).start(run_id)
     async with sessions() as session:
         completed = await session.get(SolveRun, run_id)
         assert completed.status == "COMPLETED_SOLVED", completed.last_error_message
-    assert (workspace / "responses" / "http_0001.json").is_file()
+    assert (workspace / "responses" / "http.json").is_file()
     assert (workspace / "final" / "writeup.md").is_file()
     await engine.dispose()

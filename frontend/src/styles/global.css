@@ -8,10 +8,11 @@ body::before { position: fixed; inset: 0; z-index: -1; content: ""; opacity: .58
 .brand-mark { display: grid; width: 38px; height: 38px; place-items: center; color: #043431; font-weight: 900; letter-spacing: -1px; background: linear-gradient(135deg, #e6fffa, #5ff4d4); box-shadow: 0 0 22px #5ff4d475; clip-path: polygon(18% 0, 100% 0, 100% 72%, 78% 100%, 0 100%, 0 20%); }
 .brand-lockup strong { display: block; font-size: 15px; letter-spacing: 1.8px; }
 .brand-lockup span { display: block; margin-top: 3px; color: #9de7d9; font-size: 9px; letter-spacing: 1.3px; }
-.cyber-menu { margin-top: 10px; color: #b8e7df; background: transparent !important; border-inline-end: 0 !important; }
+.cyber-menu { --ant-menu-item-color: #b8e7df; --ant-menu-item-icon-color: #9de7d9; --ant-menu-item-hover-color: #ffffff; margin-top: 10px; color: #b8e7df; background: transparent !important; border-inline-end: 0 !important; }
 .cyber-menu .ant-menu-item { width: calc(100% - 20px); height: 47px; margin: 7px 10px; line-height: 47px; border-radius: 7px; }
-.cyber-menu .ant-menu-item a { color: inherit; }
+.cyber-menu .ant-menu-item, .cyber-menu .ant-menu-item .ant-menu-title-content, .cyber-menu .ant-menu-item .anticon, .cyber-menu .ant-menu-item a { color: #b8e7df !important; }
 .cyber-menu .ant-menu-item-selected { color: #eafffb !important; font-weight: 700; background: linear-gradient(90deg, #00b89c, #00b89c48) !important; box-shadow: inset 3px 0 #d7fff6, 0 0 18px #00e0bf36; }
+.cyber-menu .ant-menu-item-selected .ant-menu-title-content, .cyber-menu .ant-menu-item-selected .anticon, .cyber-menu .ant-menu-item-selected a { color: #eafffb !important; }
 .cyber-menu .ant-menu-item:hover { color: #fff !important; background: #ffffff18 !important; }
 .sider-footnote { position: absolute; right: 18px; bottom: 24px; left: 18px; z-index: 1; color: #91d4c8; font-size: 11px; line-height: 1.7; }
 .cyber-header { display: flex; align-items: center; height: 66px; padding: 0 30px; color: #13544d; background: #ffffffc7 !important; border-bottom: 1px solid #b9eee4; backdrop-filter: blur(10px); }

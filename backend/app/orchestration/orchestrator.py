@@ -1,4 +1,5 @@
 import asyncio
+from pathlib import Path
 from time import monotonic
 
 from sqlalchemy import select
@@ -17,6 +18,7 @@ from app.services.crypto import decrypt_api_key
 from app.services.events import event_service
 from app.services.flags import flag_service
 from app.services.reports import report_service
+from app.services.runner_client import runner_client
 from app.tools.gateway import tool_gateway
 from app.tools.registry import load_tool_definitions
 
@@ -55,6 +57,8 @@ class SolveOrchestrator:
                 run = await session.scalar(select(SolveRun).where(SolveRun.id == run_id))
                 if not run:
                     return
+                if run.status == RunStatus.CREATED:
+                    await runner_client.sync_workspace(run.id, Path(run.workspace_path))
                 engine = await self.build_engine(run, session)
                 self.active_engines[run_id] = engine
                 if run.engine_type == "openai_compatible":

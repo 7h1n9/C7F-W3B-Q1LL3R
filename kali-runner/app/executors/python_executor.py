@@ -8,7 +8,7 @@ from app.workspace.paths import safe_child, workspace_for
 
 
 async def python_run(request: JobRequest) -> dict:
-    workspace = workspace_for(request.run_id, request.workspace_path)
+    workspace = workspace_for(request.run_id)
     script = safe_child(workspace, str(request.arguments.get("path", "")), "scripts")
     if script.suffix != ".py" or not script.is_file():
         raise HTTPException(400, detail="python_run only accepts existing scripts/*.py files")

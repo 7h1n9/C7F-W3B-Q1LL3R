@@ -1,3 +1,5 @@
+import ipaddress
+import socket
 from functools import lru_cache
 from pathlib import Path
 
@@ -13,6 +15,7 @@ class Settings(BaseSettings):
     codex_bridge_url: str = "http://127.0.0.1:8090"
     cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
     encryption_key: str = "development-only-change-me"
+    allowed_service_cidrs: str = "127.0.0.0/8,192.168.56.0/24"
 
     @property
     def cors_origin_list(self) -> list[str]:
@@ -40,3 +43,20 @@ def persist_service_urls(runner_url: str, codex_bridge_url: str) -> None:
             updated.append(line)
     updated.extend(f"{key}={value}" for key, value in values.items() if key not in seen)
     path.write_text("\n".join(updated) + "\n", encoding="utf-8")
+
+
+def validate_service_host(host: str, allow_private_runner: bool) -> None:
+    if host == "localhost":
+        return
+    try:
+        addresses = {item[4][0] for item in socket.getaddrinfo(host, None)}
+    except socket.gaierror as error:
+        raise ValueError("Service hostname could not be resolved.") from error
+    networks = [ipaddress.ip_network(item.strip()) for item in get_settings().allowed_service_cidrs.split(",") if item.strip()]
+    for address in addresses:
+        ip = ipaddress.ip_address(address)
+        if allow_private_runner and any(ip in network for network in networks):
+            continue
+        if not allow_private_runner and ip.is_loopback:
+            continue
+        raise ValueError("Service address is outside the allowed private network.")
