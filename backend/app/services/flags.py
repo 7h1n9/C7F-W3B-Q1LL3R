@@ -9,32 +9,61 @@ from app.services.events import event_service
 
 
 class FlagService:
-    async def extract_candidates(self, session: AsyncSession, run: SolveRun, challenge: Challenge, artifact: Artifact, content: str) -> list[FlagCandidate]:
+    async def extract_candidates(
+        self,
+        session: AsyncSession,
+        run: SolveRun,
+        challenge: Challenge,
+        artifact: Artifact,
+        content: str,
+    ) -> list[FlagCandidate]:
         try:
             matches = set(re.findall(challenge.flag_pattern, content))
         except re.error:
             matches = set()
         candidates: list[FlagCandidate] = []
         for candidate in matches:
-            existing = await session.scalar(select(FlagCandidate).where(FlagCandidate.run_id == run.id, FlagCandidate.candidate == candidate))
+            existing = await session.scalar(
+                select(FlagCandidate).where(
+                    FlagCandidate.run_id == run.id, FlagCandidate.candidate == candidate
+                )
+            )
             if existing:
                 continue
-            item = FlagCandidate(run_id=run.id, candidate=candidate, source_artifact_id=artifact.id, pattern_matched=True)
+            item = FlagCandidate(
+                run_id=run.id,
+                candidate=candidate,
+                source_artifact_id=artifact.id,
+                pattern_matched=True,
+            )
             session.add(item)
             candidates.append(item)
         await session.commit()
         for item in candidates:
-            await event_service.append(session, run.id, "flag.candidate_found", {"candidate_id": item.id, "artifact_id": artifact.id})
+            await event_service.append(
+                session,
+                run.id,
+                "flag.candidate_found",
+                {"candidate_id": item.id, "artifact_id": artifact.id},
+            )
         return candidates
 
-    async def verify(self, session: AsyncSession, run: SolveRun, challenge: Challenge, candidate: str) -> bool:
+    async def verify(
+        self, session: AsyncSession, run: SolveRun, challenge: Challenge, candidate: str
+    ) -> bool:
         try:
             valid = re.fullmatch(challenge.flag_pattern, candidate) is not None
         except re.error:
             valid = False
-        item = await session.scalar(select(FlagCandidate).where(FlagCandidate.run_id == run.id, FlagCandidate.candidate == candidate))
+        item = await session.scalar(
+            select(FlagCandidate).where(
+                FlagCandidate.run_id == run.id, FlagCandidate.candidate == candidate
+            )
+        )
         if item is None:
-            item = FlagCandidate(run_id=run.id, candidate=candidate, pattern_matched=valid, verified=valid)
+            item = FlagCandidate(
+                run_id=run.id, candidate=candidate, pattern_matched=valid, verified=valid
+            )
             session.add(item)
         else:
             item.verified = valid

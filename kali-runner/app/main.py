@@ -2,6 +2,7 @@ import asyncio
 import hashlib
 import json
 import secrets
+import shutil
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -16,6 +17,7 @@ from app.workspace.paths import DOWNLOAD_DIRS, initialize_workspace, safe_child,
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
+    settings.require_safe_production_token()
     await job_service.recover()
     yield
 
@@ -25,7 +27,7 @@ app = FastAPI(title="CTF Kali Runner", version="0.2.0", lifespan=lifespan)
 
 @app.get("/health")
 async def health() -> dict:
-    return {"status": "ok", "execution_backend": "KaliVmExecutionBackend"}
+    return {"status": "ok", "execution_backend": "KaliVmExecutionBackend", "capabilities": {"tshark": bool(shutil.which("tshark")), "capinfos": bool(shutil.which("capinfos"))}}
 
 
 def require_token(x_runner_token: str | None = Header(default=None)) -> None:

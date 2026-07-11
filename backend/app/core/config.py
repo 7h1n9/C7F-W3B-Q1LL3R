@@ -16,6 +16,16 @@ class Settings(BaseSettings):
     cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
     encryption_key: str = "development-only-change-me"
     allowed_service_cidrs: str = "127.0.0.0/8,192.168.56.0/24,192.168.236.0/24"
+    environment: str = "development"
+
+    def require_safe_production_secrets(self) -> None:
+        if self.environment.lower() not in {"dev", "development", "test", "testing"} and (
+            self.runner_api_token == "development-runner-token"
+            or self.encryption_key == "development-only-change-me"
+        ):
+            raise RuntimeError(
+                "Default Runner token or encryption key is forbidden outside development."
+            )
 
     @property
     def cors_origin_list(self) -> list[str]:
@@ -52,7 +62,11 @@ def validate_service_host(host: str, allow_private_runner: bool) -> None:
         addresses = {item[4][0] for item in socket.getaddrinfo(host, None)}
     except socket.gaierror as error:
         raise ValueError("Service hostname could not be resolved.") from error
-    networks = [ipaddress.ip_network(item.strip()) for item in get_settings().allowed_service_cidrs.split(",") if item.strip()]
+    networks = [
+        ipaddress.ip_network(item.strip())
+        for item in get_settings().allowed_service_cidrs.split(",")
+        if item.strip()
+    ]
     for address in addresses:
         ip = ipaddress.ip_address(address)
         if allow_private_runner and any(ip in network for network in networks):

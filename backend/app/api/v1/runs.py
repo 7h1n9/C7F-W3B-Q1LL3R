@@ -8,18 +8,33 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.v1.challenges import require_challenge
 from app.core.database import get_session
 from app.core.exceptions import DomainError
+from app.models.challenge import ChallengeAttachment
+from app.models.conversation import (
+    ChallengeConversation,
+    ChallengeConversationSkill,
+    ChallengeMessage,
+)
 from app.models.run import Artifact, FlagCandidate, Observation, SolveRun, ToolCall
 from app.orchestration.orchestrator import orchestrator
 from app.orchestration.state_machine import RunStatus, transition
 from app.schemas.run import RunCreate, RunRead
 from app.services.events import event_service
+from app.services.skill_selection import snapshot_run_skills
 from app.services.workspace import create_workspace
 
 router = APIRouter(tags=["runs"])
 
 
 def read(item: SolveRun) -> RunRead:
-    return RunRead.model_validate({**item.__dict__, "created_at": item.created_at.isoformat(), "updated_at": item.updated_at.isoformat(), "started_at": item.started_at.isoformat() if item.started_at else None, "finished_at": item.finished_at.isoformat() if item.finished_at else None})
+    return RunRead.model_validate(
+        {
+            **item.__dict__,
+            "created_at": item.created_at.isoformat(),
+            "updated_at": item.updated_at.isoformat(),
+            "started_at": item.started_at.isoformat() if item.started_at else None,
+            "finished_at": item.finished_at.isoformat() if item.finished_at else None,
+        }
+    )
 
 
 async def require_run(run_id: str, session: AsyncSession) -> SolveRun:
@@ -30,26 +45,115 @@ async def require_run(run_id: str, session: AsyncSession) -> SolveRun:
 
 
 @router.post("/challenges/{challenge_id}/runs", status_code=201)
-async def create_run(challenge_id: str, payload: RunCreate, session: AsyncSession = Depends(get_session)) -> dict:
+async def create_run(
+    challenge_id: str, payload: RunCreate, session: AsyncSession = Depends(get_session)
+) -> dict:
     challenge = await require_challenge(challenge_id, session)
+    if challenge.challenge_type == "TRAFFIC_ANALYSIS":
+        primary = (
+            await session.get(ChallengeAttachment, challenge.primary_attachment_id)
+            if challenge.primary_attachment_id
+            else None
+        )
+        if challenge.status == "DRAFT" or not primary or primary.kind != "PCAP":
+            raise DomainError(
+                "TRAFFIC_PCAP_REQUIRED",
+                "Traffic-analysis challenges require a valid primary PCAP before creating a Run.",
+                status_code=422,
+            )
+    values = payload.model_dump(
+        exclude={"selected_skill_ids", "disabled_skill_ids", "conversation_id"}
+    )
+    conversation_summary = None
+    if payload.conversation_id:
+        conversation = await session.get(ChallengeConversation, payload.conversation_id)
+        if not conversation or conversation.challenge_id != challenge.id:
+            raise DomainError(
+                "CONVERSATION_NOT_FOUND",
+                "Conversation does not belong to this challenge.",
+                status_code=422,
+            )
+        if values.get("model_config_id") is None:
+            values["model_config_id"] = conversation.model_config_id
+        if not payload.selected_skill_ids:
+            payload.selected_skill_ids = [
+                item.skill_id
+                for item in (
+                    await session.scalars(
+                        select(ChallengeConversationSkill)
+                        .where(ChallengeConversationSkill.conversation_id == conversation.id)
+                        .order_by(ChallengeConversationSkill.priority)
+                    )
+                ).all()
+            ]
+        messages = list(
+            (
+                await session.scalars(
+                    select(ChallengeMessage)
+                    .where(ChallengeMessage.conversation_id == conversation.id)
+                    .order_by(ChallengeMessage.created_at.desc())
+                    .limit(8)
+                )
+            ).all()
+        )
+        conversation_summary = "\n".join(
+            f"{message.role}: {message.content}" for message in reversed(messages)
+        )[:8000]
     if payload.engine_type == "openai_compatible":
         from app.models.model_config import ModelConfig
-        config = await session.get(ModelConfig, payload.model_config_id) if payload.model_config_id else None
+
+        config = (
+            await session.get(ModelConfig, values.get("model_config_id"))
+            if values.get("model_config_id")
+            else None
+        )
         if not config or not config.enabled:
-            raise DomainError("MODEL_CONFIG_REQUIRED", "OpenAI-compatible runs require an enabled model configuration.", status_code=422)
-    if payload.engine_type == "codex_sdk" and payload.model_config_id:
-        raise DomainError("MODEL_CONFIG_NOT_APPLICABLE", "Codex SDK runs do not use a model configuration.", status_code=422)
-    item = SolveRun(challenge_id=challenge.id, workspace_path="pending", **payload.model_dump())
-    session.add(item); await session.flush()
-    item.workspace_path = str(create_workspace(item.id, challenge))
-    await session.commit(); await session.refresh(item)
+            raise DomainError(
+                "MODEL_CONFIG_REQUIRED",
+                "OpenAI-compatible runs require an enabled model configuration.",
+                status_code=422,
+            )
+    if payload.engine_type == "codex_sdk" and values.get("model_config_id"):
+        raise DomainError(
+            "MODEL_CONFIG_NOT_APPLICABLE",
+            "Codex SDK runs do not use a model configuration.",
+            status_code=422,
+        )
+    item = SolveRun(
+        challenge_id=challenge.id,
+        workspace_path="pending",
+        conversation_summary=conversation_summary,
+        **values,
+    )
+    session.add(item)
+    await session.flush()
+    attachments = list(
+        (
+            await session.scalars(
+                select(ChallengeAttachment).where(ChallengeAttachment.challenge_id == challenge.id)
+            )
+        ).all()
+    )
+    item.workspace_path = str(create_workspace(item.id, challenge, attachments))
+    await snapshot_run_skills(
+        session,
+        item.id,
+        challenge.id,
+        item.model_config_id,
+        payload.selected_skill_ids,
+        payload.disabled_skill_ids,
+    )
+    await session.commit()
+    await session.refresh(item)
     await event_service.append(session, item.id, "run.created", {"challenge_id": challenge.id})
     return {"data": read(item)}
 
 
 @router.get("/runs")
 async def list_runs(session: AsyncSession = Depends(get_session)) -> dict:
-    items = list((await session.scalars(select(SolveRun).order_by(SolveRun.created_at.desc()))).all())
+    items = list(
+        (await session.scalars(select(SolveRun).order_by(SolveRun.created_at.desc()))).all()
+    )
     return {"data": [read(item) for item in items]}
 
 
@@ -62,7 +166,11 @@ async def get_run(run_id: str, session: AsyncSession = Depends(get_session)) -> 
 async def start_run(run_id: str, session: AsyncSession = Depends(get_session)) -> dict:
     run = await require_run(run_id, session)
     if run.status != RunStatus.CREATED:
-        raise DomainError("RUN_INVALID_STATE", "Only newly created runs can be started.", {"current_state": run.status})
+        raise DomainError(
+            "RUN_INVALID_STATE",
+            "Only newly created runs can be started.",
+            {"current_state": run.status},
+        )
     asyncio.create_task(orchestrator.start(run.id))
     return {"data": {"run_id": run.id, "status": "STARTING"}}
 
@@ -78,13 +186,19 @@ async def cancel_run(run_id: str, session: AsyncSession = Depends(get_session)) 
 
 
 @router.post("/runs/{run_id}/continue")
-async def continue_run(run_id: str, payload: dict, session: AsyncSession = Depends(get_session)) -> dict:
+async def continue_run(
+    run_id: str, payload: dict, session: AsyncSession = Depends(get_session)
+) -> dict:
     run = await require_run(run_id, session)
     if run.status != RunStatus.WAITING_USER:
-        raise DomainError("RUN_NOT_WAITING", "Only runs waiting for user input can continue.", status_code=409)
+        raise DomainError(
+            "RUN_NOT_WAITING", "Only runs waiting for user input can continue.", status_code=409
+        )
     message = str(payload.get("message", "")).strip()
     if not message:
-        raise DomainError("MESSAGE_REQUIRED", "A continuation message is required.", status_code=422)
+        raise DomainError(
+            "MESSAGE_REQUIRED", "A continuation message is required.", status_code=422
+        )
     asyncio.create_task(orchestrator.continue_with_message(run.id, message))
     return {"data": {"run_id": run.id, "status": "STARTING"}}
 
@@ -92,26 +206,82 @@ async def continue_run(run_id: str, payload: dict, session: AsyncSession = Depen
 @router.get("/runs/{run_id}/tool-calls")
 async def list_tool_calls(run_id: str, session: AsyncSession = Depends(get_session)) -> dict:
     await require_run(run_id, session)
-    items = list((await session.scalars(select(ToolCall).where(ToolCall.run_id == run_id).order_by(ToolCall.created_at))).all())
-    return {"data": [{"id": item.id, "tool_name": item.tool_name, "arguments": item.arguments_json, "status": item.status, "runner_job_id": item.runner_job_id, "created_at": item.created_at.isoformat()} for item in items]}
+    items = list(
+        (
+            await session.scalars(
+                select(ToolCall).where(ToolCall.run_id == run_id).order_by(ToolCall.created_at)
+            )
+        ).all()
+    )
+    return {
+        "data": [
+            {
+                "id": item.id,
+                "tool_name": item.tool_name,
+                "arguments": item.arguments_json,
+                "status": item.status,
+                "runner_job_id": item.runner_job_id,
+                "created_at": item.created_at.isoformat(),
+            }
+            for item in items
+        ]
+    }
 
 
 @router.get("/runs/{run_id}/observations")
 async def list_observations(run_id: str, session: AsyncSession = Depends(get_session)) -> dict:
     await require_run(run_id, session)
-    items = list((await session.scalars(select(Observation).where(Observation.run_id == run_id).order_by(Observation.created_at))).all())
-    return {"data": [{"id": item.id, "summary": item.summary, "facts": item.facts_json, "created_at": item.created_at.isoformat()} for item in items]}
+    items = list(
+        (
+            await session.scalars(
+                select(Observation)
+                .where(Observation.run_id == run_id)
+                .order_by(Observation.created_at)
+            )
+        ).all()
+    )
+    return {
+        "data": [
+            {
+                "id": item.id,
+                "summary": item.summary,
+                "facts": item.facts_json,
+                "created_at": item.created_at.isoformat(),
+            }
+            for item in items
+        ]
+    }
 
 
 @router.get("/runs/{run_id}/artifacts")
 async def list_artifacts(run_id: str, session: AsyncSession = Depends(get_session)) -> dict:
     await require_run(run_id, session)
-    items = list((await session.scalars(select(Artifact).where(Artifact.run_id == run_id).order_by(Artifact.created_at))).all())
-    return {"data": [{"id": item.id, "path": item.file_path, "type": item.artifact_type, "size": item.size, "sha256": item.sha256, "summary": item.summary} for item in items]}
+    items = list(
+        (
+            await session.scalars(
+                select(Artifact).where(Artifact.run_id == run_id).order_by(Artifact.created_at)
+            )
+        ).all()
+    )
+    return {
+        "data": [
+            {
+                "id": item.id,
+                "path": item.file_path,
+                "type": item.artifact_type,
+                "size": item.size,
+                "sha256": item.sha256,
+                "summary": item.summary,
+            }
+            for item in items
+        ]
+    }
 
 
 @router.get("/runs/{run_id}/artifacts/{artifact_id}")
-async def get_artifact(run_id: str, artifact_id: str, session: AsyncSession = Depends(get_session)) -> dict:
+async def get_artifact(
+    run_id: str, artifact_id: str, session: AsyncSession = Depends(get_session)
+) -> dict:
     run = await require_run(run_id, session)
     item = await session.get(Artifact, artifact_id)
     if item is None or item.run_id != run.id:
@@ -120,14 +290,33 @@ async def get_artifact(run_id: str, artifact_id: str, session: AsyncSession = De
     path = (root / item.file_path).resolve()
     if root not in path.parents or not path.is_file():
         raise DomainError("ARTIFACT_PATH_INVALID", "Artifact file is unavailable.", status_code=404)
-    return {"data": {"id": item.id, "path": item.file_path, "content": path.read_bytes()[:1_048_576].decode(errors="replace"), "truncated": path.stat().st_size > 1_048_576}}
+    return {
+        "data": {
+            "id": item.id,
+            "path": item.file_path,
+            "content": path.read_bytes()[:1_048_576].decode(errors="replace"),
+            "truncated": path.stat().st_size > 1_048_576,
+        }
+    }
 
 
 @router.get("/runs/{run_id}/flag-candidates")
 async def list_flags(run_id: str, session: AsyncSession = Depends(get_session)) -> dict:
     await require_run(run_id, session)
-    items = list((await session.scalars(select(FlagCandidate).where(FlagCandidate.run_id == run_id))).all())
-    return {"data": [{"id": item.id, "candidate": item.candidate, "verified": item.verified, "pattern_matched": item.pattern_matched} for item in items]}
+    items = list(
+        (await session.scalars(select(FlagCandidate).where(FlagCandidate.run_id == run_id))).all()
+    )
+    return {
+        "data": [
+            {
+                "id": item.id,
+                "candidate": item.candidate,
+                "verified": item.verified,
+                "pattern_matched": item.pattern_matched,
+            }
+            for item in items
+        ]
+    }
 
 
 @router.get("/runs/{run_id}/report")
@@ -135,5 +324,7 @@ async def get_report(run_id: str, session: AsyncSession = Depends(get_session)) 
     run = await require_run(run_id, session)
     path = Path(run.workspace_path) / "final" / "writeup.md"
     if not path.is_file():
-        raise DomainError("REPORT_NOT_FOUND", "No report has been generated for this run.", status_code=404)
+        raise DomainError(
+            "REPORT_NOT_FOUND", "No report has been generated for this run.", status_code=404
+        )
     return {"data": {"content": path.read_text(encoding="utf-8"), "path": "final/writeup.md"}}

@@ -5,6 +5,7 @@ import {
   MenuFoldOutlined,
   MenuUnfoldOutlined,
   PlayCircleOutlined,
+  ProfileOutlined,
   SafetyCertificateOutlined,
   SettingOutlined,
 } from "@ant-design/icons";
@@ -15,11 +16,13 @@ import { useUiStore } from "../stores/ui";
 const menuItems = [
   { key: "/", icon: <DashboardOutlined />, label: <Link to="/">态势总览</Link> },
   { key: "/challenges", icon: <ExperimentOutlined />, label: <Link to="/challenges">靶场题目</Link> },
+  { key: "/skills", icon: <ProfileOutlined />, label: <Link to="/skills">Skill 管理</Link> },
   { key: "/runs", icon: <PlayCircleOutlined />, label: <Link to="/runs">解题任务</Link> },
   { key: "/settings", icon: <SettingOutlined />, label: <Link to="/settings">系统配置</Link> },
 ];
 
 function selectedKey(pathname: string): string {
+  if (pathname.startsWith("/skills")) return "/skills";
   if (pathname.startsWith("/challenges")) return "/challenges";
   if (pathname.startsWith("/runs")) return "/runs";
   if (pathname.startsWith("/settings")) return "/settings";

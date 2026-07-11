@@ -35,10 +35,14 @@ class SolveOrchestrator:
         if run.engine_type == "codex_sdk":
             return CodexSdkEngine(get_settings().codex_bridge_url, run.workspace_path)
         if run.engine_type == "openai_compatible":
-            config = await session.get(ModelConfig, run.model_config_id) if run.model_config_id else None
+            config = (
+                await session.get(ModelConfig, run.model_config_id) if run.model_config_id else None
+            )
             if not config or not config.enabled or not config.base_url or not config.model_name:
                 raise ValueError("OpenAI-compatible engine requires an enabled model configuration")
-            return OpenAICompatibleEngine(config.base_url, decrypt_api_key(config.encrypted_api_key), config.model_name)
+            return OpenAICompatibleEngine(
+                config.base_url, decrypt_api_key(config.encrypted_api_key), config.model_name
+            )
         return MockSolveEngine()
 
     async def _transition(self, session, run: SolveRun, target: RunStatus) -> None:
@@ -57,7 +61,7 @@ class SolveOrchestrator:
                 run = await session.scalar(select(SolveRun).where(SolveRun.id == run_id))
                 if not run:
                     return
-                if run.status == RunStatus.CREATED:
+                if run.status == RunStatus.CREATED and run.engine_type != "mock":
                     await runner_client.sync_workspace(run.id, Path(run.workspace_path))
                 engine = await self.build_engine(run, session)
                 self.active_engines[run_id] = engine
@@ -71,12 +75,19 @@ class SolveOrchestrator:
                 if "run" in locals() and RunStatus(run.status) not in TERMINAL:
                     run.last_error_code, run.last_error_message = "ENGINE_ERROR", str(error)[:4000]
                     await self._transition(session, run, RunStatus.FAILED_ENGINE)
-                    await event_service.append(session, run_id, "run.failed", {"code": "ENGINE_ERROR", "message": str(error)[:1000]})
+                    await event_service.append(
+                        session,
+                        run_id,
+                        "run.failed",
+                        {"code": "ENGINE_ERROR", "message": str(error)[:1000]},
+                    )
             finally:
                 self.active_engines.pop(run_id, None)
                 self.active_tasks.pop(run_id, None)
 
-    async def _run_openai(self, session, run: SolveRun, engine: OpenAICompatibleEngine, user_message: str | None) -> None:
+    async def _run_openai(
+        self, session, run: SolveRun, engine: OpenAICompatibleEngine, user_message: str | None
+    ) -> None:
         if run.status == RunStatus.CREATED:
             await self._transition(session, run, RunStatus.PREPARING)
             await event_service.append(session, run.id, "run.started", {})
@@ -104,37 +115,76 @@ class SolveOrchestrator:
             action = await engine.next_action(messages)
             run.agent_step_count += 1
             await session.commit()
-            await event_service.append(session, run.id, "agent.action_requested", {"type": action.type, "reason": action.reason if isinstance(action, ToolAction) else action.summary})
+            await event_service.append(
+                session,
+                run.id,
+                "agent.action_requested",
+                {
+                    "type": action.type,
+                    "reason": action.reason if isinstance(action, ToolAction) else action.summary,
+                },
+            )
             if isinstance(action, ToolAction):
                 if action.tool_name not in load_tool_definitions():
-                    await event_service.append(session, run.id, "agent.action_rejected", {"tool": action.tool_name, "code": "TOOL_NOT_AVAILABLE"})
+                    await event_service.append(
+                        session,
+                        run.id,
+                        "agent.action_rejected",
+                        {"tool": action.tool_name, "code": "TOOL_NOT_AVAILABLE"},
+                    )
                     continue
                 if run.tool_call_count >= run.max_tool_calls:
-                    await event_service.append(session, run.id, "agent.action_rejected", {"tool": action.tool_name, "code": "MAX_TOOL_CALLS"})
+                    await event_service.append(
+                        session,
+                        run.id,
+                        "agent.action_rejected",
+                        {"tool": action.tool_name, "code": "MAX_TOOL_CALLS"},
+                    )
                     break
                 await self._transition(session, run, RunStatus.EXECUTING)
                 run.tool_call_count += 1
                 await session.commit()
                 try:
-                    result = await tool_gateway.invoke(session, run, challenge, action.tool_name, action.arguments)
+                    result = await tool_gateway.invoke(
+                        session, run, challenge, action.tool_name, action.arguments
+                    )
                 except DomainError as error:
-                    await event_service.append(session, run.id, "agent.action_rejected", {"tool": action.tool_name, "code": error.code})
+                    await event_service.append(
+                        session,
+                        run.id,
+                        "agent.action_rejected",
+                        {"tool": action.tool_name, "code": error.code},
+                    )
                     await self._transition(session, run, RunStatus.EVALUATING)
                     continue
-                await event_service.append(session, run.id, "agent.action_completed", {"type": "tool", "tool": action.tool_name, "status": result.get("status")})
+                await event_service.append(
+                    session,
+                    run.id,
+                    "agent.action_completed",
+                    {"type": "tool", "tool": action.tool_name, "status": result.get("status")},
+                )
                 await self._transition(session, run, RunStatus.EVALUATING)
                 continue
             await self._finish(session, run, challenge, action)
             return
         if RunStatus(run.status) not in TERMINAL:
             await self._transition(session, run, RunStatus.REPORTING)
-            await report_service.generate(session, run, challenge, "unsolved", "Maximum agent steps or tool calls reached")
+            await report_service.generate(
+                session, run, challenge, "unsolved", "Maximum agent steps or tool calls reached"
+            )
             await self._transition(session, run, RunStatus.COMPLETED_UNSOLVED)
 
-    async def _finish(self, session, run: SolveRun, challenge: Challenge, action: FinishAction) -> None:
+    async def _finish(
+        self, session, run: SolveRun, challenge: Challenge, action: FinishAction
+    ) -> None:
         if action.result == "waiting_user":
             await self._transition(session, run, RunStatus.WAITING_USER)
-            await event_service.append(session, run.id, "agent.action_completed", {"type": "finish", "result": "waiting_user"})
+            await event_service.append(
+                session,
+                run.id,
+                "agent.action_completed",
+                {"type": "finish", "result": "waiting_user"},
+            )
             return
         solved = False
         if action.flag_candidate:
@@ -142,11 +192,27 @@ class SolveOrchestrator:
             solved = await flag_service.verify(session, run, challenge, action.flag_candidate)
         await self._transition(session, run, RunStatus.REPORTING)
         result = "solved" if action.result == "solved" and solved else "unsolved"
-        await report_service.generate(session, run, challenge, result, "Flag did not match the configured pattern" if action.result == "solved" and not solved else "")
-        await event_service.append(session, run.id, "agent.action_completed", {"type": "finish", "result": result})
-        await self._transition(session, run, RunStatus.COMPLETED_SOLVED if result == "solved" else RunStatus.COMPLETED_UNSOLVED)
+        await report_service.generate(
+            session,
+            run,
+            challenge,
+            result,
+            "Flag did not match the configured pattern"
+            if action.result == "solved" and not solved
+            else "",
+        )
+        await event_service.append(
+            session, run.id, "agent.action_completed", {"type": "finish", "result": result}
+        )
+        await self._transition(
+            session,
+            run,
+            RunStatus.COMPLETED_SOLVED if result == "solved" else RunStatus.COMPLETED_UNSOLVED,
+        )
 
-    async def _run_event_engine(self, session, run: SolveRun, engine: SolveEngine, user_message: str | None) -> None:
+    async def _run_event_engine(
+        self, session, run: SolveRun, engine: SolveEngine, user_message: str | None
+    ) -> None:
         if run.status == RunStatus.CREATED:
             await self._transition(session, run, RunStatus.PREPARING)
             await event_service.append(session, run.id, "run.started", {})

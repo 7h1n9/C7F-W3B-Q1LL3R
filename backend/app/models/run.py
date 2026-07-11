@@ -15,6 +15,7 @@ class SolveRun(UUIDTimestampMixin, Base):
     current_phase: Mapped[str] = mapped_column(String(80), default="CREATED")
     workspace_path: Mapped[str] = mapped_column(String(1024), nullable=False)
     codex_thread_id: Mapped[str | None] = mapped_column(String(255))
+    conversation_summary: Mapped[str | None] = mapped_column(Text)
     max_agent_steps: Mapped[int] = mapped_column(Integer, default=12)
     max_tool_calls: Mapped[int] = mapped_column(Integer, default=12)
     max_context_observations: Mapped[int] = mapped_column(Integer, default=8)
@@ -26,7 +27,11 @@ class SolveRun(UUIDTimestampMixin, Base):
     last_error_message: Mapped[str | None] = mapped_column(Text)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC))
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(UTC),
+        onupdate=lambda: datetime.now(UTC),
+    )
 
 
 class RunEvent(UUIDTimestampMixin, Base):
@@ -82,7 +87,11 @@ class Hypothesis(UUIDTimestampMixin, Base):
     status: Mapped[str] = mapped_column(String(40), default="OPEN")
     evidence_json: Mapped[dict] = mapped_column(JSON, default=dict)
     attempt_count: Mapped[int] = mapped_column(Integer, default=0)
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC))
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(UTC),
+        onupdate=lambda: datetime.now(UTC),
+    )
 
 
 class FlagCandidate(UUIDTimestampMixin, Base):

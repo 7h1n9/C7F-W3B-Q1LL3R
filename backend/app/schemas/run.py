@@ -8,6 +8,9 @@ class RunCreate(BaseModel):
     max_tool_calls: int = Field(default=12, ge=0, le=100)
     max_context_observations: int = Field(default=8, ge=1, le=50)
     max_runtime_seconds: int = Field(default=300, ge=10, le=3600)
+    selected_skill_ids: list[str] = Field(default_factory=list, max_length=30)
+    disabled_skill_ids: list[str] = Field(default_factory=list, max_length=30)
+    conversation_id: str | None = None
 
 
 class RunRead(BaseModel):

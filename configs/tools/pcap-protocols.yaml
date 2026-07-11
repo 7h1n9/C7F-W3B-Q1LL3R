@@ -1,0 +1,7 @@
+name: pcap_protocols
+display_name: PCAP 协议层级
+category: traffic
+description: Produce a protocol hierarchy from a PCAP attachment.
+risk_level: low
+parameters:
+  path: {type: string, required: true}

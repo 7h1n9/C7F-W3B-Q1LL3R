@@ -4,6 +4,7 @@ from collections import defaultdict
 
 class InMemoryEventBus:
     """Process-local fanout; persistence remains the source of truth."""
+
     def __init__(self) -> None:
         self._queues: dict[str, set[asyncio.Queue]] = defaultdict(set)
 

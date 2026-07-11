@@ -9,6 +9,7 @@ import { ChallengesPage } from "./pages/ChallengesPage";
 import { DashboardPage } from "./pages/DashboardPage";
 import { RunsPage } from "./pages/RunsPage";
 import { SettingsPage } from "./pages/SettingsPage";
+import { SkillsPage } from "./pages/SkillsPage";
 import { WorkspacePage } from "./pages/WorkspacePage";
 import "./styles/global.css";
 
@@ -38,6 +39,7 @@ ReactDOM.createRoot(document.getElementById("root")!).render(
             <Route path="/runs" element={<RunsPage />} />
             <Route path="/runs/:id" element={<WorkspacePage />} />
             <Route path="/settings" element={<SettingsPage />} />
+            <Route path="/skills" element={<SkillsPage />} />
           </Route>
         </Routes>
       </BrowserRouter>

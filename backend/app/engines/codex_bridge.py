@@ -12,24 +12,37 @@ class CodexSdkEngine(SolveEngine):
 
     async def start(self, run_id: str) -> AsyncIterator[EngineEvent]:
         async with httpx.AsyncClient(timeout=60) as client:
-            response = await client.post(f"{self.bridge_url}/threads", json={"run_id": run_id, "workspace_path": self.workspace_path, "prompt": "Analyze only this authorized CTF workspace."})
+            response = await client.post(
+                f"{self.bridge_url}/threads",
+                json={
+                    "run_id": run_id,
+                    "workspace_path": self.workspace_path,
+                    "prompt": "Analyze only this authorized CTF workspace.",
+                },
+            )
             response.raise_for_status()
         payload = response.json()
         thread_id = payload.get("thread_id")
         if not isinstance(thread_id, str):
             raise RuntimeError("Codex Bridge did not return a thread ID")
         self.thread_ids[run_id] = thread_id
-        yield EngineEvent("agent.message", {"message": "Codex thread created", **payload}, "ANALYZING")
+        yield EngineEvent(
+            "agent.message", {"message": "Codex thread created", **payload}, "ANALYZING"
+        )
 
     async def continue_run(self, run_id: str, message: str) -> AsyncIterator[EngineEvent]:
         thread_id = self.thread_ids.get(run_id)
         if not thread_id:
             raise RuntimeError("Codex thread ID is unavailable")
         async with httpx.AsyncClient(timeout=60) as client:
-            response = await client.post(f"{self.bridge_url}/threads/{thread_id}/run", json={"prompt": message})
+            response = await client.post(
+                f"{self.bridge_url}/threads/{thread_id}/run", json={"prompt": message}
+            )
             response.raise_for_status()
         for event in response.json().get("events", []):
-            yield EngineEvent(str(event.get("type", "agent.message")), dict(event.get("payload", {})))
+            yield EngineEvent(
+                str(event.get("type", "agent.message")), dict(event.get("payload", {}))
+            )
 
     async def cancel(self, run_id: str) -> None:
         thread_id = self.thread_ids.get(run_id)
@@ -48,7 +61,12 @@ class CodexSdkEngine(SolveEngine):
                 yield event
             return
         async with httpx.AsyncClient(timeout=60) as client:
-            response = await client.post(f"{self.bridge_url}/threads/{thread_id}/resume", json={"prompt": "Resume the authorized analysis."})
+            response = await client.post(
+                f"{self.bridge_url}/threads/{thread_id}/resume",
+                json={"prompt": "Resume the authorized analysis."},
+            )
             response.raise_for_status()
         for event in response.json().get("events", []):
-            yield EngineEvent(str(event.get("type", "agent.message")), dict(event.get("payload", {})))
+            yield EngineEvent(
+                str(event.get("type", "agent.message")), dict(event.get("payload", {}))
+            )

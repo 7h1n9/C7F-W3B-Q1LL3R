@@ -76,7 +76,7 @@ class JobService:
     def _persist_artifact(self, job: Job, result: dict) -> dict:
         workspace = workspace_for(job.request.run_id)
         directory = "responses" if job.request.tool == "http_request" else "outputs"
-        suffix = "json" if job.request.tool in {"http_request", "file_search"} else "txt"
+        suffix = "json" if job.request.tool in {"http_request", "file_search", "pcap_metadata", "pcap_protocols", "pcap_query"} else "txt"
         path = workspace / directory / f"{job.job_id}.{suffix}"
         path.parent.mkdir(parents=True, exist_ok=True)
         raw = json.dumps(result, ensure_ascii=False, indent=2).encode() if suffix == "json" else str(result.get("output") or result.get("content") or json.dumps(result, ensure_ascii=False, indent=2)).encode()

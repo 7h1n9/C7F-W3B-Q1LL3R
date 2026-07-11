@@ -13,7 +13,9 @@ router = APIRouter(prefix="/runs", tags=["events"])
 
 
 @router.get("/{run_id}/events")
-async def stream_events(run_id: str, request: Request, after: int = 0, session: AsyncSession = Depends(get_session)) -> StreamingResponse:
+async def stream_events(
+    run_id: str, request: Request, after: int = 0, session: AsyncSession = Depends(get_session)
+) -> StreamingResponse:
     async def event_stream():
         for event in await event_service.history(session, run_id, after):
             yield f"id: {event.sequence}\nevent: {event.event_type}\ndata: {json.dumps(event_service.serialize(event))}\n\n"
@@ -24,4 +26,9 @@ async def stream_events(run_id: str, request: Request, after: int = 0, session: 
                 yield f"id: {event['sequence']}\nevent: {event['event_type']}\ndata: {json.dumps(event)}\n\n"
             except TimeoutError:
                 yield ": heartbeat\n\n"
-    return StreamingResponse(event_stream(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )

@@ -13,8 +13,8 @@ class JobStatus(StrEnum):
 
 class JobRequest(BaseModel):
     run_id: str = Field(min_length=1)
-    allowed_hosts: list[str] = Field(min_length=1)
-    tool: str = Field(pattern="^(http_request|file_read|file_search|python_run)$")
+    allowed_hosts: list[str] = Field(default_factory=list)
+    tool: str = Field(pattern="^(http_request|file_read|file_search|python_run|pcap_metadata|pcap_protocols|pcap_query)$")
     arguments: dict
 
 

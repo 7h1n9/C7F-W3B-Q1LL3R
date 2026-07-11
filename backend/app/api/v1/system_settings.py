@@ -37,7 +37,10 @@ async def get_system_settings() -> dict:
 
 @router.put("")
 async def update_system_settings(payload: ServiceSettingsUpdate) -> dict:
-    runner_url, bridge_url = str(payload.runner_url).rstrip("/"), str(payload.codex_bridge_url).rstrip("/")
+    runner_url, bridge_url = (
+        str(payload.runner_url).rstrip("/"),
+        str(payload.codex_bridge_url).rstrip("/"),
+    )
     persist_service_urls(runner_url, bridge_url)
     settings = get_settings()
     settings.runner_url, settings.codex_bridge_url = runner_url, bridge_url

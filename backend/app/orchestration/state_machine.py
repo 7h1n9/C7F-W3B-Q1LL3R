@@ -24,24 +24,73 @@ class RunStatus(StrEnum):
     POLICY_BLOCKED = "POLICY_BLOCKED"
 
 
-TERMINAL = {status for status in RunStatus if status.name.startswith(("COMPLETED", "FAILED"))} | {RunStatus.TIMEOUT, RunStatus.CANCELLED, RunStatus.POLICY_BLOCKED}
+TERMINAL = {status for status in RunStatus if status.name.startswith(("COMPLETED", "FAILED"))} | {
+    RunStatus.TIMEOUT,
+    RunStatus.CANCELLED,
+    RunStatus.POLICY_BLOCKED,
+}
 ALLOWED: dict[RunStatus, set[RunStatus]] = {
-    RunStatus.CREATED: {RunStatus.PREPARING, RunStatus.FAILED_ENGINE, RunStatus.CANCELLED, RunStatus.POLICY_BLOCKED},
+    RunStatus.CREATED: {
+        RunStatus.PREPARING,
+        RunStatus.FAILED_ENGINE,
+        RunStatus.CANCELLED,
+        RunStatus.POLICY_BLOCKED,
+    },
     RunStatus.PREPARING: {RunStatus.ANALYZING, RunStatus.FAILED_ENGINE, RunStatus.CANCELLED},
-    RunStatus.ANALYZING: {RunStatus.PLANNING, RunStatus.WAITING_USER, RunStatus.FAILED_ENGINE, RunStatus.CANCELLED},
-    RunStatus.PLANNING: {RunStatus.EXECUTING, RunStatus.VERIFYING_FLAG, RunStatus.REPORTING, RunStatus.WAITING_USER, RunStatus.FAILED_ENGINE, RunStatus.CANCELLED},
-    RunStatus.EXECUTING: {RunStatus.EVALUATING, RunStatus.FAILED_ENGINE, RunStatus.FAILED_TOOL, RunStatus.FAILED_RUNNER, RunStatus.TIMEOUT, RunStatus.CANCELLED},
-    RunStatus.EVALUATING: {RunStatus.PLANNING, RunStatus.VERIFYING_FLAG, RunStatus.REPORTING, RunStatus.WAITING_USER, RunStatus.FAILED_ENGINE, RunStatus.CANCELLED},
+    RunStatus.ANALYZING: {
+        RunStatus.PLANNING,
+        RunStatus.WAITING_USER,
+        RunStatus.FAILED_ENGINE,
+        RunStatus.CANCELLED,
+    },
+    RunStatus.PLANNING: {
+        RunStatus.EXECUTING,
+        RunStatus.VERIFYING_FLAG,
+        RunStatus.REPORTING,
+        RunStatus.WAITING_USER,
+        RunStatus.FAILED_ENGINE,
+        RunStatus.CANCELLED,
+    },
+    RunStatus.EXECUTING: {
+        RunStatus.EVALUATING,
+        RunStatus.FAILED_ENGINE,
+        RunStatus.FAILED_TOOL,
+        RunStatus.FAILED_RUNNER,
+        RunStatus.TIMEOUT,
+        RunStatus.CANCELLED,
+    },
+    RunStatus.EVALUATING: {
+        RunStatus.PLANNING,
+        RunStatus.VERIFYING_FLAG,
+        RunStatus.REPORTING,
+        RunStatus.WAITING_USER,
+        RunStatus.FAILED_ENGINE,
+        RunStatus.CANCELLED,
+    },
     RunStatus.WAITING_USER: {RunStatus.PLANNING, RunStatus.FAILED_ENGINE, RunStatus.CANCELLED},
-    RunStatus.VERIFYING_FLAG: {RunStatus.REPORTING, RunStatus.PLANNING, RunStatus.FAILED_ENGINE, RunStatus.CANCELLED},
-    RunStatus.REPORTING: {RunStatus.COMPLETED_SOLVED, RunStatus.COMPLETED_UNSOLVED, RunStatus.FAILED_ENGINE, RunStatus.CANCELLED},
+    RunStatus.VERIFYING_FLAG: {
+        RunStatus.REPORTING,
+        RunStatus.PLANNING,
+        RunStatus.FAILED_ENGINE,
+        RunStatus.CANCELLED,
+    },
+    RunStatus.REPORTING: {
+        RunStatus.COMPLETED_SOLVED,
+        RunStatus.COMPLETED_UNSOLVED,
+        RunStatus.FAILED_ENGINE,
+        RunStatus.CANCELLED,
+    },
 }
 
 
 def transition(run: object, target: RunStatus) -> None:
     current = RunStatus(getattr(run, "status"))
     if target not in ALLOWED.get(current, set()):
-        raise DomainError("RUN_INVALID_STATE", "The run cannot be transitioned from its current state.", {"current_state": current, "requested_state": target})
+        raise DomainError(
+            "RUN_INVALID_STATE",
+            "The run cannot be transitioned from its current state.",
+            {"current_state": current, "requested_state": target},
+        )
     run.status, run.current_phase = target.value, target.value
     if target == RunStatus.PREPARING and not getattr(run, "started_at"):
         run.started_at = datetime.now(UTC)

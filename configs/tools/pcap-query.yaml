@@ -1,0 +1,10 @@
+name: pcap_query
+display_name: PCAP 字段查询
+category: traffic
+description: Query allowlisted fields from a PCAP attachment with a bounded display filter.
+risk_level: low
+parameters:
+  path: {type: string, required: true}
+  display_filter: {type: string, required: false}
+  fields: {type: array, required: true}
+  limit: {type: integer, required: false}

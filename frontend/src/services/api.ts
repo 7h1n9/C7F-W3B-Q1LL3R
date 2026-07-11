@@ -1,4 +1,4 @@
-import type { ApiEnvelope, Challenge, RunEvent, SolveRun } from "../types/api";
+import type { ApiEnvelope, Challenge, ChallengeConversation, ChallengeMessage, RunEvent, Skill, SolveRun } from "../types/api";
 
 const base = import.meta.env.VITE_API_BASE_URL ?? "/api/v1";
 const runEventTypes = ["run.created", "run.started", "run.status_changed", "agent.message", "agent.plan_created", "agent.hypothesis_created", "agent.hypothesis_updated", "tool.requested", "tool.started", "tool.output", "tool.completed", "tool.failed", "artifact.created", "flag.candidate_found", "flag.verified", "report.started", "report.completed", "run.completed", "run.failed"];
@@ -14,9 +14,29 @@ export const api = {
   getChallenge: (id: string) => request<Challenge>(`/challenges/${id}`),
   updateChallenge: (id: string, payload: Omit<Challenge, "id" | "created_at" | "updated_at">) => request<Challenge>(`/challenges/${id}`, { method: "PUT", body: JSON.stringify(payload) }),
   deleteChallenge: (id: string) => request<void>(`/challenges/${id}`, { method: "DELETE" }),
+  listSkills: () => request<Skill[]>("/skills"),
+  createSkill: (payload: Record<string, unknown>) => request<Skill>("/skills", { method: "POST", body: JSON.stringify(payload) }),
+  updateSkill: (id: string, payload: Record<string, unknown>) => request<Skill>(`/skills/${id}`, { method: "PUT", body: JSON.stringify(payload) }),
+  validateSkill: (id: string) => request<{ ok: boolean; message: string }>(`/skills/${id}/validate`, { method: "POST" }),
+  duplicateSkill: (id: string) => request<Skill>(`/skills/${id}/duplicate`, { method: "POST" }),
+  deleteSkill: (id: string) => request<void>(`/skills/${id}`, { method: "DELETE" }),
+  getModelSkills: (id: string) => request<Array<Record<string, unknown>>>(`/model-configs/${id}/skills`),
+  setModelSkills: (id: string, payload: Array<Record<string, unknown>>) => request<Array<Record<string, unknown>>>(`/model-configs/${id}/skills`, { method: "PUT", body: JSON.stringify(payload) }),
+  getChallengeSkills: (id: string) => request<Array<Record<string, unknown>>>(`/challenges/${id}/skills`),
+  setChallengeSkills: (id: string, payload: Array<Record<string, unknown>>) => request<Array<Record<string, unknown>>>(`/challenges/${id}/skills`, { method: "PUT", body: JSON.stringify(payload) }),
+  listAttachments: (id: string) => request<Array<Record<string, unknown>>>(`/challenges/${id}/attachments`),
+  uploadAttachment: async (id: string, file: File, isPrimary = false) => { const response = await fetch(`${base}/challenges/${id}/attachments?is_primary=${isPrimary}`, { method: "POST", body: (() => { const form = new FormData(); form.append("file", file); return form; })() }); if (!response.ok) { const error = await response.json().catch(() => ({})); throw new Error(error.message ?? `HTTP ${response.status}`); } return (await response.json() as ApiEnvelope<Record<string, unknown>>).data; },
+  listConversations: (id: string) => request<ChallengeConversation[]>(`/challenges/${id}/conversations`),
+  createConversation: (id: string, payload: Record<string, unknown>) => request<ChallengeConversation>(`/challenges/${id}/conversations`, { method: "POST", body: JSON.stringify(payload) }),
+  getConversation: (id: string) => request<ChallengeConversation & { skills: Array<{ skill_id: string; priority: number }> }>(`/conversations/${id}`),
+  deleteConversation: (id: string) => request<void>(`/conversations/${id}`, { method: "DELETE" }),
+  listConversationMessages: (id: string) => request<ChallengeMessage[]>(`/conversations/${id}/messages`),
+  sendConversationMessage: (id: string, content: string) => request<ChallengeMessage>(`/conversations/${id}/messages`, { method: "POST", body: JSON.stringify({ content }) }),
+  createRunFromConversation: (id: string, payload: Record<string, unknown>) => request<SolveRun>(`/conversations/${id}/create-run`, { method: "POST", body: JSON.stringify(payload) }),
+  getReadiness: () => request<{ ready: boolean; level: string; checks: Array<{ name: string; ok: boolean; message: string }> }>("/readiness/range-test"),
   listRuns: () => request<SolveRun[]>("/runs"),
   getRun: (id: string) => request<SolveRun>(`/runs/${id}`),
-  createRun: (challengeId: string, payload: { engine_type: string; model_config_id?: string; max_agent_steps: number; max_tool_calls: number; max_runtime_seconds: number; max_context_observations: number }) => request<SolveRun>(`/challenges/${challengeId}/runs`, { method: "POST", body: JSON.stringify(payload) }),
+  createRun: (challengeId: string, payload: Record<string, unknown>) => request<SolveRun>(`/challenges/${challengeId}/runs`, { method: "POST", body: JSON.stringify(payload) }),
   startRun: (id: string) => request<{ run_id: string; status: string }>(`/runs/${id}/start`, { method: "POST" }),
   cancelRun: (id: string) => request<SolveRun>(`/runs/${id}/cancel`, { method: "POST" }),
   listModelConfigs: () => request<Array<{ id: string; name: string; provider_type: string; base_url?: string; model_name?: string; enabled: boolean; api_key_configured: boolean }>>("/model-configs"),

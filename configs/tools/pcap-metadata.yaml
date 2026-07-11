@@ -1,0 +1,7 @@
+name: pcap_metadata
+display_name: PCAP 元数据
+category: traffic
+description: Read structured metadata from a PCAP attachment using the Runner.
+risk_level: low
+parameters:
+  path: {type: string, required: true}
