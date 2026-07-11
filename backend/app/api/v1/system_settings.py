@@ -22,6 +22,7 @@ async def read() -> dict:
     runner, bridge = await probe(settings.runner_url), await probe(settings.codex_bridge_url)
     return {
         "runner_url": settings.runner_url,
+        "runner_allowed_cidrs": settings.allowed_service_cidrs,
         "runner_token_configured": bool(settings.runner_api_token),
         "runner": runner,
         "codex_bridge_url": settings.codex_bridge_url,
