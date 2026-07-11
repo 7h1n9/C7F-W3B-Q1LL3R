@@ -55,6 +55,24 @@ alembic upgrade head
 
 `APP_DATABASE_URL` defaults to `mysql+asyncmy`. For local tests it can point to an async SQLite URL; production use remains MySQL 8.
 
+## Single-agent OpenAI-compatible solve loop
+
+Choose **OpenAI Compatible** when creating a run and select an enabled model configuration. The backend builds bounded context from challenge data, observations, tool summaries and artifact metadata; it asks the provider for a strict `AgentAction` JSON response, validates it with Pydantic, and only then invokes the existing Tool Gateway. Full tool output stays in workspace artifacts and can be read through `file_read` when needed.
+
+The loop enforces persisted limits for agent steps, tool calls, context observations, and runtime. It emits durable `agent.action_requested`, `agent.action_rejected`, and `agent.action_completed` events. A flag candidate is verified only against the challenge regex; no public competition platform is contacted.
+
+Set the same non-empty `APP_RUNNER_API_TOKEN` and `RUNNER_API_TOKEN` in the two service environments. Model API keys are Fernet-encrypted at rest and are never returned to the browser.
+
+PowerShell helpers are available:
+
+```powershell
+.\scripts\setup.ps1
+.\scripts\start-backend.ps1
+.\scripts\start-frontend.ps1
+.\scripts\start-codex-bridge.ps1
+.\scripts\test.ps1
+```
+
 ## Mock modes
 
 - `engine_type=mock` emits a harmless analysis/plan/report event sequence and completes as unsolved.

@@ -4,6 +4,10 @@ from pydantic import BaseModel, Field
 class RunCreate(BaseModel):
     engine_type: str = Field(default="mock", pattern="^(mock|openai_compatible|codex_sdk)$")
     model_config_id: str | None = None
+    max_agent_steps: int = Field(default=12, ge=1, le=100)
+    max_tool_calls: int = Field(default=12, ge=0, le=100)
+    max_context_observations: int = Field(default=8, ge=1, le=50)
+    max_runtime_seconds: int = Field(default=300, ge=10, le=3600)
 
 
 class RunRead(BaseModel):
@@ -15,6 +19,14 @@ class RunRead(BaseModel):
     current_phase: str
     workspace_path: str
     codex_thread_id: str | None
+    max_agent_steps: int
+    max_tool_calls: int
+    max_context_observations: int
+    max_runtime_seconds: int
+    agent_step_count: int
+    tool_call_count: int
+    last_error_code: str | None
+    last_error_message: str | None
     started_at: str | None
     finished_at: str | None
     created_at: str

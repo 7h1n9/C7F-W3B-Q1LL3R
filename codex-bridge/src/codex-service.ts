@@ -42,6 +42,8 @@ export class CodexService {
 
   async cancel(threadId: string): Promise<void> {
     if (!this.threads.has(threadId)) throw new Error("THREAD_NOT_FOUND");
+    // The current SDK exposes no cancellation primitive. Do not claim success.
+    throw new Error("CANCEL_NOT_SUPPORTED");
   }
 
   private mockThread(input: ThreadRequest): SdkThread {

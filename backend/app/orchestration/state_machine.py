@@ -26,10 +26,10 @@ class RunStatus(StrEnum):
 
 TERMINAL = {status for status in RunStatus if status.name.startswith(("COMPLETED", "FAILED"))} | {RunStatus.TIMEOUT, RunStatus.CANCELLED, RunStatus.POLICY_BLOCKED}
 ALLOWED: dict[RunStatus, set[RunStatus]] = {
-    RunStatus.CREATED: {RunStatus.PREPARING, RunStatus.CANCELLED, RunStatus.POLICY_BLOCKED},
+    RunStatus.CREATED: {RunStatus.PREPARING, RunStatus.FAILED_ENGINE, RunStatus.CANCELLED, RunStatus.POLICY_BLOCKED},
     RunStatus.PREPARING: {RunStatus.ANALYZING, RunStatus.FAILED_ENGINE, RunStatus.CANCELLED},
     RunStatus.ANALYZING: {RunStatus.PLANNING, RunStatus.WAITING_USER, RunStatus.FAILED_ENGINE, RunStatus.CANCELLED},
-    RunStatus.PLANNING: {RunStatus.EXECUTING, RunStatus.WAITING_USER, RunStatus.FAILED_ENGINE, RunStatus.CANCELLED},
+    RunStatus.PLANNING: {RunStatus.EXECUTING, RunStatus.VERIFYING_FLAG, RunStatus.REPORTING, RunStatus.WAITING_USER, RunStatus.FAILED_ENGINE, RunStatus.CANCELLED},
     RunStatus.EXECUTING: {RunStatus.EVALUATING, RunStatus.FAILED_ENGINE, RunStatus.FAILED_TOOL, RunStatus.FAILED_RUNNER, RunStatus.TIMEOUT, RunStatus.CANCELLED},
     RunStatus.EVALUATING: {RunStatus.PLANNING, RunStatus.VERIFYING_FLAG, RunStatus.REPORTING, RunStatus.WAITING_USER, RunStatus.FAILED_ENGINE, RunStatus.CANCELLED},
     RunStatus.WAITING_USER: {RunStatus.PLANNING, RunStatus.FAILED_ENGINE, RunStatus.CANCELLED},

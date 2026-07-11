@@ -8,6 +8,7 @@ class Settings(BaseSettings):
     workspace_root: Path = Path("../data/workspaces")
     max_output_bytes: int = 1_048_576
     job_timeout_seconds: int = 30
+    api_token: str = "development-runner-token"
 
 
 settings = Settings()

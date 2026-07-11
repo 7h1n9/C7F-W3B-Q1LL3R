@@ -6,7 +6,7 @@ const app = Fastify({ logger: true });
 const service = new CodexService();
 function bridgeError(error: unknown) {
   const code = error instanceof Error ? error.message : "BRIDGE_ERROR";
-  return { status: code === "THREAD_NOT_FOUND" ? 404 : 502, body: { code, message: code === "THREAD_NOT_FOUND" ? "Thread not found" : "Codex Bridge request failed", details: {} } };
+  return { status: code === "THREAD_NOT_FOUND" ? 404 : code === "CANCEL_NOT_SUPPORTED" ? 501 : 502, body: { code, message: code === "THREAD_NOT_FOUND" ? "Thread not found" : code === "CANCEL_NOT_SUPPORTED" ? "Cancellation is not supported by the current Codex SDK" : "Codex Bridge request failed", details: {} } };
 }
 
 app.get("/health", async () => ({ status: "ok", mock_mode: process.env.CODEX_MOCK_MODE === "true" }));
