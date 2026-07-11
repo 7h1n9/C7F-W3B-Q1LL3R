@@ -7,7 +7,14 @@ from sqlalchemy import select
 from app.core.config import get_settings
 from app.core.database import SessionLocal
 from app.core.exceptions import DomainError
-from app.engines import CodexSdkEngine, MockSolveEngine, OpenAICompatibleEngine, SolveEngine
+from app.engines import (
+    CodexSdkEngine,
+    MockSolveEngine,
+    ModelRateLimitError,
+    ModelUnavailableError,
+    OpenAICompatibleEngine,
+    SolveEngine,
+)
 from app.models.challenge import Challenge
 from app.models.model_config import ModelConfig
 from app.models.run import SolveRun
@@ -62,7 +69,19 @@ class SolveOrchestrator:
                 if not run:
                     return
                 if run.status == RunStatus.CREATED and run.engine_type != "mock":
-                    await runner_client.sync_workspace(run.id, Path(run.workspace_path))
+                    try:
+                        await runner_client.sync_workspace(run.id, Path(run.workspace_path))
+                    except Exception as error:
+                        run.last_error_code = "RUNNER_UNAVAILABLE"
+                        run.last_error_message = str(error)[:4000]
+                        await self._transition(session, run, RunStatus.FAILED_RUNNER)
+                        await event_service.append(
+                            session,
+                            run.id,
+                            "run.failed",
+                            {"code": "RUNNER_UNAVAILABLE", "message": str(error)[:1000]},
+                        )
+                        return
                 engine = await self.build_engine(run, session)
                 self.active_engines[run_id] = engine
                 if run.engine_type == "openai_compatible":
@@ -73,13 +92,19 @@ class SolveOrchestrator:
                 raise
             except Exception as error:
                 if "run" in locals() and RunStatus(run.status) not in TERMINAL:
-                    run.last_error_code, run.last_error_message = "ENGINE_ERROR", str(error)[:4000]
+                    if isinstance(error, ModelRateLimitError):
+                        code = "MODEL_RATE_LIMITED"
+                    elif isinstance(error, ModelUnavailableError):
+                        code = "MODEL_UNAVAILABLE"
+                    else:
+                        code = "ENGINE_ERROR"
+                    run.last_error_code, run.last_error_message = code, str(error)[:4000]
                     await self._transition(session, run, RunStatus.FAILED_ENGINE)
                     await event_service.append(
                         session,
                         run_id,
                         "run.failed",
-                        {"code": "ENGINE_ERROR", "message": str(error)[:1000]},
+                        {"code": code, "message": str(error)[:1000]},
                     )
             finally:
                 self.active_engines.pop(run_id, None)
@@ -100,6 +125,8 @@ class SolveOrchestrator:
         if not challenge:
             raise ValueError("challenge not found")
         started = monotonic()
+        consecutive_runner_failures = 0
+        last_runner_failure: tuple[str, str] | None = None
         while run.agent_step_count < run.max_agent_steps:
             if RunStatus(run.status) == RunStatus.CANCELLED:
                 return
@@ -163,6 +190,31 @@ class SolveOrchestrator:
                     "agent.action_completed",
                     {"type": "tool", "tool": action.tool_name, "status": result.get("status")},
                 )
+                if result.get("status") == "COMPLETED":
+                    consecutive_runner_failures = 0
+                    last_runner_failure = None
+                else:
+                    failure = (
+                        action.tool_name,
+                        str(result.get("error") or result.get("summary") or "Runner execution failed"),
+                    )
+                    consecutive_runner_failures = (
+                        consecutive_runner_failures + 1
+                        if failure == last_runner_failure
+                        else 1
+                    )
+                    last_runner_failure = failure
+                    if consecutive_runner_failures >= 2:
+                        run.last_error_code = "RUNNER_UNAVAILABLE"
+                        run.last_error_message = failure[1][:4000]
+                        await self._transition(session, run, RunStatus.FAILED_RUNNER)
+                        await event_service.append(
+                            session,
+                            run.id,
+                            "run.failed",
+                            {"code": "RUNNER_UNAVAILABLE", "message": failure[1][:1000]},
+                        )
+                        return
                 await self._transition(session, run, RunStatus.EVALUATING)
                 continue
             await self._finish(session, run, challenge, action)

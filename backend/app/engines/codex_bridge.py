@@ -1,3 +1,4 @@
+import json
 from collections.abc import AsyncIterator
 
 import httpx
@@ -11,7 +12,7 @@ class CodexSdkEngine(SolveEngine):
         self.thread_ids: dict[str, str] = {}
 
     async def start(self, run_id: str) -> AsyncIterator[EngineEvent]:
-        async with httpx.AsyncClient(timeout=60) as client:
+        async with httpx.AsyncClient(timeout=300) as client:
             response = await client.post(
                 f"{self.bridge_url}/threads",
                 json={
@@ -29,20 +30,20 @@ class CodexSdkEngine(SolveEngine):
         yield EngineEvent(
             "agent.message", {"message": "Codex thread created", **payload}, "ANALYZING"
         )
+        async for event in self._stream_events(
+            f"{self.bridge_url}/threads/{thread_id}/run",
+            {"prompt": "Analyze the authorized CTF workspace and continue with the next actionable step."},
+        ):
+            yield event
 
     async def continue_run(self, run_id: str, message: str) -> AsyncIterator[EngineEvent]:
         thread_id = self.thread_ids.get(run_id)
         if not thread_id:
             raise RuntimeError("Codex thread ID is unavailable")
-        async with httpx.AsyncClient(timeout=60) as client:
-            response = await client.post(
-                f"{self.bridge_url}/threads/{thread_id}/run", json={"prompt": message}
-            )
-            response.raise_for_status()
-        for event in response.json().get("events", []):
-            yield EngineEvent(
-                str(event.get("type", "agent.message")), dict(event.get("payload", {}))
-            )
+        async for event in self._stream_events(
+            f"{self.bridge_url}/threads/{thread_id}/run", {"prompt": message}
+        ):
+            yield event
 
     async def cancel(self, run_id: str) -> None:
         thread_id = self.thread_ids.get(run_id)
@@ -60,13 +61,22 @@ class CodexSdkEngine(SolveEngine):
             async for event in self.start(run_id):
                 yield event
             return
-        async with httpx.AsyncClient(timeout=60) as client:
-            response = await client.post(
-                f"{self.bridge_url}/threads/{thread_id}/resume",
-                json={"prompt": "Resume the authorized analysis."},
-            )
-            response.raise_for_status()
-        for event in response.json().get("events", []):
-            yield EngineEvent(
-                str(event.get("type", "agent.message")), dict(event.get("payload", {}))
-            )
+        async for event in self._stream_events(
+            f"{self.bridge_url}/threads/{thread_id}/resume",
+            {"prompt": "Resume the authorized analysis."},
+        ):
+            yield event
+
+    async def _stream_events(self, url: str, payload: dict) -> AsyncIterator[EngineEvent]:
+        async with httpx.AsyncClient(timeout=300) as client:
+            async with client.stream("POST", url, json=payload) as response:
+                response.raise_for_status()
+                async for line in response.aiter_lines():
+                    if not line.strip():
+                        continue
+                    event = json.loads(line)
+                    yield EngineEvent(
+                        str(event.get("type", "agent.message")),
+                        dict(event.get("payload", {})),
+                        event.get("status"),
+                    )

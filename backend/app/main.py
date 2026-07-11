@@ -48,6 +48,16 @@ app.add_middleware(
 app.add_exception_handler(DomainError, domain_error_handler)
 
 
+def _json_safe(value: object) -> object:
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, dict):
+        return {str(key): _json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_json_safe(item) for item in value]
+    return str(value)
+
+
 @app.exception_handler(RequestValidationError)
 async def validation_error(_: Request, error: RequestValidationError) -> JSONResponse:
     return JSONResponse(
@@ -55,7 +65,7 @@ async def validation_error(_: Request, error: RequestValidationError) -> JSONRes
         content={
             "code": "VALIDATION_ERROR",
             "message": "Request validation failed.",
-            "details": {"errors": error.errors()},
+            "details": {"errors": _json_safe(error.errors())},
         },
     )
 

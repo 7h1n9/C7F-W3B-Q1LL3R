@@ -3,8 +3,13 @@ import type { ApiEnvelope, Challenge, ChallengeConversation, ChallengeMessage, R
 const base = import.meta.env.VITE_API_BASE_URL ?? "/api/v1";
 const runEventTypes = ["run.created", "run.started", "run.status_changed", "agent.message", "agent.plan_created", "agent.hypothesis_created", "agent.hypothesis_updated", "tool.requested", "tool.started", "tool.output", "tool.completed", "tool.failed", "artifact.created", "flag.candidate_found", "flag.verified", "report.started", "report.completed", "run.completed", "run.failed"];
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(`${base}${path}`, { headers: { "Content-Type": "application/json", ...(init?.headers ?? {}) }, ...init });
-  if (!response.ok) { const error = await response.json().catch(() => ({})); throw new Error(error.message ?? `HTTP ${response.status}`); }
+  let response: Response;
+  try {
+    response = await fetch(`${base}${path}`, { headers: { "Content-Type": "application/json", ...(init?.headers ?? {}) }, ...init });
+  } catch {
+    throw new Error("无法连接后端服务，请确认 127.0.0.1:8000 已启动");
+  }
+  if (!response.ok) { const error = await response.json().catch(() => ({})); const detail = error.details?.errors?.[0]?.msg; throw new Error(error.message === "Request validation failed." && detail ? detail : error.message ?? `HTTP ${response.status}`); }
   if (response.status === 204) return undefined as T;
   return (await response.json() as ApiEnvelope<T>).data;
 }
@@ -39,6 +44,7 @@ export const api = {
   createRun: (challengeId: string, payload: Record<string, unknown>) => request<SolveRun>(`/challenges/${challengeId}/runs`, { method: "POST", body: JSON.stringify(payload) }),
   startRun: (id: string) => request<{ run_id: string; status: string }>(`/runs/${id}/start`, { method: "POST" }),
   cancelRun: (id: string) => request<SolveRun>(`/runs/${id}/cancel`, { method: "POST" }),
+  deleteRun: (id: string) => request<void>(`/runs/${id}`, { method: "DELETE" }),
   listModelConfigs: () => request<Array<{ id: string; name: string; provider_type: string; base_url?: string; model_name?: string; enabled: boolean; api_key_configured: boolean }>>("/model-configs"),
   createModelConfig: (payload: Record<string, unknown>) => request<unknown>("/model-configs", { method: "POST", body: JSON.stringify(payload) }),
   updateModelConfig: (id: string, payload: Record<string, unknown>) => request<unknown>(`/model-configs/${id}`, { method: "PUT", body: JSON.stringify(payload) }),

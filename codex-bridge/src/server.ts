@@ -15,12 +15,44 @@ app.post<{ Body: ThreadRequest }>("/threads", async (request, reply) => {
   return service.create(request.body);
 });
 app.post<{ Params: { thread_id: string }; Body: { prompt: string } }>("/threads/:thread_id/run", async (request, reply) => {
-  try { return { events: await service.run(request.params.thread_id, request.body.prompt) }; }
-  catch (error) { const response = bridgeError(error); return reply.code(response.status).send(response.body); }
+  let wrote = false;
+  try {
+    reply.hijack();
+    reply.raw.setHeader("Content-Type", "application/x-ndjson; charset=utf-8");
+    for await (const event of service.stream(request.params.thread_id, request.body.prompt)) {
+      wrote = true;
+      reply.raw.write(`${JSON.stringify(event)}\n`);
+    }
+    reply.raw.end();
+  } catch (error) {
+    const response = bridgeError(error);
+    if (wrote) {
+      reply.raw.write(`${JSON.stringify({ type: "run.failed", status: "FAILED_ENGINE", payload: { code: response.body.code, message: response.body.message } })}\n`);
+      reply.raw.end();
+    } else {
+      reply.code(response.status).send(response.body);
+    }
+  }
 });
 app.post<{ Params: { thread_id: string }; Body: { prompt: string } }>("/threads/:thread_id/resume", async (request, reply) => {
-  try { return { events: await service.resume(request.params.thread_id, request.body.prompt) }; }
-  catch (error) { const response = bridgeError(error); return reply.code(response.status).send(response.body); }
+  let wrote = false;
+  try {
+    reply.hijack();
+    reply.raw.setHeader("Content-Type", "application/x-ndjson; charset=utf-8");
+    for await (const event of service.streamResume(request.params.thread_id, request.body.prompt)) {
+      wrote = true;
+      reply.raw.write(`${JSON.stringify(event)}\n`);
+    }
+    reply.raw.end();
+  } catch (error) {
+    const response = bridgeError(error);
+    if (wrote) {
+      reply.raw.write(`${JSON.stringify({ type: "run.failed", status: "FAILED_ENGINE", payload: { code: response.body.code, message: response.body.message } })}\n`);
+      reply.raw.end();
+    } else {
+      reply.code(response.status).send(response.body);
+    }
+  }
 });
 app.post<{ Params: { thread_id: string } }>("/threads/:thread_id/cancel", async (request, reply) => {
   try { await service.cancel(request.params.thread_id); return { status: "cancelled" }; }

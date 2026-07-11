@@ -10,6 +10,14 @@ action_adapter = TypeAdapter(AgentAction)
 ACTION_SCHEMA = action_adapter.json_schema()
 
 
+class ModelRateLimitError(RuntimeError):
+    """The provider rejected the request because its quota/rate limit was hit."""
+
+
+class ModelUnavailableError(RuntimeError):
+    """The provider could not be reached or returned a transient server error."""
+
+
 class OpenAICompatibleEngine:
     """Provider-neutral, structured-action client. Database and tools stay outside."""
 
@@ -55,13 +63,39 @@ class OpenAICompatibleEngine:
                 if not isinstance(content, str):
                     raise ValueError("model response did not contain JSON content")
                 return action_adapter.validate_python(json.loads(content))
-            except (
-                httpx.HTTPError,
-                KeyError,
-                ValueError,
-                json.JSONDecodeError,
-                ValidationError,
-            ) as error:
+            except httpx.HTTPStatusError as error:
+                status = error.response.status_code
+                if status == 429:
+                    if attempt < 2:
+                        retry_after = error.response.headers.get("Retry-After", "")
+                        try:
+                            delay = min(max(float(retry_after), 0.5), 8.0)
+                        except ValueError:
+                            delay = 1.0 + attempt
+                        await asyncio.sleep(delay)
+                        continue
+                    raise ModelRateLimitError(
+                        "MODEL_RATE_LIMITED: provider returned HTTP 429 Too Many Requests"
+                    ) from error
+                if status >= 500:
+                    if attempt < 2:
+                        await asyncio.sleep(1.0 + attempt)
+                        continue
+                    raise ModelUnavailableError(
+                        f"MODEL_UNAVAILABLE: provider returned HTTP {status}"
+                    ) from error
+                last_error = f"provider returned HTTP {status}: {error}"
+                if attempt == 2:
+                    break
+                continue
+            except httpx.RequestError as error:
+                if attempt < 2:
+                    await asyncio.sleep(1.0 + attempt)
+                    continue
+                raise ModelUnavailableError(
+                    f"MODEL_UNAVAILABLE: {error}"
+                ) from error
+            except (KeyError, ValueError, json.JSONDecodeError, ValidationError) as error:
                 last_error = str(error)
                 if attempt == 2:
                     break

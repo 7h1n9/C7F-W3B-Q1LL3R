@@ -33,10 +33,16 @@ ALLOWED: dict[RunStatus, set[RunStatus]] = {
     RunStatus.CREATED: {
         RunStatus.PREPARING,
         RunStatus.FAILED_ENGINE,
+        RunStatus.FAILED_RUNNER,
         RunStatus.CANCELLED,
         RunStatus.POLICY_BLOCKED,
     },
-    RunStatus.PREPARING: {RunStatus.ANALYZING, RunStatus.FAILED_ENGINE, RunStatus.CANCELLED},
+    RunStatus.PREPARING: {
+        RunStatus.ANALYZING,
+        RunStatus.FAILED_ENGINE,
+        RunStatus.FAILED_RUNNER,
+        RunStatus.CANCELLED,
+    },
     RunStatus.ANALYZING: {
         RunStatus.PLANNING,
         RunStatus.WAITING_USER,

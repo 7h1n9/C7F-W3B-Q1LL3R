@@ -9,6 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
+from app.api.v1.runs import target_is_local_to_backend
 from app.engines.openai_compatible import OpenAICompatibleEngine
 from app.models.base import Base
 from app.models.challenge import Challenge
@@ -38,6 +39,11 @@ def test_service_settings_allow_only_local_endpoints() -> None:
     assert str(settings.runner_url).startswith("http://127.0.0.1")
     with pytest.raises(ValidationError):
         ServiceSettingsUpdate(runner_url="http://example.com", codex_bridge_url="http://localhost:8090")
+
+
+def test_local_target_is_detected_for_remote_runner() -> None:
+    challenge = type("Challenge", (), {"target_url": "http://localhost:18001"})()
+    assert target_is_local_to_backend(challenge)
 
 
 @pytest.mark.asyncio

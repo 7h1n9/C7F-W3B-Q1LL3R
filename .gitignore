@@ -14,3 +14,4 @@ backend/e2e.db
 backend/e2e.*.log
 backend/local-dev.db
 data/runtime-logs/
+data/logs/

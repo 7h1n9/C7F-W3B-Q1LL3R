@@ -39,12 +39,21 @@ type ChallengeFormValues = Omit<ChallengePayload, "allowed_hosts" | "source_path
 
 function toPayload(values: ChallengeFormValues): ChallengePayload {
   const traffic = values.challenge_type === "TRAFFIC_ANALYSIS";
+  const allowedHosts = (values.allowed_hosts ?? "")
+    .split(",")
+    .map((host) => host.trim())
+    .filter(Boolean)
+    .map((host) => {
+      try {
+        return new URL(host.includes("://") ? host : `http://${host}`).hostname;
+      } catch {
+        return host;
+      }
+    });
   return {
     ...values,
     target_url: traffic ? null : values.target_url,
-    allowed_hosts: traffic
-      ? []
-      : (values.allowed_hosts ?? "").split(",").map((host) => host.trim()).filter(Boolean),
+    allowed_hosts: traffic ? [] : allowedHosts,
     source_path: values.source_path || null,
     flag_pattern: values.flag_pattern || "flag\\{[^}]+\\}",
     status: traffic ? "DRAFT" : values.status || "ACTIVE",
@@ -218,7 +227,7 @@ export function ChallengesPage() {
             ) : (
               <>
                 <Form.Item name="target_url" label="目标地址" rules={[{ required: true, type: "url", message: "请输入有效的 HTTP(S) 地址" }]}><Input placeholder="http://challenge.local" /></Form.Item>
-                <Form.Item name="allowed_hosts" label="允许访问的主机" extra="多个主机使用英文逗号分隔" rules={[{ required: true, message: "请填写允许访问的主机" }]}><Input placeholder="challenge.local" /></Form.Item>
+                <Form.Item name="allowed_hosts" label="允许访问的主机" extra="填写 localhost 或完整 URL，系统会自动提取主机名；多个主机用英文逗号分隔" rules={[{ required: true, message: "请填写允许访问的主机" }]}><Input placeholder="localhost 或 challenge.local" /></Form.Item>
               </>
             )}
           </Form.Item>

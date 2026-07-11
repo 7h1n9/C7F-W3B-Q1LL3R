@@ -1,11 +1,15 @@
 import asyncio
+import contextlib
+import shutil
 from pathlib import Path
+from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.challenges import require_challenge
+from app.core.config import get_settings
 from app.core.database import get_session
 from app.core.exceptions import DomainError
 from app.models.challenge import ChallengeAttachment
@@ -14,15 +18,36 @@ from app.models.conversation import (
     ChallengeConversationSkill,
     ChallengeMessage,
 )
-from app.models.run import Artifact, FlagCandidate, Observation, SolveRun, ToolCall
+from app.models.run import (
+    Artifact,
+    FlagCandidate,
+    Hypothesis,
+    Observation,
+    RunEvent,
+    SolveRun,
+    ToolCall,
+)
+from app.models.skill import RunSkillSnapshot
 from app.orchestration.orchestrator import orchestrator
 from app.orchestration.state_machine import RunStatus, transition
 from app.schemas.run import RunCreate, RunRead
 from app.services.events import event_service
+from app.services.runner_client import runner_client
 from app.services.skill_selection import snapshot_run_skills
 from app.services.workspace import create_workspace
 
 router = APIRouter(tags=["runs"])
+LOCAL_TARGET_HOSTS = {"localhost", "127.0.0.1", "::1"}
+
+
+def target_is_local_to_backend(challenge: object) -> bool:
+    target_url = getattr(challenge, "target_url", None)
+    return bool(target_url and (urlparse(target_url).hostname or "").lower() in LOCAL_TARGET_HOSTS)
+
+
+def runner_is_remote() -> bool:
+    runner_host = (urlparse(get_settings().runner_url).hostname or "").lower()
+    return runner_host not in LOCAL_TARGET_HOSTS
 
 
 def read(item: SolveRun) -> RunRead:
@@ -49,6 +74,17 @@ async def create_run(
     challenge_id: str, payload: RunCreate, session: AsyncSession = Depends(get_session)
 ) -> dict:
     challenge = await require_challenge(challenge_id, session)
+    if (
+        payload.engine_type != "mock"
+        and challenge.challenge_type == "WEB_TARGET"
+        and target_is_local_to_backend(challenge)
+        and runner_is_remote()
+    ):
+        raise DomainError(
+            "TARGET_NOT_REACHABLE_FROM_RUNNER",
+            "Remote Kali Runner cannot reach the Windows localhost target. Use the Windows LAN IP or configure a local Runner.",
+            status_code=422,
+        )
     if challenge.challenge_type == "TRAFFIC_ANALYSIS":
         primary = (
             await session.get(ChallengeAttachment, challenge.primary_attachment_id)
@@ -155,6 +191,36 @@ async def list_runs(session: AsyncSession = Depends(get_session)) -> dict:
         (await session.scalars(select(SolveRun).order_by(SolveRun.created_at.desc()))).all()
     )
     return {"data": [read(item) for item in items]}
+
+
+def _remove_local_workspace(workspace_path: str) -> None:
+    root = get_settings().workspace_root.resolve()
+    workspace = Path(workspace_path).resolve()
+    if workspace != root and root in workspace.parents and workspace.name:
+        shutil.rmtree(workspace, ignore_errors=True)
+
+
+async def _delete_run_records(session: AsyncSession, run_id: str) -> None:
+    # Delete children explicitly because the schema intentionally keeps these
+    # tables unconfigured with ORM cascade rules.
+    for model in (FlagCandidate, Observation, Artifact, ToolCall, Hypothesis, RunEvent, RunSkillSnapshot):
+        await session.execute(delete(model).where(model.run_id == run_id))
+    await session.execute(delete(SolveRun).where(SolveRun.id == run_id))
+
+
+@router.delete("/runs/{run_id}", status_code=204)
+async def delete_run(run_id: str, session: AsyncSession = Depends(get_session)) -> None:
+    run = await require_run(run_id, session)
+    task = orchestrator.active_tasks.get(run_id)
+    if task and task is not asyncio.current_task():
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+    with contextlib.suppress(Exception):
+        await runner_client.delete_workspace(run_id)
+    _remove_local_workspace(run.workspace_path)
+    await _delete_run_records(session, run_id)
+    await session.commit()
 
 
 @router.get("/runs/{run_id}")
