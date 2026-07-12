@@ -12,12 +12,13 @@ from app.api.v1.challenges import require_challenge
 from app.core.config import get_settings
 from app.core.database import get_session
 from app.core.exceptions import DomainError
-from app.models.challenge import ChallengeAttachment
+from app.models.challenge import Challenge, ChallengeAttachment
 from app.models.conversation import (
     ChallengeConversation,
     ChallengeConversationSkill,
     ChallengeMessage,
 )
+from app.models.model_config import ModelConfig
 from app.models.run import (
     Artifact,
     FlagCandidate,
@@ -31,6 +32,7 @@ from app.models.skill import RunSkillSnapshot
 from app.models.solver_state import SolverState
 from app.orchestration.orchestrator import orchestrator
 from app.orchestration.state_machine import RunStatus, transition
+from app.orchestration.state_machine import restart as restart_state
 from app.schemas.flag import FlagReviewUpdate
 from app.schemas.run import RunCreate, RunRead
 from app.schemas.solver_state import SolverStateRead
@@ -38,6 +40,7 @@ from app.services.codex_materializer import codex_materializer
 from app.services.events import event_service
 from app.services.flags import flag_service
 from app.services.role_loader import role_loader
+from app.services.run_diagnostics import run_diagnostics_service
 from app.services.runner_client import runner_client
 from app.services.skill_selection import snapshot_run_skills
 from app.services.solver_state import solver_state_service
@@ -67,6 +70,41 @@ def read(item: SolveRun) -> RunRead:
             "finished_at": item.finished_at.isoformat() if item.finished_at else None,
         }
     )
+
+
+async def read_with_summary(session: AsyncSession, item: SolveRun) -> RunRead:
+    challenge = await session.get(Challenge, item.challenge_id)
+    model = await session.get(ModelConfig, item.model_config_id) if item.model_config_id else None
+    state = await solver_state_service.load(session, item.id)
+    active_skill_names: list[str] = []
+    if state and state.active_skill_ids_json:
+        skills = list(
+            (
+                await session.scalars(
+                    select(RunSkillSnapshot).where(
+                        RunSkillSnapshot.run_id == item.id,
+                        RunSkillSnapshot.skill_id.in_(state.active_skill_ids_json),
+                    )
+                )
+            ).all()
+        )
+        active_skill_names = [snapshot.skill_name for snapshot in skills]
+    diagnostics = await run_diagnostics_service.analyze(session, item)
+    payload = {
+        **item.__dict__,
+        "challenge_name": challenge.name if challenge else None,
+        "challenge_type": challenge.challenge_type if challenge else None,
+        "target_summary": challenge.target_url if challenge and challenge.target_url else None,
+        "model_name": model.name if model else None,
+        "active_skill_names": active_skill_names,
+        "diagnostic_tags": diagnostics["diagnostic_tags"],
+        "diagnostic_summary": diagnostics["diagnostic_summary"],
+        "created_at": item.created_at.isoformat(),
+        "updated_at": item.updated_at.isoformat(),
+        "started_at": item.started_at.isoformat() if item.started_at else None,
+        "finished_at": item.finished_at.isoformat() if item.finished_at else None,
+    }
+    return RunRead.model_validate(payload)
 
 
 async def require_run(run_id: str, session: AsyncSession) -> SolveRun:
@@ -222,10 +260,12 @@ async def list_runs(session: AsyncSession = Depends(get_session)) -> dict:
     items = list(
         (await session.scalars(select(SolveRun).order_by(SolveRun.created_at.desc()))).all()
     )
+    payload = []
     for item in items:
         await ensure_codex_materialized(session, item)
         await ensure_flag_consistency(session, item)
-    return {"data": [read(item) for item in items]}
+        payload.append(await read_with_summary(session, item))
+    return {"data": payload}
 
 
 def _remove_local_workspace(workspace_path: str) -> None:
@@ -271,7 +311,7 @@ async def delete_run(run_id: str, session: AsyncSession = Depends(get_session)) 
 async def get_run(run_id: str, session: AsyncSession = Depends(get_session)) -> dict:
     run = await ensure_codex_materialized(session, await require_run(run_id, session))
     run = await ensure_flag_consistency(session, run)
-    return {"data": read(run)}
+    return {"data": await read_with_summary(session, run)}
 
 
 @router.get("/runs/{run_id}/solver-state")
@@ -310,6 +350,44 @@ async def start_run(run_id: str, session: AsyncSession = Depends(get_session)) -
             {"current_state": run.status},
         )
     asyncio.create_task(orchestrator.start(run.id))
+    return {"data": {"run_id": run.id, "status": "STARTING"}}
+
+
+@router.post("/runs/{run_id}/restart")
+async def restart_run(
+    run_id: str, payload: dict | None = None, session: AsyncSession = Depends(get_session)
+) -> dict:
+    """Restart a run while retaining its workspace, evidence, events and solver state."""
+    run = await require_run(run_id, session)
+    active = orchestrator.active_tasks.get(run_id)
+    if active and not active.done():
+        raise DomainError(
+            "RUN_ALREADY_ACTIVE", "The run is already executing.", status_code=409
+        )
+    previous_status = run.status
+    previous_error = {
+        "code": run.last_error_code,
+        "message": run.last_error_message,
+    }
+    restart_state(run)
+    run.last_error_code = None
+    run.last_error_message = None
+    await session.commit()
+    await solver_state_service.sync_from_run(session, run)
+    await event_service.append(
+        session,
+        run.id,
+        "run.restarted",
+        {
+            "previous_status": previous_status,
+            "previous_error": previous_error,
+            "preserved_workspace": True,
+            "preserved_evidence": True,
+            "codex_thread_id_reused": bool(run.codex_thread_id),
+        },
+    )
+    message = str((payload or {}).get("message", "")).strip() or None
+    asyncio.create_task(orchestrator.start(run.id, message))
     return {"data": {"run_id": run.id, "status": "STARTING"}}
 
 
@@ -497,3 +575,16 @@ async def get_report(run_id: str, session: AsyncSession = Depends(get_session)) 
             "REPORT_NOT_FOUND", "No report has been generated for this run.", status_code=404
         )
     return {"data": {"content": path.read_text(encoding="utf-8"), "path": "final/writeup.md"}}
+
+
+@router.get("/runs/{run_id}/diagnostics")
+async def get_run_diagnostics(run_id: str, session: AsyncSession = Depends(get_session)) -> dict:
+    run = await ensure_codex_materialized(session, await require_run(run_id, session))
+    run = await ensure_flag_consistency(session, run)
+    return {"data": await run_diagnostics_service.analyze(session, run)}
+
+
+@router.get("/diagnostics/runs")
+async def list_run_diagnostics(limit: int = 25, session: AsyncSession = Depends(get_session)) -> dict:
+    limit = max(1, min(limit, 100))
+    return {"data": await run_diagnostics_service.recent(session, limit=limit)}

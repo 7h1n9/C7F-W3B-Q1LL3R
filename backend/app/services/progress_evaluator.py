@@ -44,24 +44,27 @@ class ProgressEvaluator:
                 },
             )
 
-        activated_ids = await skill_router.activate_from_observation(
+        recommendations = await skill_router.recommend_from_observation(
             session,
             run.id,
+            challenge.challenge_type,
             {
                 "summary": observation.summary,
                 "facts_json": facts,
                 "tool_name": tool_name,
+                "observation_id": observation.id,
+                "artifact_path": artifact.file_path,
             },
         )
         await solver_state_service.sync_hypotheses(session, run.id)
-        made_progress = confirmed or rejected or bool(activated_ids)
+        made_progress = confirmed or rejected or bool(recommendations)
         no_progress_count = await solver_state_service.record_progress(
             session, run.id, made_progress
         )
         return {
             "confirmed": confirmed,
             "rejected": rejected,
-            "activated_skill_ids": activated_ids,
+            "recommended_skills": recommendations,
             "made_progress": made_progress,
             "no_progress_count": no_progress_count,
         }

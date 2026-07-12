@@ -1,7 +1,7 @@
-import type { ApiEnvelope, Challenge, ChallengeConversation, ChallengeMessage, FlagCandidate, RunEvent, Skill, SolveRun, SolverState } from "../types/api";
+import type { ApiEnvelope, Challenge, ChallengeConversation, ChallengeMessage, FlagCandidate, RunDiagnostics, RunEvent, Skill, SolveRun, SolverState } from "../types/api";
 
 const base = import.meta.env.VITE_API_BASE_URL ?? "/api/v1";
-const runEventTypes = ["run.created", "run.started", "run.status_changed", "agent.message", "agent.plan_created", "agent.hypothesis_created", "agent.hypothesis_updated", "agent.action_requested", "agent.action_rejected", "agent.action_completed", "agent.replan_required", "agent.progress_detected", "agent.no_progress", "skill.activated", "tool.requested", "tool.started", "tool.output", "tool.completed", "tool.failed", "artifact.created", "flag.candidate_found", "flag.reviewed", "flag.verified", "report.started", "report.completed", "run.completed", "run.failed"];
+const runEventTypes = ["run.created", "run.started", "run.restarted", "run.status_changed", "agent.message", "agent.plan_created", "agent.hypothesis_created", "agent.hypothesis_updated", "agent.action_requested", "agent.action_rejected", "agent.action_completed", "agent.replan_required", "agent.progress_detected", "agent.no_progress", "skill.requested", "skill.snapshot_created", "skill.activated", "skill.deactivated", "skill.recommended", "skill.activation_rejected", "tool.requested", "tool.started", "tool.output", "tool.completed", "tool.failed", "artifact.created", "flag.candidate_found", "flag.reviewed", "flag.verified", "report.started", "report.completed", "run.completed", "run.failed"];
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   let response: Response;
   try {
@@ -42,8 +42,11 @@ export const api = {
   listRuns: () => request<SolveRun[]>("/runs"),
   getRun: (id: string) => request<SolveRun>(`/runs/${id}`),
   getSolverState: (id: string) => request<SolverState>(`/runs/${id}/solver-state`),
+  getRunDiagnostics: (id: string) => request<RunDiagnostics>(`/runs/${id}/diagnostics`),
+  listRunDiagnostics: (limit = 25) => request<Array<{ run_id: string } & RunDiagnostics>>(`/diagnostics/runs?limit=${limit}`),
   createRun: (challengeId: string, payload: Record<string, unknown>) => request<SolveRun>(`/challenges/${challengeId}/runs`, { method: "POST", body: JSON.stringify(payload) }),
   startRun: (id: string) => request<{ run_id: string; status: string }>(`/runs/${id}/start`, { method: "POST" }),
+  restartRun: (id: string, message = "") => request<{ run_id: string; status: string }>(`/runs/${id}/restart`, { method: "POST", body: JSON.stringify({ message }) }),
   cancelRun: (id: string) => request<SolveRun>(`/runs/${id}/cancel`, { method: "POST" }),
   deleteRun: (id: string) => request<void>(`/runs/${id}`, { method: "DELETE" }),
   listModelConfigs: () => request<Array<{ id: string; name: string; provider_type: string; base_url?: string; model_name?: string; enabled: boolean; api_key_configured: boolean }>>("/model-configs"),

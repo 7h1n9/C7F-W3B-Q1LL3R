@@ -1,6 +1,16 @@
 import type { ThreadEvent, ThreadItem } from "@openai/codex-sdk";
 import type { BridgeEvent } from "./types.js";
 
+const WAITING_USER_MARKER = /\[\[\s*C7F_WAITING_USER\s*\]\]/i;
+
+function normalizeAgentMessage(text: string): { message: string; waitingUser: boolean } {
+  const waitingUser = WAITING_USER_MARKER.test(text);
+  return {
+    message: text.replace(WAITING_USER_MARKER, "").trim(),
+    waitingUser,
+  };
+}
+
 export function threadEventsToBridgeEvents(event: ThreadEvent): BridgeEvent[] {
   if (event.type === "thread.started") {
     return [
@@ -22,8 +32,7 @@ export function threadEventsToBridgeEvents(event: ThreadEvent): BridgeEvent[] {
     return [
       {
         type: "agent.message",
-        status: "WAITING_USER",
-        payload: { message: "Codex \u5206\u6790\u56de\u5408\u5df2\u5b8c\u6210", usage: event.usage },
+        payload: { message: "Codex \u5206\u6790\u56de\u5408\u5df2\u5b8c\u6210，准备自动继续", usage: event.usage },
       },
     ];
   }
@@ -53,8 +62,21 @@ function itemEventToBridgeEvents(
   item: ThreadItem,
 ): BridgeEvent[] {
   switch (item.type) {
-    case "agent_message":
-      return kind === "item.completed" ? [{ type: "agent.message", payload: { message: item.text, item_id: item.id } }] : [];
+    case "agent_message": {
+      if (kind !== "item.completed") return [];
+      const normalized = normalizeAgentMessage(item.text);
+      return [
+        {
+          type: "agent.message",
+          ...(normalized.waitingUser ? { status: "WAITING_USER" } : {}),
+          payload: {
+            message: normalized.message,
+            item_id: item.id,
+            requires_user_confirmation: normalized.waitingUser,
+          },
+        },
+      ];
+    }
     case "reasoning":
       return [{ type: "agent.reasoning", payload: { message: item.text, item_id: item.id } }];
     case "todo_list":

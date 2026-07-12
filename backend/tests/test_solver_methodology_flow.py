@@ -8,15 +8,18 @@ from sqlalchemy.pool import StaticPool
 from app.models.base import Base
 from app.models.challenge import Challenge
 from app.models.run import Artifact, FlagCandidate, Observation, RunEvent, SolveRun, ToolCall
-from app.models.skill import Skill
+from app.models.skill import RunSkillSnapshot, Skill
 from app.services.action_fingerprint import fingerprint_action
 from app.services.builtin_skills import BuiltinSkillSyncService
 from app.services.codex_materializer import codex_materializer
 from app.services.finish_gate import finish_gate
 from app.services.flags import flag_service
 from app.services.hypotheses import hypothesis_service
+from app.schemas.agent import SkillAction
 from app.services.role_loader import role_loader
+from app.services.run_diagnostics import run_diagnostics_service
 from app.services.solver_state import solver_state_service
+from app.orchestration.state_machine import RunStatus, transition
 
 
 def test_role_loader_selects_role_by_challenge_type() -> None:
@@ -132,6 +135,12 @@ def test_action_fingerprint_is_stable() -> None:
     first = fingerprint_action("http_request", {"b": 2, "a": 1})
     second = fingerprint_action("http_request", {"a": 1, "b": 2})
     assert first == second
+
+
+def test_timeout_transition_is_allowed_from_active_states() -> None:
+    run = SolveRun(challenge_id="demo", workspace_path=".", role_snapshot_json={}, status="PLANNING", current_phase="PLANNING")
+    transition(run, RunStatus.TIMEOUT)
+    assert run.status == RunStatus.TIMEOUT.value
 
 
 @pytest.mark.asyncio
@@ -298,4 +307,136 @@ async def test_valid_flag_reconciles_failed_run_to_solved(tmp_path: Path) -> Non
         assert run.status == "COMPLETED_SOLVED"
         assert run.current_phase == "COMPLETED_SOLVED"
         assert challenge.status == "SOLVED"
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_skill_action_activation_creates_snapshot(tmp_path: Path) -> None:
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'skill_action.db'}", poolclass=StaticPool)
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    async with sessions() as session:
+        challenge = Challenge(
+            name="demo",
+            target_url="http://demo.local",
+            allowed_hosts=["demo.local"],
+            challenge_type="WEB_TARGET",
+            flag_pattern=r"flag\{[^}]+\}",
+        )
+        skill = Skill(
+            name="web-login-method",
+            display_name="Web Login Method",
+            description="demo",
+            source_type="CUSTOM",
+            skill_kind="SPECIALIST",
+            activation_mode="MANUAL",
+            triggers=["/login"],
+            prerequisites=[],
+            required_tools=[],
+            recommended_tools=["http_request"],
+            forbidden_tools=[],
+            ctf_phases=["PLANNING"],
+            challenge_types=["WEB_TARGET"],
+            content_markdown="Use a login-aware approach.",
+            allowed_tools=["http_request"],
+            risk_level="low",
+            version=1,
+            enabled=True,
+        )
+        session.add_all([challenge, skill])
+        await session.flush()
+        run = SolveRun(challenge_id=challenge.id, workspace_path=str(tmp_path), role_snapshot_json={})
+        session.add(run)
+        await session.flush()
+        run.status = "PLANNING"
+        run.current_phase = "PLANNING"
+        await solver_state_service.initialize(session, run, challenge.challenge_type, [])
+        from app.orchestration.orchestrator import SolveOrchestrator
+
+        handled = await SolveOrchestrator()._handle_skill_action(
+            session,
+            run,
+            challenge,
+            SkillAction(
+                type="skill",
+                operation="activate",
+                phase="PLANNING",
+                objective="Enable login methodology",
+                reason="Need a login-aware path",
+                skill_id=skill.id,
+                skill_name=skill.name,
+                supporting_evidence=["/login"],
+                expected_use="Inspect authentication flow",
+            ),
+        )
+        state = await solver_state_service.load(session, run.id)
+        snapshot = await session.scalar(
+            select(RunSkillSnapshot).where(
+                RunSkillSnapshot.run_id == run.id, RunSkillSnapshot.skill_id == skill.id
+            )
+        )
+
+    assert handled is True
+    assert state is not None and skill.id in (state.active_skill_ids_json or [])
+    assert snapshot is not None and snapshot.skill_name == skill.name
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_run_diagnostics_flags_contract_and_redirect_loops(tmp_path: Path) -> None:
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'diagnostics.db'}", poolclass=StaticPool)
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    async with sessions() as session:
+        challenge = Challenge(
+            name="demo",
+            target_url="http://demo.local",
+            allowed_hosts=["demo.local"],
+            challenge_type="WEB_TARGET",
+            flag_pattern=r"flag\{[^}]+\}",
+        )
+        session.add(challenge)
+        await session.flush()
+        run = SolveRun(
+            challenge_id=challenge.id,
+            workspace_path=str(tmp_path),
+            role_snapshot_json={},
+            status="FAILED_ENGINE",
+            current_phase="FAILED_ENGINE",
+            last_error_message="400: python_run only accepts existing scripts/*.py files",
+            last_error_code="ENGINE_ERROR",
+        )
+        session.add(run)
+        await session.flush()
+        session.add_all(
+            [
+                ToolCall(
+                    run_id=run.id,
+                    tool_name="http_request",
+                    arguments_json={"url": "http://demo.local/profile"},
+                    status="COMPLETED",
+                ),
+                Observation(
+                    run_id=run.id,
+                    observation_type="tool_result",
+                    summary="GET /profile -> 302 /login",
+                    facts_json={"path": "/profile", "status_code": 302},
+                ),
+                Observation(
+                    run_id=run.id,
+                    observation_type="tool_result",
+                    summary="GET /admin -> 302 /login",
+                    facts_json={"path": "/admin", "status_code": 302},
+                ),
+            ]
+        )
+        await session.commit()
+        diagnostics = await run_diagnostics_service.analyze(session, run)
+
+    assert "TOOL_CONTRACT_MISMATCH" in diagnostics["diagnostic_tags"]
+    assert "AUTH_REDIRECT_LOOP" in diagnostics["diagnostic_tags"]
+    assert any(item["code"] == "TOOL_CONTRACT_MISMATCH" for item in diagnostics["anomalies"])
+    assert any(item["code"] == "AUTH_REDIRECT_LOOP" for item in diagnostics["anomalies"])
     await engine.dispose()

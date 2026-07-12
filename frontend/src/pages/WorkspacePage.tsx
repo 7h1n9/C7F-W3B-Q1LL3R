@@ -1,6 +1,7 @@
 ﻿import {
   CaretRightOutlined,
   PauseCircleOutlined,
+  ReloadOutlined,
   SafetyCertificateOutlined,
 } from "@ant-design/icons";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -32,6 +33,7 @@ import type { FlagCandidate, RunEvent } from "../types/api";
 const eventLabels: Record<string, string> = {
   "run.created": "任务已创建",
   "run.started": "任务已启动",
+  "run.restarted": "任务已重启",
   "run.status_changed": "状态变更",
   "agent.message": "智能体消息",
   "agent.plan_created": "生成分析计划",
@@ -43,7 +45,12 @@ const eventLabels: Record<string, string> = {
   "agent.progress_detected": "检测到进展",
   "agent.no_progress": "暂无进展",
   "agent.replan_required": "需要重新规划",
+  "skill.requested": "请求技能",
+  "skill.snapshot_created": "技能快照已创建",
   "skill.activated": "Skill 已激活",
+  "skill.deactivated": "Skill 已停用",
+  "skill.recommended": "Skill 已推荐",
+  "skill.activation_rejected": "Skill 激活失败",
   "tool.requested": "请求工具",
   "tool.started": "工具开始执行",
   "tool.output": "工具输出",
@@ -63,6 +70,7 @@ function eventColor(type: string): string {
   if (type.includes("failed")) return "red";
   if (type.includes("completed") || type.includes("verified")) return "green";
   if (type.includes("tool") || type.includes("flag")) return "blue";
+  if (type.includes("skill")) return "cyan";
   return "gray";
 }
 
@@ -83,6 +91,10 @@ export function WorkspacePage() {
 
   const run = useQuery({ queryKey: ["run", id], queryFn: () => api.getRun(id) });
   const solverState = useQuery({ queryKey: ["solver-state", id], queryFn: () => api.getSolverState(id) });
+  const diagnostics = useQuery({
+    queryKey: ["run-diagnostics", id],
+    queryFn: () => api.getRunDiagnostics(id),
+  });
   const tools = useQuery({ queryKey: ["tool-calls", id], queryFn: () => api.getToolCalls(id) });
   const observations = useQuery({ queryKey: ["observations", id], queryFn: () => api.getObservations(id) });
   const artifacts = useQuery({ queryKey: ["artifacts", id], queryFn: () => api.getArtifacts(id) });
@@ -103,6 +115,18 @@ export function WorkspacePage() {
     onSuccess: () => {
       void client.invalidateQueries({ queryKey: ["run", id] });
       message.success("任务已取消");
+    },
+    onError: (error: Error) => message.error(error.message),
+  });
+
+  const restart = useMutation({
+    mutationFn: () => api.restartRun(id),
+    onSuccess: () => {
+      void client.invalidateQueries({ queryKey: ["run", id] });
+      void client.invalidateQueries({ queryKey: ["solver-state", id] });
+      void client.invalidateQueries({ queryKey: ["run-diagnostics", id] });
+      void client.invalidateQueries({ queryKey: ["runs"] });
+      message.success("任务已重启，将沿用原有状态与证据继续执行");
     },
     onError: (error: Error) => message.error(error.message),
   });
@@ -134,6 +158,7 @@ export function WorkspacePage() {
       events.filter(
         (event) =>
           event.event_type.startsWith("tool.") ||
+          event.event_type.startsWith("skill.") ||
           event.event_type.includes("hypothesis") ||
           event.event_type.includes("artifact") ||
           event.event_type.includes("flag"),
@@ -170,6 +195,17 @@ export function WorkspacePage() {
             启动任务
           </Button>
           <Button
+            icon={<ReloadOutlined />}
+            loading={restart.isPending}
+            onClick={() => restart.mutate()}
+            disabled={
+              !run.data ||
+              !["WAITING_USER", "FAILED_ENGINE", "FAILED_TOOL", "FAILED_RUNNER", "TIMEOUT", "COMPLETED_UNSOLVED", "CANCELLED"].includes(run.data.status)
+            }
+          >
+            重启任务
+          </Button>
+          <Button
             danger
             icon={<PauseCircleOutlined />}
             loading={cancel.isPending}
@@ -194,16 +230,23 @@ export function WorkspacePage() {
           column={{ xs: 1, md: 2, xl: 4 }}
           items={[
             { key: "id", label: "任务编号", children: <span className="id-code">{run.data?.id ?? "—"}</span> },
+            { key: "challenge", label: "题目", children: run.data?.challenge_name ?? run.data?.challenge_id ?? "—" },
             { key: "status", label: "当前状态", children: run.data ? <RunStatusTag status={run.data.status} /> : "—" },
             {
               key: "engine",
               label: "解题引擎",
               children: run.data?.engine_type === "mock" ? "模拟引擎" : run.data?.engine_type,
             },
+            { key: "model", label: "模型", children: run.data?.model_name ?? "—" },
             {
               key: "phase",
               label: "当前阶段",
               children: run.data ? runStatusLabel(run.data.current_phase) : "—",
+            },
+            {
+              key: "skills",
+              label: "活跃技能",
+              children: (run.data?.active_skill_names ?? []).length ? (run.data?.active_skill_names ?? []).join("、") : "—",
             },
           ]}
         />
@@ -272,6 +315,33 @@ export function WorkspacePage() {
             </Card>
           </Col>
         </Row>
+      </Card>
+
+      <Card className="panel-card" title="异常诊断" style={{ marginTop: 18 }}>
+        <Space direction="vertical" size={12} style={{ width: "100%" }}>
+          <Space wrap>
+            {(diagnostics.data?.diagnostic_tags ?? []).length ? (
+              diagnostics.data?.diagnostic_tags?.map((tag) => <Tag key={tag} color="cyan">{tag}</Tag>)
+            ) : (
+              <Tag color="green">未见异常标签</Tag>
+            )}
+          </Space>
+          <div className="field-help">{diagnostics.data?.diagnostic_summary ?? "暂无可用诊断"}</div>
+          <Table
+            className="cyber-table"
+            size="small"
+            rowKey="code"
+            dataSource={diagnostics.data?.anomalies ?? []}
+            columns={[
+              { title: "代码", dataIndex: "code" },
+              { title: "级别", dataIndex: "severity" },
+              { title: "摘要", dataIndex: "summary" },
+              { title: "恢复建议", dataIndex: "suggestion" },
+            ]}
+            locale={{ emptyText: "当前没有可识别的异常" }}
+            pagination={{ pageSize: 4, showSizeChanger: false }}
+          />
+        </Space>
       </Card>
 
       <Row className="workspace-grid" gutter={[18, 18]}>

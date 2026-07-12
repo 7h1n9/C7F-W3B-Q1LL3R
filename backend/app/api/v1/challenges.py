@@ -32,12 +32,35 @@ async def require_challenge(challenge_id: str, session: AsyncSession) -> Challen
     return item
 
 
+async def _challenge_summary(session: AsyncSession, challenge: Challenge) -> dict:
+    runs = list(
+        (
+            await session.scalars(
+                select(SolveRun)
+                .where(SolveRun.challenge_id == challenge.id)
+                .order_by(SolveRun.created_at.desc())
+            )
+        ).all()
+    )
+    latest = runs[0] if runs else None
+    return {
+        "run_count": len(runs),
+        "solved_run_count": sum(1 for item in runs if item.status == "COMPLETED_SOLVED"),
+        "latest_run_status": latest.status if latest else None,
+        "latest_run_started_at": latest.started_at.isoformat() if latest and latest.started_at else None,
+        "latest_run_engine_type": latest.engine_type if latest else None,
+    }
+
+
 @router.get("")
 async def list_challenges(session: AsyncSession = Depends(get_session)) -> dict:
     items = list(
         (await session.scalars(select(Challenge).order_by(Challenge.created_at.desc()))).all()
     )
-    return {"data": [read(item) for item in items]}
+    payload = []
+    for item in items:
+        payload.append(ChallengeRead.model_validate({**read(item).model_dump(), **await _challenge_summary(session, item)}))
+    return {"data": payload}
 
 
 @router.post("", status_code=201)
@@ -56,7 +79,10 @@ async def create_challenge(
 
 @router.get("/{challenge_id}")
 async def get_challenge(challenge_id: str, session: AsyncSession = Depends(get_session)) -> dict:
-    return {"data": read(await require_challenge(challenge_id, session))}
+    item = await require_challenge(challenge_id, session)
+    return {
+        "data": ChallengeRead.model_validate({**read(item).model_dump(), **await _challenge_summary(session, item)})
+    }
 
 
 @router.put("/{challenge_id}")
@@ -75,7 +101,9 @@ async def update_challenge(
         item.status = "ACTIVE" if primary and primary.kind == "PCAP" else "DRAFT"
     await session.commit()
     await session.refresh(item)
-    return {"data": read(item)}
+    return {
+        "data": ChallengeRead.model_validate({**read(item).model_dump(), **await _challenge_summary(session, item)})
+    }
 
 
 @router.delete("/{challenge_id}", status_code=204)

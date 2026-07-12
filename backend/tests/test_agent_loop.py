@@ -28,6 +28,24 @@ def test_agent_action_rejects_extra_fields() -> None:
         adapter.validate_python({"type": "tool", "tool_name": "http_request", "arguments": {}, "reason": "inspect", "shell": "whoami"})
 
 
+def test_agent_action_accepts_skill_operations() -> None:
+    adapter = TypeAdapter(AgentAction)
+    action = adapter.validate_python(
+        {
+            "type": "skill",
+            "operation": "activate",
+            "phase": "PLANNING",
+            "objective": "Enable methodology",
+            "reason": "Need a dedicated login approach",
+            "skill_name": "web-login-method",
+            "supporting_evidence": ["/login"],
+            "expected_use": "Focus on authentication",
+        }
+    )
+    assert action.type == "skill"
+    assert action.operation == "activate"
+
+
 def test_api_key_is_encrypted_and_round_trips() -> None:
     secret = "sk-test-secret"
     encrypted = encrypt_api_key(secret)

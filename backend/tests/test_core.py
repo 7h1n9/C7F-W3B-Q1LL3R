@@ -1,6 +1,6 @@
 import pytest
 
-from app.orchestration.state_machine import RunStatus, transition
+from app.orchestration.state_machine import RunStatus, restart, transition
 from app.schemas.challenge import ChallengeInput
 
 
@@ -27,3 +27,18 @@ def test_state_machine_accepts_start() -> None:
     class Run: status = "CREATED"; current_phase = "CREATED"; started_at = None; finished_at = None
     run = Run(); transition(run, RunStatus.PREPARING)
     assert run.status == "PREPARING"
+
+
+def test_state_machine_restarts_failed_run_without_erasing_state() -> None:
+    class Run:
+        status = "FAILED_ENGINE"
+        current_phase = "FAILED_ENGINE"
+        started_at = object()
+        finished_at = object()
+
+    run = Run()
+    previous = restart(run)
+    assert previous == RunStatus.FAILED_ENGINE
+    assert run.status == "WAITING_USER"
+    assert run.current_phase == "WAITING_USER"
+    assert run.finished_at is None

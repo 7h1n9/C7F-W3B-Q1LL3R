@@ -110,3 +110,15 @@ def allowed_tools_for(challenge_type: str) -> set[str]:
             "pcap_query",
         }
     )
+
+
+async def specialist_skill_catalog(
+    session: AsyncSession, challenge_type: str, disabled_ids: set[str] | None = None
+) -> list[Skill]:
+    disabled = disabled_ids or set()
+    items = list(
+        (
+            await session.scalars(select(Skill).where(Skill.enabled, Skill.skill_kind == "SPECIALIST"))
+        ).all()
+    )
+    return [item for item in items if challenge_type in (item.challenge_types or []) and item.id not in disabled]

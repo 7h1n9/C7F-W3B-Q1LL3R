@@ -10,6 +10,7 @@ class SolverStateRead(BaseModel):
     active_hypotheses_json: list[dict]
     action_fingerprints_json: dict
     active_skill_ids_json: list[str]
+    skill_recommendations_json: list[dict]
     no_progress_count: int
     last_progress_at: str | None
     created_at: str

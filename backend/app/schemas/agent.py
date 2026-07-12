@@ -21,6 +21,20 @@ class ToolAction(BaseModel):
     activate_skill: str | None = None
 
 
+class SkillAction(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    type: Literal["skill"]
+    operation: Literal["activate", "deactivate", "inspect"]
+    phase: str
+    objective: str
+    reason: str = Field(min_length=1, max_length=2000)
+    skill_id: str | None = Field(default=None, max_length=100)
+    skill_name: str | None = Field(default=None, max_length=200)
+    supporting_evidence: list[str] = Field(default_factory=list)
+    expected_use: str = Field(min_length=1, max_length=2000)
+
+
 class FinishAction(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
@@ -36,4 +50,4 @@ class FinishAction(BaseModel):
     failure_pivot: str | None = None
 
 
-AgentAction = Annotated[ToolAction | FinishAction, Field(discriminator="type")]
+AgentAction = Annotated[ToolAction | SkillAction | FinishAction, Field(discriminator="type")]

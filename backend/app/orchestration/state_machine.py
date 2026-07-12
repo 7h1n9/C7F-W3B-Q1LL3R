@@ -29,6 +29,26 @@ TERMINAL = {status for status in RunStatus if status.name.startswith(("COMPLETED
     RunStatus.CANCELLED,
     RunStatus.POLICY_BLOCKED,
 }
+RESTARTABLE = {
+    RunStatus.WAITING_USER,
+    RunStatus.FAILED_ENGINE,
+    RunStatus.FAILED_TOOL,
+    RunStatus.FAILED_RUNNER,
+    RunStatus.TIMEOUT,
+    RunStatus.COMPLETED_UNSOLVED,
+    RunStatus.CANCELLED,
+}
+TIMEOUT_SOURCES = {
+    RunStatus.CREATED,
+    RunStatus.PREPARING,
+    RunStatus.ANALYZING,
+    RunStatus.PLANNING,
+    RunStatus.EXECUTING,
+    RunStatus.EVALUATING,
+    RunStatus.WAITING_USER,
+    RunStatus.VERIFYING_FLAG,
+    RunStatus.REPORTING,
+}
 ALLOWED: dict[RunStatus, set[RunStatus]] = {
     RunStatus.CREATED: {
         RunStatus.PREPARING,
@@ -88,6 +108,10 @@ ALLOWED: dict[RunStatus, set[RunStatus]] = {
     },
 }
 
+for status in TIMEOUT_SOURCES:
+    if status not in TERMINAL:
+        ALLOWED.setdefault(status, set()).add(RunStatus.TIMEOUT)
+
 
 def transition(run: object, target: RunStatus) -> None:
     current = RunStatus(getattr(run, "status"))
@@ -102,3 +126,18 @@ def transition(run: object, target: RunStatus) -> None:
         run.started_at = datetime.now(UTC)
     if target in TERMINAL:
         run.finished_at = datetime.now(UTC)
+
+
+def restart(run: object) -> RunStatus:
+    """Re-arm a run without deleting its durable state, events, or evidence."""
+    current = RunStatus(getattr(run, "status"))
+    if current not in RESTARTABLE:
+        raise DomainError(
+            "RUN_NOT_RESTARTABLE",
+            "Only waiting, failed, timed-out, cancelled, or unsolved runs can restart.",
+            {"current_state": current},
+        )
+    run.status = RunStatus.WAITING_USER.value
+    run.current_phase = RunStatus.WAITING_USER.value
+    run.finished_at = None
+    return current

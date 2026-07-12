@@ -35,6 +35,33 @@ class _DisconnectedClient:
         raise httpx.RemoteProtocolError("Server disconnected")
 
 
+class _FlakyThenSuccessClient:
+    attempts = 0
+
+    def __init__(self, **_: object) -> None:
+        pass
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *_: object) -> None:
+        pass
+
+    async def post(self, *_: object, **__: object):
+        type(self).attempts += 1
+        if type(self).attempts < 3:
+            response = httpx.Response(503, request=httpx.Request("POST", "https://provider.test/v1/chat/completions"))
+            raise httpx.HTTPStatusError("temporary", request=response.request, response=response)
+        class Response:
+            def raise_for_status(self) -> None:
+                pass
+
+            def json(self) -> dict:
+                return {"choices": [{"message": {"content": '{"type":"finish","result":"unsolved","summary":"No flag","flag_candidate":null}'}}]}
+
+        return Response()
+
+
 @pytest.mark.asyncio
 async def test_provider_429_is_classified_as_rate_limited(monkeypatch: pytest.MonkeyPatch) -> None:
     async def no_sleep(_: float) -> None: pass
@@ -51,3 +78,19 @@ async def test_provider_disconnect_is_classified_as_unavailable(monkeypatch: pyt
     monkeypatch.setattr("app.engines.openai_compatible.asyncio.sleep", no_sleep)
     with pytest.raises(ModelUnavailableError, match="MODEL_UNAVAILABLE"):
         await OpenAICompatibleEngine("https://provider.test/v1", "secret", "model").next_action([])
+
+
+@pytest.mark.asyncio
+async def test_provider_transient_error_is_retried(monkeypatch: pytest.MonkeyPatch) -> None:
+    sleeps: list[float] = []
+
+    async def fake_sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    _FlakyThenSuccessClient.attempts = 0
+    monkeypatch.setattr("app.engines.openai_compatible.httpx.AsyncClient", _FlakyThenSuccessClient)
+    monkeypatch.setattr("app.engines.openai_compatible.asyncio.sleep", fake_sleep)
+    action = await OpenAICompatibleEngine("https://provider.test/v1", "secret", "model").next_action([])
+    assert action.type == "finish"
+    assert _FlakyThenSuccessClient.attempts == 3
+    assert len(sleeps) == 2

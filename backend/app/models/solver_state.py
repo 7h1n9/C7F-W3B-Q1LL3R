@@ -17,6 +17,7 @@ class SolverState(UUIDTimestampMixin, Base):
     active_hypotheses_json: Mapped[list[dict]] = mapped_column(JSON, nullable=False, default=list)
     action_fingerprints_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
     active_skill_ids_json: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
+    skill_recommendations_json: Mapped[list[dict]] = mapped_column(JSON, nullable=False, default=list)
     no_progress_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     last_progress_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     updated_at: Mapped[datetime] = mapped_column(

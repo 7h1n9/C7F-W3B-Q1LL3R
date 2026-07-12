@@ -1,0 +1,119 @@
+INFO:     127.0.0.1:53764 - "GET /api/v1/runs/af32b4d2-fb3c-47d2-8114-c27cd09e1b5e/events HTTP/1.1" 200 OK
+INFO:     127.0.0.1:53765 - "GET /api/v1/health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:53784 - "GET /api/v1/health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:11422 - "GET /api/v1/runs/af32b4d2-fb3c-47d2-8114-c27cd09e1b5e/events HTTP/1.1" 200 OK
+INFO:     127.0.0.1:22333 - "GET /api/v1/runs/af32b4d2-fb3c-47d2-8114-c27cd09e1b5e/events HTTP/1.1" 200 OK
+INFO:     127.0.0.1:26225 - "GET /api/v1/runs/af32b4d2-fb3c-47d2-8114-c27cd09e1b5e/events HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65226 - "GET /api/v1/runs/af32b4d2-fb3c-47d2-8114-c27cd09e1b5e/events HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52879 - "GET /api/v1/runs/af32b4d2-fb3c-47d2-8114-c27cd09e1b5e/events HTTP/1.1" 200 OK
+INFO:     127.0.0.1:44836 - "GET /api/v1/runs/af32b4d2-fb3c-47d2-8114-c27cd09e1b5e/events HTTP/1.1" 200 OK
+INFO:     127.0.0.1:28754 - "GET /api/v1/runs/af32b4d2-fb3c-47d2-8114-c27cd09e1b5e/events HTTP/1.1" 200 OK
+INFO:     127.0.0.1:57057 - "GET /api/v1/runs/af32b4d2-fb3c-47d2-8114-c27cd09e1b5e/events HTTP/1.1" 200 OK
+INFO:     127.0.0.1:29243 - "OPTIONS /api/v1/runs/af32b4d2-fb3c-47d2-8114-c27cd09e1b5e HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51511 - "OPTIONS /api/v1/runs/af32b4d2-fb3c-47d2-8114-c27cd09e1b5e/diagnostics HTTP/1.1" 200 OK
+INFO:     127.0.0.1:14114 - "OPTIONS /api/v1/runs/af32b4d2-fb3c-47d2-8114-c27cd09e1b5e/tool-calls HTTP/1.1" 200 OK
+INFO:     127.0.0.1:26780 - "OPTIONS /api/v1/runs/af32b4d2-fb3c-47d2-8114-c27cd09e1b5e/observations HTTP/1.1" 200 OK
+INFO:     127.0.0.1:29243 - "OPTIONS /api/v1/runs/af32b4d2-fb3c-47d2-8114-c27cd09e1b5e/flag-candidates HTTP/1.1" 200 OK
+INFO:     127.0.0.1:5295 - "OPTIONS /api/v1/runs/af32b4d2-fb3c-47d2-8114-c27cd09e1b5e/artifacts HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51511 - "OPTIONS /api/v1/runs/af32b4d2-fb3c-47d2-8114-c27cd09e1b5e/report HTTP/1.1" 200 OK
+INFO:     127.0.0.1:14114 - "OPTIONS /api/v1/runs/af32b4d2-fb3c-47d2-8114-c27cd09e1b5e/solver-state HTTP/1.1" 200 OK
+INFO:     127.0.0.1:14114 - "GET /api/v1/runs/af32b4d2-fb3c-47d2-8114-c27cd09e1b5e/tool-calls HTTP/1.1" 200 OK
+INFO:     127.0.0.1:26780 - "GET /api/v1/runs/af32b4d2-fb3c-47d2-8114-c27cd09e1b5e HTTP/1.1" 200 OK
+INFO:     127.0.0.1:5295 - "GET /api/v1/runs/af32b4d2-fb3c-47d2-8114-c27cd09e1b5e/flag-candidates HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51511 - "GET /api/v1/runs/af32b4d2-fb3c-47d2-8114-c27cd09e1b5e/observations HTTP/1.1" 200 OK
+INFO:     127.0.0.1:29243 - "GET /api/v1/runs/af32b4d2-fb3c-47d2-8114-c27cd09e1b5e/diagnostics HTTP/1.1" 200 OK
+INFO:     127.0.0.1:14114 - "GET /api/v1/runs/af32b4d2-fb3c-47d2-8114-c27cd09e1b5e/artifacts HTTP/1.1" 200 OK
+INFO:     127.0.0.1:5295 - "GET /api/v1/runs/af32b4d2-fb3c-47d2-8114-c27cd09e1b5e/report HTTP/1.1" 200 OK
+INFO:     127.0.0.1:26780 - "GET /api/v1/runs/af32b4d2-fb3c-47d2-8114-c27cd09e1b5e/solver-state HTTP/1.1" 500 Internal Server Error
+INFO:     127.0.0.1:5295 - "GET /api/v1/runs/af32b4d2-fb3c-47d2-8114-c27cd09e1b5e/events HTTP/1.1" 200 OK
+INFO:     127.0.0.1:26054 - "GET /api/v1/runs/af32b4d2-fb3c-47d2-8114-c27cd09e1b5e/events HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62324 - "GET /api/v1/runs/af32b4d2-fb3c-47d2-8114-c27cd09e1b5e/events HTTP/1.1" 200 OK
+INFO:     127.0.0.1:12677 - "GET /api/v1/runs/af32b4d2-fb3c-47d2-8114-c27cd09e1b5e/events HTTP/1.1" 200 OK
+INFO:     127.0.0.1:27940 - "GET /api/v1/runs/af32b4d2-fb3c-47d2-8114-c27cd09e1b5e/events HTTP/1.1" 200 OK
+INFO:     127.0.0.1:7115 - "GET /api/v1/runs/af32b4d2-fb3c-47d2-8114-c27cd09e1b5e/events HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59961 - "GET /api/v1/runs/af32b4d2-fb3c-47d2-8114-c27cd09e1b5e/events HTTP/1.1" 200 OK
+INFO:     127.0.0.1:27358 - "GET /api/v1/runs/af32b4d2-fb3c-47d2-8114-c27cd09e1b5e/events HTTP/1.1" 200 OK
+INFO:     127.0.0.1:29098 - "GET /api/v1/runs/af32b4d2-fb3c-47d2-8114-c27cd09e1b5e/events HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65479 - "GET /api/v1/runs/af32b4d2-fb3c-47d2-8114-c27cd09e1b5e/events HTTP/1.1" 200 OK
+INFO:     127.0.0.1:46827 - "GET /api/v1/runs/af32b4d2-fb3c-47d2-8114-c27cd09e1b5e/events HTTP/1.1" 200 OK
+INFO:     127.0.0.1:28218 - "GET /api/v1/runs/af32b4d2-fb3c-47d2-8114-c27cd09e1b5e/events HTTP/1.1" 200 OK
+INFO:     127.0.0.1:34795 - "GET /api/v1/runs/af32b4d2-fb3c-47d2-8114-c27cd09e1b5e/events HTTP/1.1" 200 OK
+INFO:     127.0.0.1:38907 - "GET /api/v1/runs/af32b4d2-fb3c-47d2-8114-c27cd09e1b5e/events HTTP/1.1" 200 OK
+INFO:     127.0.0.1:16610 - "GET /api/v1/runs/af32b4d2-fb3c-47d2-8114-c27cd09e1b5e/events HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59797 - "GET /api/v1/runs/af32b4d2-fb3c-47d2-8114-c27cd09e1b5e/events HTTP/1.1" 200 OK
+INFO:     127.0.0.1:24626 - "GET /api/v1/runs/af32b4d2-fb3c-47d2-8114-c27cd09e1b5e/events HTTP/1.1" 200 OK
+INFO:     127.0.0.1:42877 - "GET /api/v1/runs/af32b4d2-fb3c-47d2-8114-c27cd09e1b5e/tool-calls HTTP/1.1" 200 OK
+INFO:     127.0.0.1:48623 - "GET /api/v1/runs/af32b4d2-fb3c-47d2-8114-c27cd09e1b5e HTTP/1.1" 200 OK
+INFO:     127.0.0.1:9488 - "GET /api/v1/runs/af32b4d2-fb3c-47d2-8114-c27cd09e1b5e/diagnostics HTTP/1.1" 200 OK
+INFO:     127.0.0.1:29057 - "GET /api/v1/runs/af32b4d2-fb3c-47d2-8114-c27cd09e1b5e/observations HTTP/1.1" 200 OK
+INFO:     127.0.0.1:1604 - "GET /api/v1/runs/af32b4d2-fb3c-47d2-8114-c27cd09e1b5e/artifacts HTTP/1.1" 200 OK
+INFO:     127.0.0.1:42877 - "GET /api/v1/runs/af32b4d2-fb3c-47d2-8114-c27cd09e1b5e/flag-candidates HTTP/1.1" 200 OK
+INFO:     127.0.0.1:48623 - "GET /api/v1/runs/af32b4d2-fb3c-47d2-8114-c27cd09e1b5e/report HTTP/1.1" 200 OK
+INFO:     127.0.0.1:9488 - "GET /api/v1/runs/af32b4d2-fb3c-47d2-8114-c27cd09e1b5e/solver-state HTTP/1.1" 500 Internal Server Error
+INFO:     127.0.0.1:48623 - "OPTIONS /api/v1/runs/af32b4d2-fb3c-47d2-8114-c27cd09e1b5e/restart HTTP/1.1" 200 OK
+INFO:     127.0.0.1:48623 - "POST /api/v1/runs/af32b4d2-fb3c-47d2-8114-c27cd09e1b5e/restart HTTP/1.1" 200 OK
+INFO:     127.0.0.1:36165 - "GET /api/v1/runs/af32b4d2-fb3c-47d2-8114-c27cd09e1b5e/events HTTP/1.1" 200 OK
+INFO:     127.0.0.1:48623 - "GET /api/v1/runs/af32b4d2-fb3c-47d2-8114-c27cd09e1b5e/solver-state HTTP/1.1" 500 Internal Server Error
+INFO:     127.0.0.1:42877 - "GET /api/v1/runs/af32b4d2-fb3c-47d2-8114-c27cd09e1b5e HTTP/1.1" 200 OK
+INFO:     127.0.0.1:26117 - "GET /api/v1/runs/af32b4d2-fb3c-47d2-8114-c27cd09e1b5e/diagnostics HTTP/1.1" 200 OK
+INFO:     127.0.0.1:42877 - "OPTIONS /api/v1/model-configs HTTP/1.1" 200 OK
+INFO:     127.0.0.1:42877 - "OPTIONS /api/v1/challenges HTTP/1.1" 200 OK
+INFO:     127.0.0.1:16304 - "OPTIONS /api/v1/skills HTTP/1.1" 200 OK
+INFO:     127.0.0.1:42699 - "GET /api/v1/model-configs HTTP/1.1" 200 OK
+INFO:     127.0.0.1:42877 - "GET /api/v1/skills HTTP/1.1" 200 OK
+INFO:     127.0.0.1:16304 - "GET /api/v1/challenges HTTP/1.1" 200 OK
+INFO:     127.0.0.1:16304 - "OPTIONS /api/v1/runs HTTP/1.1" 200 OK
+INFO:     127.0.0.1:26117 - "GET /api/v1/runs/af32b4d2-fb3c-47d2-8114-c27cd09e1b5e/solver-state HTTP/1.1" 500 Internal Server Error
+INFO:     127.0.0.1:42877 - "GET /api/v1/model-configs HTTP/1.1" 200 OK
+INFO:     127.0.0.1:42699 - "GET /api/v1/skills HTTP/1.1" 200 OK
+INFO:     127.0.0.1:36643 - "GET /api/v1/challenges HTTP/1.1" 200 OK
+INFO:     127.0.0.1:36643 - "GET /api/v1/skills HTTP/1.1" 200 OK
+INFO:     127.0.0.1:16304 - "GET /api/v1/runs HTTP/1.1" 200 OK
+INFO:     127.0.0.1:23145 - "OPTIONS /api/v1/runs/10db33a6-ddf9-4c06-862b-a2999451f08b HTTP/1.1" 200 OK
+INFO:     127.0.0.1:28500 - "OPTIONS /api/v1/runs/10db33a6-ddf9-4c06-862b-a2999451f08b/solver-state HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58234 - "OPTIONS /api/v1/runs/10db33a6-ddf9-4c06-862b-a2999451f08b/diagnostics HTTP/1.1" 200 OK
+INFO:     127.0.0.1:1409 - "OPTIONS /api/v1/runs/10db33a6-ddf9-4c06-862b-a2999451f08b/tool-calls HTTP/1.1" 200 OK
+INFO:     127.0.0.1:18810 - "OPTIONS /api/v1/runs/10db33a6-ddf9-4c06-862b-a2999451f08b/observations HTTP/1.1" 200 OK
+INFO:     127.0.0.1:27356 - "OPTIONS /api/v1/runs/10db33a6-ddf9-4c06-862b-a2999451f08b/artifacts HTTP/1.1" 200 OK
+INFO:     127.0.0.1:23145 - "OPTIONS /api/v1/runs/10db33a6-ddf9-4c06-862b-a2999451f08b/flag-candidates HTTP/1.1" 200 OK
+INFO:     127.0.0.1:28500 - "OPTIONS /api/v1/runs/10db33a6-ddf9-4c06-862b-a2999451f08b/report HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58234 - "GET /api/v1/runs/10db33a6-ddf9-4c06-862b-a2999451f08b/events HTTP/1.1" 200 OK
+INFO:     127.0.0.1:28500 - "GET /api/v1/runs/10db33a6-ddf9-4c06-862b-a2999451f08b/solver-state HTTP/1.1" 500 Internal Server Error
+INFO:     127.0.0.1:27356 - "GET /api/v1/runs/10db33a6-ddf9-4c06-862b-a2999451f08b/tool-calls HTTP/1.1" 200 OK
+INFO:     127.0.0.1:18810 - "GET /api/v1/runs/10db33a6-ddf9-4c06-862b-a2999451f08b/observations HTTP/1.1" 200 OK
+INFO:     127.0.0.1:1409 - "GET /api/v1/runs/10db33a6-ddf9-4c06-862b-a2999451f08b HTTP/1.1" 200 OK
+INFO:     127.0.0.1:27356 - "GET /api/v1/runs/10db33a6-ddf9-4c06-862b-a2999451f08b/flag-candidates HTTP/1.1" 200 OK
+INFO:     127.0.0.1:23145 - "GET /api/v1/runs/10db33a6-ddf9-4c06-862b-a2999451f08b/diagnostics HTTP/1.1" 200 OK
+INFO:     127.0.0.1:17356 - "GET /api/v1/runs/10db33a6-ddf9-4c06-862b-a2999451f08b/artifacts HTTP/1.1" 200 OK
+INFO:     127.0.0.1:18810 - "GET /api/v1/runs/10db33a6-ddf9-4c06-862b-a2999451f08b/report HTTP/1.1" 200 OK
+INFO:     127.0.0.1:1409 - "GET /api/v1/runs/af32b4d2-fb3c-47d2-8114-c27cd09e1b5e/tool-calls HTTP/1.1" 200 OK
+INFO:     127.0.0.1:17356 - "GET /api/v1/runs/af32b4d2-fb3c-47d2-8114-c27cd09e1b5e HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55209 - "GET /api/v1/runs/af32b4d2-fb3c-47d2-8114-c27cd09e1b5e/observations HTTP/1.1" 200 OK
+INFO:     127.0.0.1:23145 - "GET /api/v1/runs/af32b4d2-fb3c-47d2-8114-c27cd09e1b5e/solver-state HTTP/1.1" 500 Internal Server Error
+INFO:     127.0.0.1:10975 - "GET /api/v1/runs/af32b4d2-fb3c-47d2-8114-c27cd09e1b5e/events HTTP/1.1" 200 OK
+INFO:     127.0.0.1:27356 - "GET /api/v1/runs/af32b4d2-fb3c-47d2-8114-c27cd09e1b5e/diagnostics HTTP/1.1" 200 OK
+INFO:     127.0.0.1:1409 - "GET /api/v1/runs/af32b4d2-fb3c-47d2-8114-c27cd09e1b5e/artifacts HTTP/1.1" 200 OK
+INFO:     127.0.0.1:27356 - "GET /api/v1/runs/af32b4d2-fb3c-47d2-8114-c27cd09e1b5e/solver-state HTTP/1.1" 500 Internal Server Error
+INFO:     127.0.0.1:55209 - "GET /api/v1/runs/af32b4d2-fb3c-47d2-8114-c27cd09e1b5e/report HTTP/1.1" 200 OK
+INFO:     127.0.0.1:17356 - "GET /api/v1/runs/af32b4d2-fb3c-47d2-8114-c27cd09e1b5e/flag-candidates HTTP/1.1" 200 OK
+INFO:     127.0.0.1:17356 - "GET /api/v1/runs/af32b4d2-fb3c-47d2-8114-c27cd09e1b5e/solver-state HTTP/1.1" 500 Internal Server Error
+INFO:     127.0.0.1:18810 - "GET /api/v1/runs HTTP/1.1" 200 OK
+INFO:     127.0.0.1:6795 - "GET /api/v1/runs/af32b4d2-fb3c-47d2-8114-c27cd09e1b5e/solver-state HTTP/1.1" 500 Internal Server Error
+INFO:     127.0.0.1:3607 - "GET /api/v1/runs/af32b4d2-fb3c-47d2-8114-c27cd09e1b5e HTTP/1.1" 200 OK
+INFO:     127.0.0.1:3607 - "GET /api/v1/runs/af32b4d2-fb3c-47d2-8114-c27cd09e1b5e/events HTTP/1.1" 200 OK
+INFO:     127.0.0.1:64876 - "GET /api/v1/runs/af32b4d2-fb3c-47d2-8114-c27cd09e1b5e/tool-calls HTTP/1.1" 200 OK
+INFO:     127.0.0.1:6838 - "GET /api/v1/runs/af32b4d2-fb3c-47d2-8114-c27cd09e1b5e/artifacts HTTP/1.1" 200 OK
+INFO:     127.0.0.1:32644 - "GET /api/v1/runs/af32b4d2-fb3c-47d2-8114-c27cd09e1b5e/observations HTTP/1.1" 200 OK
+INFO:     127.0.0.1:4395 - "GET /api/v1/runs/af32b4d2-fb3c-47d2-8114-c27cd09e1b5e/diagnostics HTTP/1.1" 200 OK
+INFO:     127.0.0.1:44838 - "GET /api/v1/runs/af32b4d2-fb3c-47d2-8114-c27cd09e1b5e/report HTTP/1.1" 200 OK
+INFO:     127.0.0.1:4395 - "GET /api/v1/runs/af32b4d2-fb3c-47d2-8114-c27cd09e1b5e/solver-state HTTP/1.1" 500 Internal Server Error
+INFO:     127.0.0.1:64876 - "GET /api/v1/runs/af32b4d2-fb3c-47d2-8114-c27cd09e1b5e/flag-candidates HTTP/1.1" 200 OK
+INFO:     127.0.0.1:64876 - "GET /api/v1/runs/af32b4d2-fb3c-47d2-8114-c27cd09e1b5e/solver-state HTTP/1.1" 500 Internal Server Error
+INFO:     127.0.0.1:52271 - "GET /api/v1/runs/af32b4d2-fb3c-47d2-8114-c27cd09e1b5e/solver-state HTTP/1.1" 500 Internal Server Error
+INFO:     127.0.0.1:10022 - "GET /api/v1/runs/af32b4d2-fb3c-47d2-8114-c27cd09e1b5e/events HTTP/1.1" 200 OK
+INFO:     127.0.0.1:28495 - "GET /api/v1/runs/af32b4d2-fb3c-47d2-8114-c27cd09e1b5e/events HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63129 - "GET /api/v1/runs/af32b4d2-fb3c-47d2-8114-c27cd09e1b5e/events HTTP/1.1" 200 OK
+INFO:     127.0.0.1:26484 - "GET /api/v1/runs/af32b4d2-fb3c-47d2-8114-c27cd09e1b5e/events HTTP/1.1" 200 OK
+INFO:     127.0.0.1:9676 - "GET /api/v1/runs/af32b4d2-fb3c-47d2-8114-c27cd09e1b5e/events HTTP/1.1" 200 OK
+INFO:     127.0.0.1:8880 - "GET /api/v1/runs/af32b4d2-fb3c-47d2-8114-c27cd09e1b5e/events HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59160 - "GET /api/v1/runs/af32b4d2-fb3c-47d2-8114-c27cd09e1b5e/events HTTP/1.1" 200 OK

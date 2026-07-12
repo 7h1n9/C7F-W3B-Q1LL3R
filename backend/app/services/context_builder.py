@@ -8,7 +8,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.challenge import Challenge
 from app.models.run import Artifact, FlagCandidate, Hypothesis, Observation, SolveRun, ToolCall
 from app.models.skill import RunSkillSnapshot, Skill
+from app.services.run_diagnostics import run_diagnostics_service
 from app.services.solver_state import solver_state_service
+from app.services.skill_selection import specialist_skill_catalog
 from app.services.tool_permissions import effective_tools_for
 from app.tools.registry import load_tool_definitions
 
@@ -111,14 +113,10 @@ class ContextBuilder:
         permitted = await effective_tools_for(session, run, challenge)
         tool_schema = self._tool_schema(load_tool_definitions(), permitted)
         active_skill_ids = set((state.active_skill_ids_json if state else []) or [])
+        skill_recommendations = (state.skill_recommendations_json if state else []) or []
         active_snapshots = [item for item in snapshots if item.skill_id in active_skill_ids]
-        candidate_snapshots = [
-            item
-            for item in snapshots
-            if item.skill_id not in active_skill_ids
-            and skills.get(item.skill_id)
-            and skills[item.skill_id].skill_kind == "SPECIALIST"
-        ]
+        specialist_catalog = await specialist_skill_catalog(session, challenge.challenge_type, active_skill_ids)
+        snapshot_by_skill = {snapshot.skill_id: snapshot for snapshot in snapshots}
         active_skill_details = [
             {
                 "skill_id": snapshot.skill_id,
@@ -139,22 +137,48 @@ class ContextBuilder:
         ]
         candidate_skill_summaries = [
             {
-                "skill_id": snapshot.skill_id,
-                "name": snapshot.skill_name,
-                "version": snapshot.skill_version,
-                "skill_kind": skills[snapshot.skill_id].skill_kind,
-                "activation_mode": skills[snapshot.skill_id].activation_mode,
-                "triggers": skills[snapshot.skill_id].triggers,
-                "required_tools": skills[snapshot.skill_id].required_tools,
-                "recommended_tools": skills[snapshot.skill_id].recommended_tools,
-                "forbidden_tools": skills[snapshot.skill_id].forbidden_tools,
-                "ctf_phases": skills[snapshot.skill_id].ctf_phases,
+                "skill_id": skill.id,
+                "name": skill.name,
+                "display_name": skill.display_name,
+                "version": skill.version,
+                "skill_kind": skill.skill_kind,
+                "activation_mode": skill.activation_mode,
+                "triggers": skill.triggers,
+                "prerequisites": skill.prerequisites,
+                "required_tools": skill.required_tools,
+                "recommended_tools": skill.recommended_tools,
+                "forbidden_tools": skill.forbidden_tools,
+                "ctf_phases": skill.ctf_phases,
+                "snapshotted": skill.id in snapshot_by_skill,
+                "priority": snapshot_by_skill.get(skill.id).priority if skill.id in snapshot_by_skill else None,
             }
-            for snapshot in candidate_snapshots
-            if snapshot.skill_id in skills
+            for skill in specialist_catalog
         ]
         last_call = calls[0] if calls else None
         last_observation = observations[0] if observations else None
+        recent_runs = list(
+            (
+                await session.scalars(
+                    select(SolveRun)
+                    .where(SolveRun.challenge_id == challenge.id, SolveRun.id != run.id)
+                    .order_by(SolveRun.created_at.desc())
+                    .limit(3)
+                )
+            ).all()
+        )
+        recent_run_diagnostics = []
+        for recent_run in recent_runs:
+            diag = await run_diagnostics_service.analyze(session, recent_run)
+            recent_run_diagnostics.append(
+                {
+                    "run_id": recent_run.id,
+                    "engine_type": recent_run.engine_type,
+                    "status": recent_run.status,
+                    "diagnostic_tags": diag["diagnostic_tags"],
+                    "diagnostic_summary": diag["diagnostic_summary"],
+                    "anomalies": [item["code"] for item in diag["anomalies"]],
+                }
+            )
         context = {
             "Core Solver Prompt": CORE_PROMPT,
             "Role Snapshot": run.role_snapshot_json or {},
@@ -221,6 +245,8 @@ class ContextBuilder:
             "Available Tool Schemas": tool_schema,
             "Active Specialist Skills": active_skill_details,
             "Candidate Specialist Skill Summaries": candidate_skill_summaries,
+            "Skill Recommendations": skill_recommendations,
+            "Recent Run Diagnostics For This Challenge": recent_run_diagnostics,
             "Remaining Budget": {
                 "agent_steps": max(run.max_agent_steps - run.agent_step_count, 0),
                 "tool_calls": max(run.max_tool_calls - run.tool_call_count, 0),

@@ -48,6 +48,11 @@ class ChallengeInput(BaseModel):
 
 class ChallengeRead(ChallengeInput):
     id: str
+    run_count: int = 0
+    solved_run_count: int = 0
+    latest_run_status: str | None = None
+    latest_run_started_at: str | None = None
+    latest_run_engine_type: str | None = None
     created_at: str
     updated_at: str
     primary_attachment_id: str | None = None

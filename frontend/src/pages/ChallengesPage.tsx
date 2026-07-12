@@ -158,7 +158,19 @@ export function ChallengesPage() {
           loading={query.isLoading}
           locale={{ emptyText: <Empty description="尚未登记靶场题目" image={Empty.PRESENTED_IMAGE_SIMPLE} /> }}
           columns={[
-                        {
+            {
+              title: "题目",
+              dataIndex: "name",
+              render: (name: string, record: Challenge) => (
+                <Space direction="vertical" size={0}>
+                  <span>{name}</span>
+                  <span className="field-help">
+                    {record.challenge_type === "TRAFFIC_ANALYSIS" ? "流量分析题" : "Web 靶场题"}
+                  </span>
+                </Space>
+              ),
+            },
+            {
               title: "状态",
               dataIndex: "status",
               render: (status: string) => {
@@ -167,6 +179,23 @@ export function ChallengesPage() {
                 if (status === "DRAFT") return <Tag color="default">草稿</Tag>;
                 return <Tag>{status}</Tag>;
               },
+            },
+            { title: "任务数", dataIndex: "run_count", render: (value: number | undefined) => value ?? 0 },
+            { title: "已解出", dataIndex: "solved_run_count", render: (value: number | undefined) => value ?? 0 },
+            {
+              title: "最近任务",
+              render: (_: unknown, record: Challenge) =>
+                record.latest_run_status ? (
+                  <Space direction="vertical" size={0}>
+                    <span>{record.latest_run_status}</span>
+                    <span className="field-help">
+                      {record.latest_run_engine_type ?? "—"}
+                      {record.latest_run_started_at ? ` · ${new Date(record.latest_run_started_at).toLocaleString("zh-CN", { hour12: false })}` : ""}
+                    </span>
+                  </Space>
+                ) : (
+                  "—"
+                ),
             },
             {
               title: "操作",

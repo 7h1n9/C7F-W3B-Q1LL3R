@@ -5,7 +5,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.run import Hypothesis, SolveRun
-from app.models.skill import Skill
+from app.models.skill import RunSkillSnapshot, Skill
 from app.models.solver_state import SolverState
 
 
@@ -85,10 +85,51 @@ class SolverStateService:
         active_ids = set(state.active_skill_ids_json or [])
         if skill.id in active_ids:
             return False
+        snapshot = await session.scalar(
+            select(RunSkillSnapshot).where(
+                RunSkillSnapshot.run_id == run_id, RunSkillSnapshot.skill_id == skill.id
+            )
+        )
+        if snapshot is None:
+            snapshot = RunSkillSnapshot(
+                run_id=run_id,
+                skill_id=skill.id,
+                skill_name=skill.name,
+                skill_version=skill.version,
+                content_snapshot=skill.content_markdown,
+                allowed_tools_snapshot=skill.allowed_tools,
+                config_snapshot={},
+                priority=1000,
+            )
+            session.add(snapshot)
         active_ids.add(skill.id)
         state.active_skill_ids_json = sorted(active_ids)
         await session.commit()
         return True
+
+    async def deactivate_skill(self, session: AsyncSession, run_id: str, skill_id: str) -> bool:
+        state = await self.load(session, run_id)
+        if not state:
+            return False
+        skill = await session.get(Skill, skill_id)
+        if not skill or not skill.enabled:
+            return False
+        if skill.skill_kind in {"CORE", "METHODOLOGY"}:
+            return False
+        active_ids = set(state.active_skill_ids_json or [])
+        if skill.id not in active_ids:
+            return False
+        active_ids.remove(skill.id)
+        state.active_skill_ids_json = sorted(active_ids)
+        await session.commit()
+        return True
+
+    async def record_skill_recommendations(self, session: AsyncSession, run_id: str, entries: list[dict]) -> None:
+        state = await self.load(session, run_id)
+        if not state:
+            return
+        state.skill_recommendations_json = entries
+        await session.commit()
 
     async def record_fingerprint(
         self,

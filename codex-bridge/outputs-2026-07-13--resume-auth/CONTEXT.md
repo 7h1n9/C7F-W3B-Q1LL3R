@@ -1,0 +1,22 @@
+# Context
+
+- Workspace: `codex-bridge` Fastify service in the C7F-W3B-Q1LL3R monorepo.
+- Current root used in the sandbox: `C:\Users\CodexSandboxOffline\.codex\.sandbox\cwd\a6a560b6e0967f57`
+- Build status: `npm run build` succeeds.
+- Relevant source files:
+  - `src/server.ts`
+  - `src/codex-service.ts`
+  - `src/event-adapter.ts`
+  - `src/thread-store.ts`
+  - `src/types.ts`
+- Key findings so far:
+  - `/threads` validates presence of `run_id`, `workspace_path`, and `prompt`, but does not validate ownership or path scope.
+  - `CodexService.create()` stores a bridge-local UUID as `thread_id`, while the SDK's real thread id is only assigned after the first turn starts.
+  - `streamResume()` falls back to `this.codex!.resumeThread(threadId)` when the bridge-local id is not in memory.
+  - The SDK docs confirm that `resumeThread(id)` expects the real persisted thread id.
+  - `mapRun()` is currently unused outside the in-memory store.
+- Working hypothesis:
+  - Resume is only reliable for threads still resident in process memory; after a restart, the bridge-local `thread_id` cannot be resumed because the SDK thread id was never captured.
+- Runtime check:
+  - In mock mode, creating a thread and resuming it within the same `CodexService` instance works.
+  - Recreating the service and resuming the same returned `thread_id` fails with `THREAD_NOT_FOUND`.

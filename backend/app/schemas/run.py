@@ -16,8 +16,12 @@ class RunCreate(BaseModel):
 class RunRead(BaseModel):
     id: str
     challenge_id: str
+    challenge_name: str | None = None
+    challenge_type: str | None = None
+    target_summary: str | None = None
     engine_type: str
     model_config_id: str | None
+    model_name: str | None = None
     role_name: str | None
     role_version: str | None
     role_snapshot_json: dict
@@ -33,6 +37,9 @@ class RunRead(BaseModel):
     tool_call_count: int
     last_error_code: str | None
     last_error_message: str | None
+    active_skill_names: list[str] = Field(default_factory=list)
+    diagnostic_tags: list[str] = Field(default_factory=list)
+    diagnostic_summary: str | None = None
     started_at: str | None
     finished_at: str | None
     created_at: str

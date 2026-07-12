@@ -8,6 +8,8 @@ from app.core.config import get_settings
 from app.core.database import SessionLocal
 from app.core.exceptions import DomainError
 from app.engines import (
+    BridgeRateLimitError,
+    BridgeUnavailableError,
     CodexSdkEngine,
     MockSolveEngine,
     ModelRateLimitError,
@@ -18,8 +20,9 @@ from app.engines import (
 from app.models.challenge import Challenge
 from app.models.model_config import ModelConfig
 from app.models.run import Artifact, Observation, SolveRun, ToolCall
+from app.models.skill import RunSkillSnapshot, Skill
 from app.orchestration.state_machine import TERMINAL, RunStatus, transition
-from app.schemas.agent import FinishAction, ToolAction
+from app.schemas.agent import FinishAction, SkillAction, ToolAction
 from app.services.action_fingerprint import fingerprint_action
 from app.services.codex_materializer import codex_materializer
 from app.services.context_builder import context_builder
@@ -32,6 +35,7 @@ from app.services.progress_evaluator import progress_evaluator
 from app.services.reports import report_service
 from app.services.runner_client import runner_client
 from app.services.solver_state import solver_state_service
+from app.services.tool_permissions import effective_tools_for
 from app.tools.gateway import tool_gateway
 from app.tools.registry import load_tool_definitions
 
@@ -46,7 +50,11 @@ class SolveOrchestrator:
         if self.engine_factory:
             return self.engine_factory(run)
         if run.engine_type == "codex_sdk":
-            return CodexSdkEngine(get_settings().codex_bridge_url, run.workspace_path)
+            return CodexSdkEngine(
+                get_settings().codex_bridge_url,
+                run.workspace_path,
+                thread_id=run.codex_thread_id,
+            )
         if run.engine_type == "openai_compatible":
             config = (
                 await session.get(ModelConfig, run.model_config_id) if run.model_config_id else None
@@ -65,6 +73,265 @@ class SolveOrchestrator:
         await session.commit()
         await solver_state_service.sync_from_run(session, run)
         await event_service.append(session, run.id, "run.status_changed", {"status": run.status})
+
+    async def _resolve_skill(self, session, skill_id: str | None, skill_name: str | None) -> Skill | None:
+        if skill_id:
+            skill = await session.get(Skill, skill_id)
+            if skill:
+                return skill
+        if skill_name:
+            return await session.scalar(select(Skill).where(Skill.name == skill_name))
+        return None
+
+    async def _ensure_skill_snapshot(
+        self, session, run: SolveRun, skill: Skill, priority: int = 1000
+    ) -> bool:
+        snapshot = await session.scalar(
+            select(RunSkillSnapshot).where(
+                RunSkillSnapshot.run_id == run.id, RunSkillSnapshot.skill_id == skill.id
+            )
+        )
+        if snapshot:
+            return False
+        session.add(
+            RunSkillSnapshot(
+                run_id=run.id,
+                skill_id=skill.id,
+                skill_name=skill.name,
+                skill_version=skill.version,
+                content_snapshot=skill.content_markdown,
+                allowed_tools_snapshot=skill.allowed_tools,
+                config_snapshot={},
+                priority=priority,
+            )
+        )
+        await session.commit()
+        return True
+
+    async def _handle_skill_action(
+        self,
+        session,
+        run: SolveRun,
+        challenge: Challenge,
+        action: SkillAction,
+    ) -> bool:
+        skill = await self._resolve_skill(session, action.skill_id, action.skill_name)
+        if not skill:
+            await event_service.append(
+                session,
+                run.id,
+                "skill.activation_rejected",
+                {
+                    "skill_id": action.skill_id,
+                    "skill_name": action.skill_name,
+                    "operation": action.operation,
+                    "error_code": "SKILL_NOT_FOUND",
+                    "reason": "Skill not found.",
+                },
+            )
+            await solver_state_service.record_rejected_path(
+                session,
+                run.id,
+                {
+                    "source": "skill_action",
+                    "operation": action.operation,
+                    "error_code": "SKILL_NOT_FOUND",
+                    "skill_id": action.skill_id,
+                    "skill_name": action.skill_name,
+                },
+            )
+            return False
+        active_state = await solver_state_service.load(session, run.id)
+        active_ids = set(active_state.active_skill_ids_json or []) if active_state else set()
+        active_skill_rows = (
+            list((await session.scalars(select(Skill).where(Skill.id.in_(active_ids)))).all())
+            if active_ids
+            else []
+        )
+        active_skill_names = {item.name for item in active_skill_rows} | {
+            item.display_name for item in active_skill_rows
+        } | active_ids
+        if action.operation == "deactivate":
+            if skill.skill_kind in {"CORE", "METHODOLOGY"}:
+                await event_service.append(
+                    session,
+                    run.id,
+                    "skill.activation_rejected",
+                    {
+                        "skill_id": skill.id,
+                        "skill_name": skill.name,
+                        "operation": action.operation,
+                        "error_code": "SKILL_NOT_DEACTIVATABLE",
+                        "reason": "CORE and methodology skills cannot be deactivated.",
+                    },
+                )
+                return False
+            changed = await solver_state_service.deactivate_skill(session, run.id, skill.id)
+            if changed:
+                await event_service.append(
+                    session,
+                    run.id,
+                    "skill.deactivated",
+                    {
+                        "skill_id": skill.id,
+                        "skill_name": skill.name,
+                        "source": "action",
+                        "phase": action.phase,
+                    },
+                )
+                await solver_state_service.record_progress(session, run.id, True)
+                await self._transition(session, run, RunStatus.PLANNING)
+                return True
+            await event_service.append(
+                session,
+                run.id,
+                "skill.activation_rejected",
+                {
+                    "skill_id": skill.id,
+                    "skill_name": skill.name,
+                    "operation": action.operation,
+                    "error_code": "SKILL_ALREADY_INACTIVE",
+                    "reason": "Skill is not active.",
+                },
+            )
+            return False
+        if skill.skill_kind == "SPECIALIST" and challenge.challenge_type not in (skill.challenge_types or []):
+            await event_service.append(
+                session,
+                run.id,
+                "skill.activation_rejected",
+                {
+                    "skill_id": skill.id,
+                    "skill_name": skill.name,
+                    "operation": action.operation,
+                    "error_code": "SKILL_NOT_APPLICABLE",
+                    "reason": "Skill is not applicable to this challenge type.",
+                },
+            )
+            return False
+        if skill.ctf_phases and action.phase not in skill.ctf_phases:
+            await event_service.append(
+                session,
+                run.id,
+                "skill.activation_rejected",
+                {
+                    "skill_id": skill.id,
+                    "skill_name": skill.name,
+                    "operation": action.operation,
+                    "error_code": "SKILL_PHASE_NOT_APPLICABLE",
+                    "reason": "Skill is not applicable to the current phase.",
+                },
+            )
+            return False
+        prerequisites = [str(item).lower() for item in (skill.prerequisites or [])]
+        if prerequisites and not all(
+            any(required in candidate for candidate in active_skill_names) for required in prerequisites
+        ):
+            await event_service.append(
+                session,
+                run.id,
+                "skill.activation_rejected",
+                {
+                    "skill_id": skill.id,
+                    "skill_name": skill.name,
+                    "operation": action.operation,
+                    "error_code": "SKILL_PREREQUISITE_NOT_MET",
+                    "reason": "Required prerequisite skills are not active.",
+                },
+            )
+            return False
+        permitted_tools = await effective_tools_for(session, run, challenge)
+        if skill.required_tools and not set(skill.required_tools).issubset(permitted_tools):
+            await event_service.append(
+                session,
+                run.id,
+                "skill.activation_rejected",
+                {
+                    "skill_id": skill.id,
+                    "skill_name": skill.name,
+                    "operation": action.operation,
+                    "error_code": "SKILL_REQUIRED_TOOL_UNAVAILABLE",
+                    "reason": "Required tools are not available for this run.",
+                },
+            )
+            return False
+        if action.operation == "inspect":
+            await event_service.append(
+                session,
+                run.id,
+                "skill.requested",
+                {
+                    "skill_id": skill.id,
+                    "skill_name": skill.name,
+                    "operation": action.operation,
+                    "phase": action.phase,
+                    "reason": action.reason,
+                    "supporting_evidence": action.supporting_evidence,
+                },
+            )
+            await solver_state_service.record_progress(session, run.id, True)
+            await self._transition(session, run, RunStatus.PLANNING)
+            return True
+        if skill.id in active_ids:
+            await event_service.append(
+                session,
+                run.id,
+                "skill.activation_rejected",
+                {
+                    "skill_id": skill.id,
+                    "skill_name": skill.name,
+                    "operation": action.operation,
+                    "error_code": "SKILL_ALREADY_ACTIVE",
+                    "reason": "Skill is already active.",
+                },
+            )
+            return False
+        snapshot_created = await self._ensure_skill_snapshot(session, run, skill)
+        activated = await solver_state_service.activate_skill(session, run.id, skill.id)
+        if activated:
+            await event_service.append(
+                session,
+                run.id,
+                "skill.requested",
+                {
+                    "skill_id": skill.id,
+                    "skill_name": skill.name,
+                    "operation": action.operation,
+                    "phase": action.phase,
+                    "reason": action.reason,
+                    "supporting_evidence": action.supporting_evidence,
+                    "expected_use": action.expected_use,
+                },
+            )
+            if snapshot_created:
+                await event_service.append(
+                    session,
+                    run.id,
+                    "skill.snapshot_created",
+                    {"skill_id": skill.id, "skill_name": skill.name, "source": "action"},
+                )
+            await event_service.append(
+                session,
+                run.id,
+                "skill.activated",
+                {"skill_id": skill.id, "skill_name": skill.name, "source": "action"},
+            )
+            await solver_state_service.record_progress(session, run.id, True)
+            await self._transition(session, run, RunStatus.PLANNING)
+            return True
+        await event_service.append(
+            session,
+            run.id,
+            "skill.activation_rejected",
+            {
+                "skill_id": skill.id,
+                "skill_name": skill.name,
+                "operation": action.operation,
+                "error_code": "SKILL_DISABLED_FOR_RUN",
+                "reason": "Skill could not be activated for this run.",
+            },
+        )
+        return False
 
     async def start(self, run_id: str, user_message: str | None = None) -> None:
         task = asyncio.current_task()
@@ -101,8 +368,12 @@ class SolveOrchestrator:
                 if "run" in locals() and RunStatus(run.status) not in TERMINAL:
                     if isinstance(error, ModelRateLimitError):
                         code = "MODEL_RATE_LIMITED"
+                    elif isinstance(error, BridgeRateLimitError):
+                        code = "CODEX_BRIDGE_RATE_LIMITED"
                     elif isinstance(error, ModelUnavailableError):
                         code = "MODEL_UNAVAILABLE"
+                    elif isinstance(error, BridgeUnavailableError):
+                        code = "CODEX_BRIDGE_UNAVAILABLE"
                     else:
                         code = "ENGINE_ERROR"
                     run.last_error_code, run.last_error_message = code, str(error)[:4000]
@@ -158,15 +429,47 @@ class SolveOrchestrator:
                     "phase": getattr(action, "phase", None),
                     "objective": getattr(action, "objective", None),
                     "hypothesis": getattr(action, "hypothesis", None),
-                    "reason": action.reason if isinstance(action, ToolAction) else action.summary,
+                    "reason": action.reason
+                    if isinstance(action, (ToolAction, SkillAction))
+                    else action.summary,
                     "expected_evidence": getattr(action, "expected_evidence", None),
                     "success_condition": getattr(action, "success_condition", None),
                     "failure_pivot": getattr(action, "failure_pivot", None),
                     "retry_reason": getattr(action, "retry_reason", None),
                     "activate_skill": getattr(action, "activate_skill", None),
+                    "operation": getattr(action, "operation", None),
+                    "skill_id": getattr(action, "skill_id", None),
+                    "skill_name": getattr(action, "skill_name", None),
+                    "supporting_evidence": getattr(action, "supporting_evidence", None),
+                    "expected_use": getattr(action, "expected_use", None),
                 },
             )
             hypothesis_item = None
+            if isinstance(action, SkillAction):
+                handled = await self._handle_skill_action(session, run, challenge, action)
+                if not handled:
+                    no_progress_count = await solver_state_service.record_progress(
+                        session, run.id, False
+                    )
+                    await event_service.append(
+                        session,
+                        run.id,
+                        "agent.no_progress",
+                        {
+                            "skill_id": action.skill_id,
+                            "skill_name": action.skill_name,
+                            "operation": action.operation,
+                            "no_progress_count": no_progress_count,
+                        },
+                    )
+                    if no_progress_count >= 2:
+                        await event_service.append(
+                            session,
+                            run.id,
+                            "agent.replan_required",
+                            {"reason": "Repeated no-progress actions"},
+                        )
+                continue
             if isinstance(action, ToolAction):
                 hypothesis_item, created = await hypothesis_service.upsert_from_action(
                     session,
@@ -351,7 +654,7 @@ class SolveOrchestrator:
                         .where(Artifact.tool_call_id == call.id)
                         .order_by(Artifact.created_at.desc())
                     )
-                progress = {"made_progress": False, "no_progress_count": 0, "activated_skill_ids": []}
+                progress = {"made_progress": False, "no_progress_count": 0, "recommended_skills": []}
                 if call and observation and artifact:
                     progress = await progress_evaluator.evaluate(
                         session,
@@ -380,12 +683,18 @@ class SolveOrchestrator:
                         evidence={"tool_name": action.tool_name, "status": result.get("status")},
                     )
                 if progress["made_progress"]:
-                    for skill_id in progress["activated_skill_ids"]:
+                    for recommendation in progress["recommended_skills"]:
                         await event_service.append(
                             session,
                             run.id,
-                            "skill.activated",
-                            {"skill_id": skill_id, "source": "observation"},
+                            "skill.recommended",
+                            {
+                                "skill_id": recommendation["skill_id"],
+                                "skill_name": recommendation["skill_name"],
+                                "matched_triggers": recommendation["matched_triggers"],
+                                "confidence": recommendation["confidence"],
+                                "source": "observation",
+                            },
                         )
                     await event_service.append(
                         session,
@@ -394,7 +703,7 @@ class SolveOrchestrator:
                         {
                             "tool": action.tool_name,
                             "no_progress_count": progress["no_progress_count"],
-                            "activated_skill_ids": progress["activated_skill_ids"],
+                            "recommended_skills": progress["recommended_skills"],
                         },
                     )
                 else:
@@ -520,18 +829,59 @@ class SolveOrchestrator:
             await event_service.append(session, run.id, "run.started", {})
             iterator = engine.start(run.id)
         elif user_message:
+            if run.status == RunStatus.WAITING_USER:
+                await self._transition(session, run, RunStatus.PLANNING)
             iterator = engine.continue_run(run.id, user_message)
         else:
+            if run.status == RunStatus.WAITING_USER:
+                await self._transition(session, run, RunStatus.PLANNING)
             iterator = engine.resume(run.id)
-        async for item in iterator:
-            thread_id = item.payload.get("thread_id")
-            if isinstance(thread_id, str):
-                run.codex_thread_id = thread_id
-                await session.commit()
-            if item.status and item.status != run.status:
-                await self._transition(session, run, RunStatus(item.status))
-            await event_service.append(session, run.id, item.event_type, item.payload)
-        await codex_materializer.sync(session, run)
+        auto_turns = 0
+        max_auto_turns = max(1, run.max_agent_steps)
+        auto_started = monotonic()
+        while True:
+            auto_turns += 1
+            async for item in iterator:
+                thread_id = item.payload.get("thread_id")
+                if isinstance(thread_id, str):
+                    run.codex_thread_id = thread_id
+                    await session.commit()
+                if item.status and item.status != run.status:
+                    await self._transition(session, run, RunStatus(item.status))
+                await event_service.append(session, run.id, item.event_type, item.payload)
+            await codex_materializer.sync(session, run)
+            current_status = RunStatus(run.status)
+            if current_status in TERMINAL or current_status == RunStatus.WAITING_USER:
+                return
+            if run.engine_type != "codex_sdk":
+                return
+            if auto_turns >= max_auto_turns:
+                await self._transition(session, run, RunStatus.WAITING_USER)
+                await event_service.append(
+                    session,
+                    run.id,
+                    "agent.message",
+                    {
+                        "message": "自动续跑已达到本任务的轮次上限，请补充信息后继续。",
+                        "requires_user_confirmation": True,
+                        "reason": "AUTO_TURN_LIMIT",
+                    },
+                )
+                return
+            if monotonic() - auto_started >= run.max_runtime_seconds:
+                await self._transition(session, run, RunStatus.WAITING_USER)
+                await event_service.append(
+                    session,
+                    run.id,
+                    "agent.message",
+                    {
+                        "message": "自动续跑已达到本任务的运行时长上限，请补充信息后继续。",
+                        "requires_user_confirmation": True,
+                        "reason": "AUTO_RUNTIME_LIMIT",
+                    },
+                )
+                return
+            iterator = engine.resume(run.id)
 
     async def continue_with_message(self, run_id: str, message: str) -> None:
         await self.start(run_id, message)
