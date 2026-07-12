@@ -1,9 +1,11 @@
 name: web-ctf-solver
 display_name: Web CTF Solver
+version: 1
 description: Solver for explicitly authorized CTF Web challenges.
+challenge_types: [WEB_TARGET]
 enabled: true
 tools: [http_request, file_read, file_search, python_run]
-skills: [demo-web-analysis]
+skills: [ctf-solver-core, web-ctf-methodology]
 limits:
   max_tool_calls: 40
   max_runtime_seconds: 900

@@ -11,6 +11,7 @@ async def snapshot_run_skills(
     session: AsyncSession,
     run_id: str,
     challenge_id: str,
+    challenge_type: str,
     model_config_id: str | None,
     selected_ids: list[str],
     disabled_ids: list[str],
@@ -62,6 +63,18 @@ async def snapshot_run_skills(
         )
     for skill_id in disabled_ids:
         candidates.pop(skill_id, None)
+    auto_skills = [
+        skill
+        for skill in (
+            await session.scalars(
+                select(Skill).where(Skill.enabled, Skill.skill_kind.in_(["CORE", "METHODOLOGY"]))
+            )
+        ).all()
+        if (skill.skill_kind == "CORE" or challenge_type in (skill.challenge_types or []))
+        and skill.id not in disabled_ids
+    ]
+    for skill in auto_skills:
+        candidates.setdefault(skill.id, (0, {}, skill))
     snapshots, length = [], 0
     for skill_id, (priority, config, skill) in sorted(
         candidates.items(), key=lambda row: (row[1][0], row[1][2].name)

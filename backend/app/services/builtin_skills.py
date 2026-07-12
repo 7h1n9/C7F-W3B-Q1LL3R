@@ -1,4 +1,5 @@
 import hashlib
+import re
 from pathlib import Path
 
 import yaml
@@ -28,22 +29,92 @@ class BuiltinSkillSyncService:
             raise ValueError("Skill content exceeds the configured length limit")
         return metadata, content.strip()
 
+    @staticmethod
+    def _challenge_tools(challenge_types: list[str]) -> list[str]:
+        if challenge_types == ["TRAFFIC_ANALYSIS"]:
+            return ["file_read", "file_search", "python_run", "pcap_metadata", "pcap_protocols", "pcap_query"]
+        return ["http_request", "file_read", "file_search", "python_run"]
+
+    @staticmethod
+    def _infer_kind(name: str, metadata: dict) -> str:
+        if metadata.get("skill_kind") in {"CORE", "METHODOLOGY", "SPECIALIST"}:
+            return str(metadata["skill_kind"])
+        if name == "ctf-solver-core":
+            return "CORE"
+        if name.endswith("-methodology"):
+            return "METHODOLOGY"
+        return "SPECIALIST"
+
+    @staticmethod
+    def _infer_activation_mode(skill_kind: str, metadata: dict) -> str:
+        value = metadata.get("activation_mode")
+        if value in {"ALWAYS", "AUTO", "MANUAL"}:
+            return str(value)
+        return "ALWAYS" if skill_kind == "CORE" else "AUTO" if skill_kind == "METHODOLOGY" else "MANUAL"
+
+    @staticmethod
+    def _infer_triggers(name: str, description: str, metadata: dict, skill_kind: str) -> list[str]:
+        values = metadata.get("triggers") or []
+        if values:
+            return sorted({str(item).strip() for item in values if str(item).strip()})
+        tokens = [token for token in re.split(r"[-_\s]+", f"{name} {description}") if token]
+        if skill_kind == "CORE":
+            return []
+        if skill_kind == "METHODOLOGY":
+            return sorted({token.lower() for token in tokens[:10]})
+        return sorted({token.lower() for token in tokens[:6]})
+
+    @staticmethod
+    def _default_phases(challenge_types: list[str]) -> list[str]:
+        if challenge_types == ["TRAFFIC_ANALYSIS"]:
+            return ["BASELINE", "MAPPING", "TESTING", "FLAG_SEARCH", "FLAG_VERIFICATION", "REPORTING"]
+        return [
+            "INTAKE",
+            "BASELINE",
+            "MAPPING",
+            "HYPOTHESIS",
+            "TESTING",
+            "CHAINING",
+            "FLAG_SEARCH",
+            "FLAG_VERIFICATION",
+            "REPORTING",
+        ]
+
     async def sync(self, session: AsyncSession) -> list[str]:
         results: list[str] = []
         if not self.root.exists():
             return results
         for path in sorted(self.root.glob("*/SKILL.md")):
-            relative = path.relative_to(self.root.parent.parent).as_posix()
+            try:
+                relative = path.relative_to(self.root.parent.parent).as_posix()
+            except ValueError:
+                relative = path.relative_to(self.root).as_posix()
             try:
                 metadata, content = self._parse(path)
+                challenge_types = list(metadata.get("challenge_types") or ["WEB_TARGET"])
+                skill_kind = self._infer_kind(path.parent.name, metadata)
+                activation_mode = self._infer_activation_mode(skill_kind, metadata)
+                required_tools = list(metadata.get("required_tools") or self._challenge_tools(challenge_types))
+                recommended_tools = list(metadata.get("recommended_tools") or required_tools)
+                forbidden_tools = list(metadata.get("forbidden_tools") or [])
+                triggers = self._infer_triggers(path.parent.name, str(metadata.get("description") or ""), metadata, skill_kind)
+                ctf_phases = list(metadata.get("ctf_phases") or self._default_phases(challenge_types))
                 payload = SkillWrite(
                     name=str(metadata.get("name") or path.parent.name),
                     display_name=str(
                         metadata.get("display_name") or metadata.get("name") or path.parent.name
                     ),
                     description=str(metadata.get("description") or ""),
-                    challenge_types=metadata.get("challenge_types") or ["WEB_TARGET"],
-                    allowed_tools=metadata.get("allowed_tools") or [],
+                    skill_kind=skill_kind,
+                    activation_mode=activation_mode,
+                    triggers=triggers,
+                    prerequisites=list(metadata.get("prerequisites") or []),
+                    required_tools=required_tools,
+                    recommended_tools=recommended_tools,
+                    forbidden_tools=forbidden_tools,
+                    ctf_phases=ctf_phases,
+                    challenge_types=challenge_types,
+                    allowed_tools=metadata.get("allowed_tools") or required_tools,
                     risk_level=str(metadata.get("risk_level") or "low"),
                     content_markdown=content,
                 )

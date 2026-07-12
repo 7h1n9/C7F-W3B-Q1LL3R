@@ -12,17 +12,47 @@ KNOWN_TOOLS = {
     "pcap_query",
 }
 CHALLENGE_TYPES = {"WEB_TARGET", "TRAFFIC_ANALYSIS"}
+SKILL_KINDS = {"CORE", "METHODOLOGY", "SPECIALIST"}
+ACTIVATION_MODES = {"ALWAYS", "AUTO", "MANUAL"}
 
 
 class SkillWrite(BaseModel):
     name: str = Field(min_length=2, max_length=120, pattern=r"^[a-z0-9][a-z0-9-]*$")
     display_name: str = Field(min_length=1, max_length=200)
     description: str = Field(default="", max_length=4000)
+    skill_kind: str = Field(default="SPECIALIST", pattern=r"^(CORE|METHODOLOGY|SPECIALIST)$")
+    activation_mode: str = Field(default="MANUAL", pattern=r"^(ALWAYS|AUTO|MANUAL)$")
+    triggers: list[str] = Field(default_factory=list)
+    prerequisites: list[str] = Field(default_factory=list)
+    required_tools: list[str] = Field(default_factory=list)
+    recommended_tools: list[str] = Field(default_factory=list)
+    forbidden_tools: list[str] = Field(default_factory=list)
+    ctf_phases: list[str] = Field(default_factory=list)
     challenge_types: list[str] = Field(default_factory=lambda: ["WEB_TARGET"])
     content_markdown: str = Field(min_length=1, max_length=24000)
     allowed_tools: list[str] = Field(default_factory=list)
     risk_level: str = Field(default="low", pattern="^(low|medium|high)$")
     enabled: bool = True
+
+    @field_validator("skill_kind")
+    @classmethod
+    def validate_kind(cls, value: str) -> str:
+        if value not in SKILL_KINDS:
+            raise ValueError("skill_kind contains an unsupported value")
+        return value
+
+    @field_validator("activation_mode")
+    @classmethod
+    def validate_mode(cls, value: str) -> str:
+        if value not in ACTIVATION_MODES:
+            raise ValueError("activation_mode contains an unsupported value")
+        return value
+
+    @field_validator("triggers", "prerequisites", "required_tools", "recommended_tools", "forbidden_tools", "ctf_phases")
+    @classmethod
+    def validate_string_lists(cls, value: list[str]) -> list[str]:
+        clean = sorted({str(item).strip() for item in value if str(item).strip()})
+        return clean
 
     @field_validator("challenge_types")
     @classmethod

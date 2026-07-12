@@ -17,15 +17,21 @@ from app.engines import (
 )
 from app.models.challenge import Challenge
 from app.models.model_config import ModelConfig
-from app.models.run import SolveRun
+from app.models.run import Artifact, Observation, SolveRun, ToolCall
 from app.orchestration.state_machine import TERMINAL, RunStatus, transition
 from app.schemas.agent import FinishAction, ToolAction
+from app.services.action_fingerprint import fingerprint_action
+from app.services.codex_materializer import codex_materializer
 from app.services.context_builder import context_builder
 from app.services.crypto import decrypt_api_key
 from app.services.events import event_service
+from app.services.finish_gate import finish_gate
 from app.services.flags import flag_service
+from app.services.hypotheses import hypothesis_service
+from app.services.progress_evaluator import progress_evaluator
 from app.services.reports import report_service
 from app.services.runner_client import runner_client
+from app.services.solver_state import solver_state_service
 from app.tools.gateway import tool_gateway
 from app.tools.registry import load_tool_definitions
 
@@ -57,6 +63,7 @@ class SolveOrchestrator:
             return
         transition(run, target)
         await session.commit()
+        await solver_state_service.sync_from_run(session, run)
         await event_service.append(session, run.id, "run.status_changed", {"status": run.status})
 
     async def start(self, run_id: str, user_message: str | None = None) -> None:
@@ -148,9 +155,44 @@ class SolveOrchestrator:
                 "agent.action_requested",
                 {
                     "type": action.type,
+                    "phase": getattr(action, "phase", None),
+                    "objective": getattr(action, "objective", None),
+                    "hypothesis": getattr(action, "hypothesis", None),
                     "reason": action.reason if isinstance(action, ToolAction) else action.summary,
+                    "expected_evidence": getattr(action, "expected_evidence", None),
+                    "success_condition": getattr(action, "success_condition", None),
+                    "failure_pivot": getattr(action, "failure_pivot", None),
+                    "retry_reason": getattr(action, "retry_reason", None),
+                    "activate_skill": getattr(action, "activate_skill", None),
                 },
             )
+            hypothesis_item = None
+            if isinstance(action, ToolAction):
+                hypothesis_item, created = await hypothesis_service.upsert_from_action(
+                    session,
+                    run.id,
+                    phase=getattr(action, "phase", None),
+                    objective=getattr(action, "objective", None),
+                    hypothesis_text=getattr(action, "hypothesis", None),
+                    evidence={
+                        "expected_evidence": getattr(action, "expected_evidence", None),
+                        "success_condition": getattr(action, "success_condition", None),
+                        "failure_pivot": getattr(action, "failure_pivot", None),
+                        "retry_reason": getattr(action, "retry_reason", None),
+                        "tool_name": action.tool_name,
+                    },
+                )
+                await event_service.append(
+                    session,
+                    run.id,
+                    "agent.hypothesis_created" if created else "agent.hypothesis_updated",
+                    {
+                        "hypothesis_id": hypothesis_item.id,
+                        "title": hypothesis_item.title,
+                        "status": hypothesis_item.status,
+                        "confidence": hypothesis_item.confidence,
+                    },
+                )
             if isinstance(action, ToolAction):
                 if action.tool_name not in load_tool_definitions():
                     await event_service.append(
@@ -159,13 +201,85 @@ class SolveOrchestrator:
                         "agent.action_rejected",
                         {"tool": action.tool_name, "code": "TOOL_NOT_AVAILABLE"},
                     )
+                    await solver_state_service.record_rejected_path(
+                        session,
+                        run.id,
+                        {"tool": action.tool_name, "code": "TOOL_NOT_AVAILABLE"},
+                    )
+                    no_progress_count = await solver_state_service.record_progress(
+                        session, run.id, False
+                    )
+                    await event_service.append(
+                        session,
+                        run.id,
+                        "agent.no_progress",
+                        {"tool": action.tool_name, "no_progress_count": no_progress_count},
+                    )
                     continue
+                fingerprint = fingerprint_action(action.tool_name, action.arguments)
+                state = await solver_state_service.load(session, run.id)
+                fingerprint_state = (state.action_fingerprints_json if state else {}).get(fingerprint)
+                if fingerprint_state and not action.retry_reason:
+                    await event_service.append(
+                        session,
+                        run.id,
+                        "agent.action_rejected",
+                        {"tool": action.tool_name, "code": "DUPLICATE_ACTION"},
+                    )
+                    await solver_state_service.record_rejected_path(
+                        session,
+                        run.id,
+                        {
+                            "tool": action.tool_name,
+                            "fingerprint": fingerprint,
+                            "reason": "Duplicate action without retry reason",
+                        },
+                    )
+                    no_progress_count = await solver_state_service.record_progress(
+                        session, run.id, False
+                    )
+                    await event_service.append(
+                        session,
+                        run.id,
+                        "agent.no_progress",
+                        {"tool": action.tool_name, "no_progress_count": no_progress_count},
+                    )
+                    if no_progress_count >= 2:
+                        await event_service.append(
+                            session,
+                            run.id,
+                            "agent.replan_required",
+                            {"reason": "Repeated no-progress actions"},
+                        )
+                    continue
+                if action.activate_skill:
+                    if await solver_state_service.activate_skill(session, run.id, action.activate_skill):
+                        await event_service.append(
+                            session,
+                            run.id,
+                            "skill.activated",
+                            {"skill_id": action.activate_skill, "source": "action"},
+                        )
                 if run.tool_call_count >= run.max_tool_calls:
                     await event_service.append(
                         session,
                         run.id,
                         "agent.action_rejected",
                         {"tool": action.tool_name, "code": "MAX_TOOL_CALLS"},
+                    )
+                    await solver_state_service.record_rejected_path(
+                        session,
+                        run.id,
+                        {"tool": action.tool_name, "code": "MAX_TOOL_CALLS"},
+                    )
+                    no_progress_count = await solver_state_service.record_progress(
+                        session, run.id, False
+                    )
+                    await event_service.append(
+                        session,
+                        run.id,
+                        "agent.no_progress",
+                        {"tool": action.tool_name, "no_progress_count": no_progress_count},
                     )
                     break
                 await self._transition(session, run, RunStatus.EXECUTING)
@@ -182,14 +296,130 @@ class SolveOrchestrator:
                         "agent.action_rejected",
                         {"tool": action.tool_name, "code": error.code},
                     )
+                    await solver_state_service.record_rejected_path(
+                        session,
+                        run.id,
+                        {
+                            "tool": action.tool_name,
+                            "fingerprint": fingerprint,
+                            "reason": error.message,
+                            "code": error.code,
+                        },
+                    )
+                    no_progress_count = await solver_state_service.record_progress(
+                        session, run.id, False
+                    )
+                    await event_service.append(
+                        session,
+                        run.id,
+                        "agent.no_progress",
+                        {"tool": action.tool_name, "no_progress_count": no_progress_count},
+                    )
+                    await solver_state_service.record_fingerprint(
+                        session,
+                        run.id,
+                        fingerprint,
+                        tool_name=action.tool_name,
+                        arguments=action.arguments,
+                        status="REJECTED",
+                        retry_reason=action.retry_reason,
+                    )
+                    if no_progress_count >= 2:
+                        await event_service.append(
+                            session,
+                            run.id,
+                            "agent.replan_required",
+                            {"reason": "Repeated no-progress actions"},
+                        )
                     await self._transition(session, run, RunStatus.EVALUATING)
                     continue
+                call = await session.scalar(
+                    select(ToolCall)
+                    .where(ToolCall.run_id == run.id, ToolCall.tool_name == action.tool_name)
+                    .order_by(ToolCall.created_at.desc())
+                )
+                observation = None
+                artifact = None
+                if call:
+                    observation = await session.scalar(
+                        select(Observation)
+                        .where(Observation.tool_call_id == call.id)
+                        .order_by(Observation.created_at.desc())
+                    )
+                    artifact = await session.scalar(
+                        select(Artifact)
+                        .where(Artifact.tool_call_id == call.id)
+                        .order_by(Artifact.created_at.desc())
+                    )
+                progress = {"made_progress": False, "no_progress_count": 0, "activated_skill_ids": []}
+                if call and observation and artifact:
+                    progress = await progress_evaluator.evaluate(
+                        session,
+                        run,
+                        challenge,
+                        action.tool_name,
+                        result,
+                        observation,
+                        artifact,
+                    )
+                await solver_state_service.record_fingerprint(
+                    session,
+                    run.id,
+                    fingerprint,
+                    tool_name=action.tool_name,
+                    arguments=action.arguments,
+                    status=str(result.get("status") or "UNKNOWN"),
+                    retry_reason=action.retry_reason,
+                )
+                if hypothesis_item:
+                    await hypothesis_service.mark_result(
+                        session,
+                        hypothesis_item.id,
+                        result_status=str(result.get("status") or "UNKNOWN"),
+                        observation=observation.facts_json if observation else None,
+                        evidence={"tool_name": action.tool_name, "status": result.get("status")},
+                    )
+                if progress["made_progress"]:
+                    for skill_id in progress["activated_skill_ids"]:
+                        await event_service.append(
+                            session,
+                            run.id,
+                            "skill.activated",
+                            {"skill_id": skill_id, "source": "observation"},
+                        )
+                    await event_service.append(
+                        session,
+                        run.id,
+                        "agent.progress_detected",
+                        {
+                            "tool": action.tool_name,
+                            "no_progress_count": progress["no_progress_count"],
+                            "activated_skill_ids": progress["activated_skill_ids"],
+                        },
+                    )
+                else:
+                    await event_service.append(
+                        session,
+                        run.id,
+                        "agent.no_progress",
+                        {
+                            "tool": action.tool_name,
+                            "no_progress_count": progress["no_progress_count"],
+                        },
+                    )
                 await event_service.append(
                     session,
                     run.id,
                     "agent.action_completed",
                     {"type": "tool", "tool": action.tool_name, "status": result.get("status")},
                 )
+                if progress["no_progress_count"] >= 2:
+                    await event_service.append(
+                        session,
+                        run.id,
+                        "agent.replan_required",
+                        {"reason": "Repeated no-progress actions"},
+                    )
                 if result.get("status") == "COMPLETED":
                     consecutive_runner_failures = 0
                     last_runner_failure = None
@@ -217,8 +447,10 @@ class SolveOrchestrator:
                         return
                 await self._transition(session, run, RunStatus.EVALUATING)
                 continue
-            await self._finish(session, run, challenge, action)
-            return
+            finished = await self._finish(session, run, challenge, action)
+            if finished:
+                return
+            continue
         if RunStatus(run.status) not in TERMINAL:
             await self._transition(session, run, RunStatus.REPORTING)
             await report_service.generate(
@@ -228,7 +460,7 @@ class SolveOrchestrator:
 
     async def _finish(
         self, session, run: SolveRun, challenge: Challenge, action: FinishAction
-    ) -> None:
+    ) -> bool:
         if action.result == "waiting_user":
             await self._transition(session, run, RunStatus.WAITING_USER)
             await event_service.append(
@@ -237,11 +469,28 @@ class SolveOrchestrator:
                 "agent.action_completed",
                 {"type": "finish", "result": "waiting_user"},
             )
-            return
+            return True
         solved = False
         if action.flag_candidate:
             await self._transition(session, run, RunStatus.VERIFYING_FLAG)
             solved = await flag_service.verify(session, run, challenge, action.flag_candidate)
+        allowed, code, message = await finish_gate.evaluate(
+            session, run, challenge, candidate_verified=solved
+        )
+        if not allowed:
+            await event_service.append(
+                session,
+                run.id,
+                "agent.action_rejected",
+                {"type": "finish", "code": code, "message": message},
+            )
+            await solver_state_service.record_rejected_path(
+                session,
+                run.id,
+                {"source": "finish_gate", "code": code, "message": message},
+            )
+            await self._transition(session, run, RunStatus.PLANNING)
+            return False
         await self._transition(session, run, RunStatus.REPORTING)
         result = "solved" if action.result == "solved" and solved else "unsolved"
         await report_service.generate(
@@ -261,6 +510,7 @@ class SolveOrchestrator:
             run,
             RunStatus.COMPLETED_SOLVED if result == "solved" else RunStatus.COMPLETED_UNSOLVED,
         )
+        return True
 
     async def _run_event_engine(
         self, session, run: SolveRun, engine: SolveEngine, user_message: str | None
@@ -281,6 +531,7 @@ class SolveOrchestrator:
             if item.status and item.status != run.status:
                 await self._transition(session, run, RunStatus(item.status))
             await event_service.append(session, run.id, item.event_type, item.payload)
+        await codex_materializer.sync(session, run)
 
     async def continue_with_message(self, run_id: str, message: str) -> None:
         await self.start(run_id, message)

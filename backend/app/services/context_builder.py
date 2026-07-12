@@ -1,19 +1,52 @@
 import json
+from datetime import UTC, datetime
+from pathlib import Path
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.challenge import Challenge
-from app.models.run import Artifact, Hypothesis, Observation, SolveRun, ToolCall
-from app.models.skill import RunSkillSnapshot
-from app.services.skill_selection import allowed_tools_for
+from app.models.run import Artifact, FlagCandidate, Hypothesis, Observation, SolveRun, ToolCall
+from app.models.skill import RunSkillSnapshot, Skill
+from app.services.solver_state import solver_state_service
+from app.services.tool_permissions import effective_tools_for
 from app.tools.registry import load_tool_definitions
+
+CORE_PROMPT_PATH = Path(__file__).resolve().parents[1] / "prompts" / "ctf_solver_core.md"
+CORE_PROMPT = CORE_PROMPT_PATH.read_text(encoding="utf-8")
 
 
 class ContextBuilder:
-    """Build a bounded, artifact-first model context for one agent step."""
+    """Build the bounded, phase-ordered context for one agent step."""
+
+    @staticmethod
+    def _ordered_hypotheses(items: list[Hypothesis]) -> list[dict]:
+        ordered = sorted(items, key=lambda item: (-item.priority, -item.confidence, item.created_at))
+        return [
+            {
+                "id": item.id,
+                "category": item.category,
+                "statement": item.title,
+                "description": item.description,
+                "confidence": item.confidence,
+                "priority": item.priority,
+                "status": item.status,
+                "evidence": item.evidence_json,
+                "attempt_count": item.attempt_count,
+            }
+            for item in ordered
+        ]
+
+    @staticmethod
+    def _tool_schema(tools: dict[str, object], permitted: set[str]) -> list[dict]:
+        return [
+            {"name": item.name, "description": item.description, "parameters": item.parameters}
+            for item in tools.values()
+            if item.enabled and item.name in permitted
+        ]
 
     async def build(self, session: AsyncSession, run: SolveRun, challenge: Challenge) -> list[dict]:
+        state = await solver_state_service.load(session, run.id)
         limit = run.max_context_observations
         observations = list(
             (
@@ -55,7 +88,6 @@ class ContextBuilder:
                 )
             ).all()
         )
-        tools = load_tool_definitions()
         snapshots = list(
             (
                 await session.scalars(
@@ -65,69 +97,167 @@ class ContextBuilder:
                 )
             ).all()
         )
-        permitted = allowed_tools_for(challenge.challenge_type)
-        for snapshot in snapshots:
-            if snapshot.allowed_tools_snapshot:
-                permitted &= set(snapshot.allowed_tools_snapshot)
-        tool_schema = [
-            {"name": item.name, "description": item.description, "parameters": item.parameters}
-            for item in tools.values()
-            if item.enabled and item.name in permitted
+        skill_ids = {snapshot.skill_id for snapshot in snapshots}
+        skills = (
+            {
+                item.id: item
+                for item in (
+                    await session.scalars(select(Skill).where(Skill.id.in_(skill_ids)))
+                ).all()
+            }
+            if skill_ids
+            else {}
+        )
+        permitted = await effective_tools_for(session, run, challenge)
+        tool_schema = self._tool_schema(load_tool_definitions(), permitted)
+        active_skill_ids = set((state.active_skill_ids_json if state else []) or [])
+        active_snapshots = [item for item in snapshots if item.skill_id in active_skill_ids]
+        candidate_snapshots = [
+            item
+            for item in snapshots
+            if item.skill_id not in active_skill_ids
+            and skills.get(item.skill_id)
+            and skills[item.skill_id].skill_kind == "SPECIALIST"
         ]
-        facts = {
-            "challenge": {
+        active_skill_details = [
+            {
+                "skill_id": snapshot.skill_id,
+                "name": snapshot.skill_name,
+                "version": snapshot.skill_version,
+                "skill_kind": skills.get(snapshot.skill_id).skill_kind if skills.get(snapshot.skill_id) else "SPECIALIST",
+                "activation_mode": skills.get(snapshot.skill_id).activation_mode if skills.get(snapshot.skill_id) else "MANUAL",
+                "triggers": skills.get(snapshot.skill_id).triggers if skills.get(snapshot.skill_id) else [],
+                "required_tools": skills.get(snapshot.skill_id).required_tools if skills.get(snapshot.skill_id) else [],
+                "recommended_tools": skills.get(snapshot.skill_id).recommended_tools if skills.get(snapshot.skill_id) else [],
+                "forbidden_tools": skills.get(snapshot.skill_id).forbidden_tools if skills.get(snapshot.skill_id) else [],
+                "ctf_phases": skills.get(snapshot.skill_id).ctf_phases if skills.get(snapshot.skill_id) else [],
+                "content": snapshot.content_snapshot,
+                "config": snapshot.config_snapshot,
+            }
+            for snapshot in active_snapshots
+            if skills.get(snapshot.skill_id)
+        ]
+        candidate_skill_summaries = [
+            {
+                "skill_id": snapshot.skill_id,
+                "name": snapshot.skill_name,
+                "version": snapshot.skill_version,
+                "skill_kind": skills[snapshot.skill_id].skill_kind,
+                "activation_mode": skills[snapshot.skill_id].activation_mode,
+                "triggers": skills[snapshot.skill_id].triggers,
+                "required_tools": skills[snapshot.skill_id].required_tools,
+                "recommended_tools": skills[snapshot.skill_id].recommended_tools,
+                "forbidden_tools": skills[snapshot.skill_id].forbidden_tools,
+                "ctf_phases": skills[snapshot.skill_id].ctf_phases,
+            }
+            for snapshot in candidate_snapshots
+            if snapshot.skill_id in skills
+        ]
+        last_call = calls[0] if calls else None
+        last_observation = observations[0] if observations else None
+        context = {
+            "Core Solver Prompt": CORE_PROMPT,
+            "Role Snapshot": run.role_snapshot_json or {},
+            "Challenge-Type Methodology Skill": {
+                "challenge_type": challenge.challenge_type,
+                "current_phase": (state.current_phase if state else run.current_phase),
+                "skill_names": [snapshot.skill_name for snapshot in snapshots],
+                "methodology_skills": [
+                    {
+                        "skill_id": snapshot.skill_id,
+                        "name": snapshot.skill_name,
+                        "version": snapshot.skill_version,
+                        "content": snapshot.content_snapshot,
+                    }
+                    for snapshot in snapshots
+                    if skills.get(snapshot.skill_id)
+                    and skills[snapshot.skill_id].skill_kind == "METHODOLOGY"
+                ],
+            },
+            "Solver State": {
+                "current_phase": state.current_phase if state else run.current_phase,
+                "confirmed_facts": state.confirmed_facts_json if state else [],
+                "rejected_paths": state.rejected_paths_json if state else [],
+                "active_hypotheses": state.active_hypotheses_json if state else [],
+                "previous_action_fingerprints": state.action_fingerprints_json if state else {},
+                "active_skill_ids": sorted(active_skill_ids),
+                "no_progress_count": state.no_progress_count if state else 0,
+                "last_progress_at": state.last_progress_at.isoformat() if state and state.last_progress_at else None,
+                "last_action": {
+                    "tool_name": last_call.tool_name,
+                    "status": last_call.status,
+                    "arguments": last_call.arguments_json,
+                }
+                if last_call
+                else None,
+                "last_result_classification": last_observation.facts_json if last_observation else None,
+            },
+            "Challenge Facts": {
+                "id": challenge.id,
                 "name": challenge.name,
                 "description": challenge.description,
                 "challenge_type": challenge.challenge_type,
                 "target_url": challenge.target_url,
                 "allowed_hosts": challenge.allowed_hosts,
                 "flag_pattern": challenge.flag_pattern,
+                "conversation_summary": run.conversation_summary,
             },
-            "run": {
-                "status": run.status,
-                "remaining_steps": max(run.max_agent_steps - run.agent_step_count, 0),
-                "remaining_tool_calls": max(run.max_tool_calls - run.tool_call_count, 0),
-            },
-            "available_tools": tool_schema,
-            "hypotheses": [
-                {
-                    "id": item.id,
-                    "title": item.title,
-                    "status": item.status,
-                    "confidence": item.confidence,
-                }
-                for item in hypotheses
-            ],
-            "recent_observations": [
-                {"summary": item.summary, "facts": item.facts_json}
+            "Recent Observations": [
+                {"summary": item.summary, "facts": item.facts_json, "created_at": item.created_at.isoformat()}
                 for item in reversed(observations)
             ],
-            "recent_tool_calls": [
-                {"tool": item.tool_name, "status": item.status} for item in reversed(calls)
-            ],
-            "artifacts": [
-                {"path": item.file_path, "type": item.artifact_type, "summary": item.summary}
+            "Artifacts": [
+                {
+                    "path": item.file_path,
+                    "type": item.artifact_type,
+                    "summary": item.summary,
+                    "sha256": item.sha256,
+                }
                 for item in reversed(artifacts)
             ],
-            "skills": [
+            "Ranked Hypotheses": self._ordered_hypotheses(hypotheses),
+            "Rejected Paths": state.rejected_paths_json if state else [],
+            "Previous Action Fingerprints": state.action_fingerprints_json if state else {},
+            "Available Tool Schemas": tool_schema,
+            "Active Specialist Skills": active_skill_details,
+            "Candidate Specialist Skill Summaries": candidate_skill_summaries,
+            "Remaining Budget": {
+                "agent_steps": max(run.max_agent_steps - run.agent_step_count, 0),
+                "tool_calls": max(run.max_tool_calls - run.tool_call_count, 0),
+                "runtime_seconds": max(
+                    run.max_runtime_seconds
+                    - (
+                        int((datetime.now(UTC) - run.started_at).total_seconds())
+                        if run.started_at
+                        else 0
+                    ),
+                    0,
+                ),
+            },
+            "Flag Candidates": [
                 {
-                    "name": item.skill_name,
-                    "version": item.skill_version,
-                    "allowed_tools": item.allowed_tools_snapshot,
-                    "content": item.content_snapshot,
+                    "candidate": item.candidate,
+                    "verified": item.verified,
+                    "review_state": item.review_state,
+                    "pattern_matched": item.pattern_matched,
                 }
-                for item in snapshots
+                for item in (
+                    await session.scalars(select(FlagCandidate).where(FlagCandidate.run_id == run.id))
+                ).all()
             ],
-            "conversation_summary": run.conversation_summary,
         }
-        system = (
-            "You solve only this authorized CTF Web challenge. Never request shell commands, scanners, payload libraries, "
-            "or targets outside allowed_hosts. Use only the listed tools. Return exactly one JSON action. Context contains "
-            "summaries only: use file_read on an artifact path when raw content is needed."
-        )
+        # The model receives one system message with the core prompt and one user message
+        # with ordered JSON context.
         return [
-            {"role": "system", "content": system},
-            {"role": "user", "content": json.dumps(facts, ensure_ascii=False)},
+            {
+                "role": "system",
+                "content": (
+                    f"{CORE_PROMPT}\n\n"
+                    f"Role snapshot:\n{json.dumps(run.role_snapshot_json or {}, ensure_ascii=False)}\n\n"
+                    "Return exactly one JSON action and keep the response grounded in the ordered context."
+                ),
+            },
+            {"role": "user", "content": json.dumps(context, ensure_ascii=False)},
         ]
 
 

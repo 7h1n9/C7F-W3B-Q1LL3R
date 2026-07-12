@@ -3,6 +3,14 @@ from urllib.parse import urlparse
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 
+def _extract_hostname(value: str) -> str:
+    candidate = value.strip()
+    if not candidate:
+        return ""
+    parsed = urlparse(candidate if "://" in candidate else f"//{candidate}", scheme="http")
+    return (parsed.hostname or candidate).lower().strip()
+
+
 class ChallengeInput(BaseModel):
     name: str = Field(min_length=1, max_length=200)
     description: str = ""
@@ -17,7 +25,10 @@ class ChallengeInput(BaseModel):
     @field_validator("allowed_hosts")
     @classmethod
     def normalize_hosts(cls, values: list[str]) -> list[str]:
-        cleaned = sorted({value.lower().strip() for value in values if value.strip()})
+        expanded: list[str] = []
+        for value in values:
+            expanded.extend(part for part in value.replace("\n", ",").replace(";", ",").split(","))
+        cleaned = sorted({_extract_hostname(value) for value in expanded if value.strip()})
         return cleaned
 
     @model_validator(mode="after")

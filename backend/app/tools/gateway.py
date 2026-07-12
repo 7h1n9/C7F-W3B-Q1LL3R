@@ -12,7 +12,7 @@ from app.orchestration.state_machine import RunStatus
 from app.services.events import event_service
 from app.services.flags import flag_service
 from app.services.runner_client import runner_client
-from app.services.skill_selection import allowed_tools_for
+from app.services.tool_permissions import effective_tools_for
 from app.tools.policy import enforce_tool_policy
 from app.tools.registry import load_tool_definitions
 
@@ -33,10 +33,10 @@ class ToolGateway:
                 {"current_state": run.status},
                 409,
             )
-        if name not in allowed_tools_for(challenge.challenge_type):
+        if name not in await effective_tools_for(session, run, challenge):
             raise DomainError(
                 "TOOL_NOT_ALLOWED_FOR_CHALLENGE",
-                "This tool is not allowed for the challenge type.",
+                "This tool is not allowed by the current role or challenge limits.",
                 {"tool": name, "challenge_type": challenge.challenge_type},
                 422,
             )

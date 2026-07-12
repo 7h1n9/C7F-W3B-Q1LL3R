@@ -18,6 +18,9 @@ class RunRead(BaseModel):
     challenge_id: str
     engine_type: str
     model_config_id: str | None
+    role_name: str | None
+    role_version: str | None
+    role_snapshot_json: dict
     status: str
     current_phase: str
     workspace_path: str

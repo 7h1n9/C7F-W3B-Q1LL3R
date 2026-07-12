@@ -14,6 +14,7 @@ from app.engines.openai_compatible import OpenAICompatibleEngine
 from app.models.base import Base
 from app.models.challenge import Challenge
 from app.models.run import RunEvent, SolveRun
+from app.models.solver_state import SolverState
 from app.orchestration.orchestrator import SolveOrchestrator
 from app.schemas.agent import AgentAction, FinishAction
 from app.schemas.system_settings import ServiceSettingsUpdate
@@ -101,6 +102,19 @@ async def test_openai_loop_verifies_flag_and_generates_report(monkeypatch: pytes
         session.add(challenge); await session.flush()
         run = SolveRun(challenge_id=challenge.id, engine_type="openai_compatible", workspace_path=str(workspace))
         session.add(run); await session.commit()
+        session.add(
+            SolverState(
+                run_id=run.id,
+                current_phase="PLANNING",
+                confirmed_facts_json=[{"source": "http_request"}],
+                rejected_paths_json=[{"source": "tool", "reason": "blocked"}],
+                active_hypotheses_json=[{"id": "h1", "statement": "Initial hypothesis"}],
+                action_fingerprints_json={},
+                active_skill_ids_json=[],
+                no_progress_count=0,
+            )
+        )
+        await session.commit()
         run_id = run.id
 
     class ScriptedEngine:
@@ -130,6 +144,19 @@ async def test_openai_compatible_tool_to_artifact_flag_e2e(monkeypatch: pytest.M
         session.add(challenge); await session.flush()
         run = SolveRun(challenge_id=challenge.id, engine_type="openai_compatible", workspace_path=str(workspace), max_agent_steps=3)
         session.add(run); await session.commit()
+        session.add(
+            SolverState(
+                run_id=run.id,
+                current_phase="PLANNING",
+                confirmed_facts_json=[{"source": "http_request"}],
+                rejected_paths_json=[{"source": "tool", "reason": "blocked"}],
+                active_hypotheses_json=[{"id": "h1", "statement": "Initial hypothesis"}],
+                action_fingerprints_json={},
+                active_skill_ids_json=[],
+                no_progress_count=0,
+            )
+        )
+        await session.commit()
         run_id = run.id
 
     actions = [

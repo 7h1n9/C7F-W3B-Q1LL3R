@@ -49,7 +49,7 @@ class ReportService:
         lines += ["", "## Observations"] + [f"- {item.summary}" for item in observations]
         lines += ["", "## Hypotheses"] + [f"- {item.title} ({item.status})" for item in hypotheses]
         lines += ["", "## Flag candidates"] + [
-            f"- {item.candidate}: {'verified' if item.verified else 'unverified'}" for item in flags
+            f"- {item.candidate}: {item.review_state.lower()}" for item in flags
         ]
         lines += ["", "## Failure reason", failure_reason or "None"]
         raw = "\n".join(lines).encode()

@@ -2,24 +2,24 @@
 
 > CTF Web Agent 初版基础架构
 
-An authorization-bound monorepo for a CTF Web solving workflow. It is designed only for local practice ranges, CTF competitions, and explicitly authorized testing. It does **not** enable arbitrary shell commands, public-target automation, persistence, automatic exploitation, broad scanning, or automated payload libraries.
+这是一个面向授权场景的 CTF Web 解题工作流单仓库。它只用于本地练习靶场、CTF 比赛，以及明确授权的测试场景。它不会提供任意 shell 命令执行、公共目标自动化、持久化、自动化利用、宽泛扫描或自动化 payload 库。
 
-## Components
+## 组件
 
-- `backend/`: FastAPI, SQLAlchemy 2 async data access, Alembic, state machine, Tool Gateway, SSE persistence.
-- `frontend/`: Vite + React + TypeScript + Ant Design pages for dashboard, challenges, runs, workspace, and settings.
-- `codex-bridge/`: server-only Fastify bridge to `@openai/codex-sdk`, with a deterministic mock mode.
-- `kali-runner/`: separate FastAPI service for restricted HTTP, file-read, file-search, and existing Python-script execution.
-- `configs/`: original YAML definitions for one safe web-CTF role, four tools, and one skill.
+- `backend/`：FastAPI、SQLAlchemy 2 异步数据访问、Alembic、状态机、Tool Gateway、SSE 持久化。
+- `frontend/`：Vite + React + TypeScript + Ant Design 页面，包含总览、题目、任务、工作区和设置。
+- `codex-bridge/`：仅服务端的 Fastify 桥接服务，用于 `@openai/codex-sdk`，支持确定性的 mock 模式。
+- `kali-runner/`：独立的 FastAPI 服务，用于受限 HTTP、文件读取、文件搜索，以及对现有 Python 脚本的执行。
+- `configs/`：原始 YAML 定义，包含一个安全的 Web-CTF 角色、四个工具和一个技能。
 
-## Requirements
+## 环境要求
 
 - Python 3.11+
-- Node.js 20+ (the Codex SDK itself supports Node 18+, but this project targets Node 20+)
-- MySQL 8 with `utf8mb4` (Docker Compose is supplied)
-- A separate Kali Linux VM/service for Runner in real environments
+- Node.js 20+（Codex SDK 本身支持 Node 18+，但本项目目标是 Node 20+）
+- 支持 `utf8mb4` 的 MySQL 8（已提供 Docker Compose）
+- 一个独立的 Kali Linux VM / 服务，用于真实环境中的 Runner
 
-## Start from a clean environment
+## 项目启动方法
 
 ```bash
 copy backend\.env.example backend\.env
@@ -33,7 +33,7 @@ cd ..\frontend && npm install
 cd ..\codex-bridge && npm install
 ```
 
-Start each service in a separate terminal:
+分别在不同终端启动各个服务：
 
 ```bash
 cd backend && uvicorn app.main:app --reload --port 8000
@@ -42,9 +42,9 @@ cd codex-bridge && set CODEX_MOCK_MODE=true && npm run dev
 cd frontend && npm run dev
 ```
 
-Open the Vite URL (normally `http://localhost:5173`). The frontend calls FastAPI only.
+打开 Vite 地址（通常是 `http://localhost:5173`）。前端只调用 FastAPI。
 
-## Migration lifecycle
+## 迁移流程
 
 ```bash
 cd backend
@@ -53,17 +53,17 @@ alembic downgrade -1
 alembic upgrade head
 ```
 
-`APP_DATABASE_URL` defaults to `mysql+asyncmy`. For local tests it can point to an async SQLite URL; production use remains MySQL 8.
+`APP_DATABASE_URL` 默认使用 `mysql+asyncmy`。本地测试时它可以指向异步 SQLite URL；生产环境仍然使用 MySQL 8。
 
-## Single-agent OpenAI-compatible solve loop
+## 单智能体 OpenAI 兼容解题循环
 
-Choose **OpenAI Compatible** when creating a run and select an enabled model configuration. The backend builds bounded context from challenge data, observations, tool summaries and artifact metadata; it asks the provider for a strict `AgentAction` JSON response, validates it with Pydantic, and only then invokes the existing Tool Gateway. Full tool output stays in workspace artifacts and can be read through `file_read` when needed.
+创建任务时选择 **OpenAI Compatible**，并选择一个已启用的模型配置。后端会基于题目信息、观测、工具摘要和工件元数据构建受限上下文；随后要求模型返回严格的 `AgentAction` JSON，使用 Pydantic 验证后才调用现有 Tool Gateway。完整工具输出会保留在工作区工件中，需要时可通过 `file_read` 读取。
 
-The loop enforces persisted limits for agent steps, tool calls, context observations, and runtime. It emits durable `agent.action_requested`, `agent.action_rejected`, and `agent.action_completed` events. A flag candidate is verified only against the challenge regex; no public competition platform is contacted.
+该循环会对智能体步数、工具调用次数、上下文观测数量和运行时长做持久化限制。它会发出持久化的 `agent.action_requested`、`agent.action_rejected` 和 `agent.action_completed` 事件。flag 候选项只会按题目 regex 验证，不会连接任何公开比赛平台。
 
-Set the same non-empty `APP_RUNNER_API_TOKEN` and `RUNNER_API_TOKEN` in the two service environments. Model API keys are Fernet-encrypted at rest and are never returned to the browser.
+请在两个服务环境中设置相同且非空的 `APP_RUNNER_API_TOKEN` 和 `RUNNER_API_TOKEN`。模型 API Key 会使用 Fernet 加密后落盘，且不会返回给浏览器。
 
-PowerShell helpers are available:
+可用的 PowerShell 辅助脚本：
 
 ```powershell
 .\scripts\setup.ps1
@@ -73,26 +73,26 @@ PowerShell helpers are available:
 .\scripts\test.ps1
 ```
 
-## Mock modes
+## Mock 模式
 
-- `engine_type=mock` emits a harmless analysis/plan/report event sequence and completes as unsolved.
-- `CODEX_MOCK_MODE=true` provides local thread IDs and structured mock events without a live Codex runtime.
-- Runner remains real and restricted; no generic command execution endpoint exists.
+- `engine_type=mock` 会发出无害的分析 / 计划 / 报告事件序列，并以未解出状态完成。
+- `CODEX_MOCK_MODE=true` 会提供本地线程 ID 和结构化 mock 事件，而不依赖真实 Codex 运行时。
+- Runner 仍然是真实且受限的；不存在通用命令执行接口。
 
-## Implemented
+## 已实现内容
 
-- Challenge CRUD with `target_url` host / `allowed_hosts` validation.
-- Solve-run creation with a unique workspace, `challenge.json`, run `AGENTS.md`, and a durable `run.created` event.
-- Explicit state machine; controllers cannot assign arbitrary statuses.
-- Durable sequenced events and SSE replay/live fan-out with heartbeats.
-- MySQL/Alembic schema, OpenAI-compatible engine skeleton, Codex SDK bridge, YAML loading, and tool-audit models.
-- Workspace isolation, path traversal checks, target allowlisting, subprocess argument vectors, timeouts, and output caps.
+- 题目 CRUD，包含 `target_url` 主机与 `allowed_hosts` 校验。
+- 创建解题任务时生成唯一工作区、`challenge.json`、运行时 `AGENTS.md`，并记录持久化的 `run.created` 事件。
+- 显式状态机；控制器不能分配任意状态。
+- 持久化顺序事件，以及支持 SSE 回放 / 实时转发 / 心跳。
+- MySQL / Alembic 架构、OpenAI-compatible 引擎骨架、Codex SDK 桥接、YAML 加载和工具审计模型。
+- 工作区隔离、路径穿越检查、目标白名单、子进程参数数组、超时与输出上限。
 
-## Deliberately not implemented
+## 明确未实现内容
 
-Automatic SQL injection, command execution, file upload, exploit payload libraries, broad scanners, multi-agent autonomy, RAG, Docker sandboxing, auth, WebSockets, `codex app-server`, and a distributed queue. Those remain future design items, not hidden capabilities.
+自动 SQL 注入、命令执行、文件上传、漏洞利用 payload 库、宽泛扫描、多智能体自治、RAG、Docker 沙箱、认证、WebSocket、`codex app-server`，以及分布式队列。这些仍然是未来的设计项，不是隐藏能力。
 
-## Verification
+## 验证
 
 ```bash
 cd backend && ruff check . && pytest
@@ -101,4 +101,4 @@ cd frontend && npm run build
 cd codex-bridge && npm run build
 ```
 
-See `docs/architecture.md`, `docs/api.md`, `docs/database.md`, `docs/deployment.md`, and `docs/reference-analysis.md` for further details.
+更多细节请查看 `docs/architecture.md`、`docs/api.md`、`docs/database.md`、`docs/deployment.md` 和 `docs/reference-analysis.md`。

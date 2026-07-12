@@ -16,6 +16,7 @@ from app.models.run import (
     ToolCall,
 )
 from app.models.skill import ChallengeSkillBinding, ModelSkillBinding, RunSkillSnapshot, Skill
+from app.models.solver_state import SolverState
 
 __all__ = [
     "Base",
@@ -28,6 +29,7 @@ __all__ = [
     "Observation",
     "Hypothesis",
     "FlagCandidate",
+    "SolverState",
     "ModelConfig",
     "Skill",
     "ModelSkillBinding",

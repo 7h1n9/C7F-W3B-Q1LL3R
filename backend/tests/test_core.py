@@ -9,6 +9,15 @@ def test_challenge_requires_target_host_in_allowlist() -> None:
         ChallengeInput(name="x", target_url="http://not-allowed.local", allowed_hosts=["allowed.local"])
 
 
+def test_challenge_allows_url_style_host_list_values() -> None:
+    challenge = ChallengeInput(
+        name="x",
+        target_url="http://not-allowed.local",
+        allowed_hosts=["http://not-allowed.local;http://other.local"],
+    )
+    assert challenge.allowed_hosts == ["not-allowed.local", "other.local"]
+
+
 def test_state_machine_rejects_invalid_transition() -> None:
     class Run: status = "CREATED"; current_phase = "CREATED"; started_at = None; finished_at = None
     with pytest.raises(Exception): transition(Run(), RunStatus.COMPLETED_SOLVED)

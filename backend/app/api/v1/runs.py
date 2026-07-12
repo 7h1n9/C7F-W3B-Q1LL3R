@@ -28,12 +28,19 @@ from app.models.run import (
     ToolCall,
 )
 from app.models.skill import RunSkillSnapshot
+from app.models.solver_state import SolverState
 from app.orchestration.orchestrator import orchestrator
 from app.orchestration.state_machine import RunStatus, transition
+from app.schemas.flag import FlagReviewUpdate
 from app.schemas.run import RunCreate, RunRead
+from app.schemas.solver_state import SolverStateRead
+from app.services.codex_materializer import codex_materializer
 from app.services.events import event_service
+from app.services.flags import flag_service
+from app.services.role_loader import role_loader
 from app.services.runner_client import runner_client
 from app.services.skill_selection import snapshot_run_skills
+from app.services.solver_state import solver_state_service
 from app.services.workspace import create_workspace
 
 router = APIRouter(tags=["runs"])
@@ -67,6 +74,17 @@ async def require_run(run_id: str, session: AsyncSession) -> SolveRun:
     if not item:
         raise DomainError("RUN_NOT_FOUND", "Solve run not found.", status_code=404)
     return item
+
+
+async def ensure_codex_materialized(session: AsyncSession, run: SolveRun) -> SolveRun:
+    if run.engine_type == "codex_sdk":
+        await codex_materializer.sync(session, run)
+    return run
+
+
+async def ensure_flag_consistency(session: AsyncSession, run: SolveRun) -> SolveRun:
+    await flag_service.reconcile_run_status(session, run)
+    return run
 
 
 @router.post("/challenges/{challenge_id}/runs", status_code=201)
@@ -159,10 +177,17 @@ async def create_run(
         challenge_id=challenge.id,
         workspace_path="pending",
         conversation_summary=conversation_summary,
+        role_name=None,
+        role_version=None,
+        role_snapshot_json={},
         **values,
     )
     session.add(item)
     await session.flush()
+    role = role_loader.load(challenge.challenge_type)
+    item.role_name = role.name
+    item.role_version = role.version
+    item.role_snapshot_json = role.snapshot()
     attachments = list(
         (
             await session.scalars(
@@ -171,13 +196,20 @@ async def create_run(
         ).all()
     )
     item.workspace_path = str(create_workspace(item.id, challenge, attachments))
-    await snapshot_run_skills(
+    snapshots = await snapshot_run_skills(
         session,
         item.id,
         challenge.id,
+        challenge.challenge_type,
         item.model_config_id,
         payload.selected_skill_ids,
         payload.disabled_skill_ids,
+    )
+    await solver_state_service.initialize(
+        session,
+        item,
+        challenge.challenge_type,
+        [snapshot.skill_id for snapshot in snapshots],
     )
     await session.commit()
     await session.refresh(item)
@@ -190,6 +222,9 @@ async def list_runs(session: AsyncSession = Depends(get_session)) -> dict:
     items = list(
         (await session.scalars(select(SolveRun).order_by(SolveRun.created_at.desc()))).all()
     )
+    for item in items:
+        await ensure_codex_materialized(session, item)
+        await ensure_flag_consistency(session, item)
     return {"data": [read(item) for item in items]}
 
 
@@ -203,7 +238,16 @@ def _remove_local_workspace(workspace_path: str) -> None:
 async def _delete_run_records(session: AsyncSession, run_id: str) -> None:
     # Delete children explicitly because the schema intentionally keeps these
     # tables unconfigured with ORM cascade rules.
-    for model in (FlagCandidate, Observation, Artifact, ToolCall, Hypothesis, RunEvent, RunSkillSnapshot):
+    for model in (
+        FlagCandidate,
+        Observation,
+        Artifact,
+        ToolCall,
+        Hypothesis,
+        RunEvent,
+        RunSkillSnapshot,
+        SolverState,
+    ):
         await session.execute(delete(model).where(model.run_id == run_id))
     await session.execute(delete(SolveRun).where(SolveRun.id == run_id))
 
@@ -225,7 +269,35 @@ async def delete_run(run_id: str, session: AsyncSession = Depends(get_session)) 
 
 @router.get("/runs/{run_id}")
 async def get_run(run_id: str, session: AsyncSession = Depends(get_session)) -> dict:
-    return {"data": read(await require_run(run_id, session))}
+    run = await ensure_codex_materialized(session, await require_run(run_id, session))
+    run = await ensure_flag_consistency(session, run)
+    return {"data": read(run)}
+
+
+@router.get("/runs/{run_id}/solver-state")
+async def get_solver_state(run_id: str, session: AsyncSession = Depends(get_session)) -> dict:
+    run = await ensure_codex_materialized(session, await require_run(run_id, session))
+    run = await ensure_flag_consistency(session, run)
+    state = await solver_state_service.load(session, run.id)
+    if not state:
+        raise DomainError("SOLVER_STATE_NOT_FOUND", "Solver state not found.", status_code=404)
+    payload = {
+        "id": state.id,
+        "run_id": state.run_id,
+        "current_phase": state.current_phase,
+        "confirmed_facts_json": state.confirmed_facts_json,
+        "rejected_paths_json": state.rejected_paths_json,
+        "active_hypotheses_json": state.active_hypotheses_json,
+        "action_fingerprints_json": state.action_fingerprints_json,
+        "active_skill_ids_json": state.active_skill_ids_json,
+        "no_progress_count": state.no_progress_count,
+        "last_progress_at": state.last_progress_at.isoformat() if state.last_progress_at else None,
+        "created_at": state.created_at.isoformat(),
+        "updated_at": state.updated_at.isoformat(),
+    }
+    return {
+        "data": SolverStateRead.model_validate(payload)
+    }
 
 
 @router.post("/runs/{run_id}/start")
@@ -271,7 +343,8 @@ async def continue_run(
 
 @router.get("/runs/{run_id}/tool-calls")
 async def list_tool_calls(run_id: str, session: AsyncSession = Depends(get_session)) -> dict:
-    await require_run(run_id, session)
+    run = await ensure_codex_materialized(session, await require_run(run_id, session))
+    await ensure_flag_consistency(session, run)
     items = list(
         (
             await session.scalars(
@@ -296,7 +369,8 @@ async def list_tool_calls(run_id: str, session: AsyncSession = Depends(get_sessi
 
 @router.get("/runs/{run_id}/observations")
 async def list_observations(run_id: str, session: AsyncSession = Depends(get_session)) -> dict:
-    await require_run(run_id, session)
+    run = await ensure_codex_materialized(session, await require_run(run_id, session))
+    await ensure_flag_consistency(session, run)
     items = list(
         (
             await session.scalars(
@@ -321,7 +395,8 @@ async def list_observations(run_id: str, session: AsyncSession = Depends(get_ses
 
 @router.get("/runs/{run_id}/artifacts")
 async def list_artifacts(run_id: str, session: AsyncSession = Depends(get_session)) -> dict:
-    await require_run(run_id, session)
+    run = await ensure_codex_materialized(session, await require_run(run_id, session))
+    await ensure_flag_consistency(session, run)
     items = list(
         (
             await session.scalars(
@@ -348,7 +423,8 @@ async def list_artifacts(run_id: str, session: AsyncSession = Depends(get_sessio
 async def get_artifact(
     run_id: str, artifact_id: str, session: AsyncSession = Depends(get_session)
 ) -> dict:
-    run = await require_run(run_id, session)
+    run = await ensure_codex_materialized(session, await require_run(run_id, session))
+    run = await ensure_flag_consistency(session, run)
     item = await session.get(Artifact, artifact_id)
     if item is None or item.run_id != run.id:
         raise DomainError("ARTIFACT_NOT_FOUND", "Artifact not found.", status_code=404)
@@ -368,7 +444,8 @@ async def get_artifact(
 
 @router.get("/runs/{run_id}/flag-candidates")
 async def list_flags(run_id: str, session: AsyncSession = Depends(get_session)) -> dict:
-    await require_run(run_id, session)
+    run = await ensure_codex_materialized(session, await require_run(run_id, session))
+    await ensure_flag_consistency(session, run)
     items = list(
         (await session.scalars(select(FlagCandidate).where(FlagCandidate.run_id == run_id))).all()
     )
@@ -378,6 +455,7 @@ async def list_flags(run_id: str, session: AsyncSession = Depends(get_session)) 
                 "id": item.id,
                 "candidate": item.candidate,
                 "verified": item.verified,
+                "review_state": item.review_state,
                 "pattern_matched": item.pattern_matched,
             }
             for item in items
@@ -385,9 +463,34 @@ async def list_flags(run_id: str, session: AsyncSession = Depends(get_session)) 
     }
 
 
+@router.patch("/runs/{run_id}/flag-candidates/{candidate_id}")
+async def review_flag_candidate(
+    run_id: str,
+    candidate_id: str,
+    payload: FlagReviewUpdate,
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    run = await ensure_codex_materialized(session, await require_run(run_id, session))
+    await ensure_flag_consistency(session, run)
+    try:
+        item = await flag_service.set_review_state(session, run, candidate_id, payload.review_state)
+    except ValueError as error:
+        raise DomainError("FLAG_CANDIDATE_NOT_FOUND", str(error), status_code=404) from error
+    return {
+        "data": {
+            "id": item.id,
+            "candidate": item.candidate,
+            "verified": item.verified,
+            "review_state": item.review_state,
+            "pattern_matched": item.pattern_matched,
+        }
+    }
+
+
 @router.get("/runs/{run_id}/report")
 async def get_report(run_id: str, session: AsyncSession = Depends(get_session)) -> dict:
-    run = await require_run(run_id, session)
+    run = await ensure_codex_materialized(session, await require_run(run_id, session))
+    run = await ensure_flag_consistency(session, run)
     path = Path(run.workspace_path) / "final" / "writeup.md"
     if not path.is_file():
         raise DomainError(

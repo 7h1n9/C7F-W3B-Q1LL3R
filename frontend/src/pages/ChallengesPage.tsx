@@ -1,4 +1,4 @@
-import {
+﻿import {
   CommentOutlined,
   EditOutlined,
   EyeOutlined,
@@ -40,7 +40,7 @@ type ChallengeFormValues = Omit<ChallengePayload, "allowed_hosts" | "source_path
 function toPayload(values: ChallengeFormValues): ChallengePayload {
   const traffic = values.challenge_type === "TRAFFIC_ANALYSIS";
   const allowedHosts = (values.allowed_hosts ?? "")
-    .split(",")
+    .split(/[,\n;]+/)
     .map((host) => host.trim())
     .filter(Boolean)
     .map((host) => {
@@ -158,34 +158,15 @@ export function ChallengesPage() {
           loading={query.isLoading}
           locale={{ emptyText: <Empty description="尚未登记靶场题目" image={Empty.PRESENTED_IMAGE_SIMPLE} /> }}
           columns={[
-            {
-              title: "题目名称",
-              dataIndex: "name",
-              render: (name: string, record: Challenge) => (
-                <Space direction="vertical" size={0}>
-                  <strong>{name}</strong>
-                  <span className="id-code">{record.id.slice(0, 8)}</span>
-                </Space>
-              ),
-            },
-            {
-              title: "模式",
-              dataIndex: "challenge_type",
-              render: (type: Challenge["challenge_type"]) => (
-                <Tag color={type === "TRAFFIC_ANALYSIS" ? "purple" : "cyan"}>
-                  {type === "TRAFFIC_ANALYSIS" ? "流量分析" : "Web 靶场"}
-                </Tag>
-              ),
-            },
-            {
-              title: "目标 / 附件",
-              render: (_: unknown, record: Challenge) =>
-                record.challenge_type === "TRAFFIC_ANALYSIS" ? "PCAP 主附件" : record.target_url,
-            },
-            {
+                        {
               title: "状态",
               dataIndex: "status",
-              render: (status: string) => <Tag color={status === "ACTIVE" ? "success" : "default"}>{status === "ACTIVE" ? "可用" : status}</Tag>,
+              render: (status: string) => {
+                if (status === "ACTIVE") return <Tag color="success">可用</Tag>;
+                if (status === "SOLVED") return <Tag color="green">已解出</Tag>;
+                if (status === "DRAFT") return <Tag color="default">草稿</Tag>;
+                return <Tag>{status}</Tag>;
+              },
             },
             {
               title: "操作",
@@ -227,7 +208,7 @@ export function ChallengesPage() {
             ) : (
               <>
                 <Form.Item name="target_url" label="目标地址" rules={[{ required: true, type: "url", message: "请输入有效的 HTTP(S) 地址" }]}><Input placeholder="http://challenge.local" /></Form.Item>
-                <Form.Item name="allowed_hosts" label="允许访问的主机" extra="填写 localhost 或完整 URL，系统会自动提取主机名；多个主机用英文逗号分隔" rules={[{ required: true, message: "请填写允许访问的主机" }]}><Input placeholder="localhost 或 challenge.local" /></Form.Item>
+                <Form.Item name="allowed_hosts" label="允许访问的主机" extra="填写 localhost 或完整 URL，系统会自动提取主机名；多个主机用英文逗号或分号分隔" rules={[{ required: true, message: "请填写允许访问的主机" }]}><Input placeholder="localhost, challenge.local" /></Form.Item>
               </>
             )}
           </Form.Item>
@@ -262,3 +243,4 @@ export function ChallengesPage() {
     </>
   );
 }
+

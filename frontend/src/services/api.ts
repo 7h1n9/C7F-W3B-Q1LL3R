@@ -1,7 +1,7 @@
-import type { ApiEnvelope, Challenge, ChallengeConversation, ChallengeMessage, RunEvent, Skill, SolveRun } from "../types/api";
+import type { ApiEnvelope, Challenge, ChallengeConversation, ChallengeMessage, FlagCandidate, RunEvent, Skill, SolveRun, SolverState } from "../types/api";
 
 const base = import.meta.env.VITE_API_BASE_URL ?? "/api/v1";
-const runEventTypes = ["run.created", "run.started", "run.status_changed", "agent.message", "agent.plan_created", "agent.hypothesis_created", "agent.hypothesis_updated", "tool.requested", "tool.started", "tool.output", "tool.completed", "tool.failed", "artifact.created", "flag.candidate_found", "flag.verified", "report.started", "report.completed", "run.completed", "run.failed"];
+const runEventTypes = ["run.created", "run.started", "run.status_changed", "agent.message", "agent.plan_created", "agent.hypothesis_created", "agent.hypothesis_updated", "agent.action_requested", "agent.action_rejected", "agent.action_completed", "agent.replan_required", "agent.progress_detected", "agent.no_progress", "skill.activated", "tool.requested", "tool.started", "tool.output", "tool.completed", "tool.failed", "artifact.created", "flag.candidate_found", "flag.reviewed", "flag.verified", "report.started", "report.completed", "run.completed", "run.failed"];
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   let response: Response;
   try {
@@ -41,6 +41,7 @@ export const api = {
   getReadiness: () => request<{ ready: boolean; level: string; checks: Array<{ name: string; ok: boolean; message: string }> }>("/readiness/range-test"),
   listRuns: () => request<SolveRun[]>("/runs"),
   getRun: (id: string) => request<SolveRun>(`/runs/${id}`),
+  getSolverState: (id: string) => request<SolverState>(`/runs/${id}/solver-state`),
   createRun: (challengeId: string, payload: Record<string, unknown>) => request<SolveRun>(`/challenges/${challengeId}/runs`, { method: "POST", body: JSON.stringify(payload) }),
   startRun: (id: string) => request<{ run_id: string; status: string }>(`/runs/${id}/start`, { method: "POST" }),
   cancelRun: (id: string) => request<SolveRun>(`/runs/${id}/cancel`, { method: "POST" }),
@@ -56,7 +57,8 @@ export const api = {
   getObservations: (id: string) => request<Array<Record<string, unknown>>>(`/runs/${id}/observations`),
   getArtifacts: (id: string) => request<Array<{ id: string; path: string; type: string; summary: string; size: number }>>(`/runs/${id}/artifacts`),
   getArtifact: (runId: string, artifactId: string) => request<{ content: string; path: string }>(`/runs/${runId}/artifacts/${artifactId}`),
-  getFlags: (id: string) => request<Array<Record<string, unknown>>>(`/runs/${id}/flag-candidates`),
+  getFlags: (id: string) => request<FlagCandidate[]>(`/runs/${id}/flag-candidates`),
+  reviewFlagCandidate: (runId: string, candidateId: string, reviewState: "OPEN" | "VALID" | "INVALID") => request<FlagCandidate>(`/runs/${runId}/flag-candidates/${candidateId}`, { method: "PATCH", body: JSON.stringify({ review_state: reviewState }) }),
   getReport: (id: string) => request<{ content: string; path: string }>(`/runs/${id}/report`),
   continueRun: (id: string, message: string) => request<{ run_id: string }>(`/runs/${id}/continue`, { method: "POST", body: JSON.stringify({ message }) }),
   streamRunEvents: (id: string, onEvent: (event: RunEvent) => void) => { const source = new EventSource(`${base}/runs/${id}/events`); const handler = (message: MessageEvent<string>) => onEvent(JSON.parse(message.data) as RunEvent); source.onmessage = handler; runEventTypes.forEach((type) => source.addEventListener(type, handler)); return source; },
