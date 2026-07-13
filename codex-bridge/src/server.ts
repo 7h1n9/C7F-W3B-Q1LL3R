@@ -9,7 +9,7 @@ function bridgeError(error: unknown) {
   return { status: code === "THREAD_NOT_FOUND" ? 404 : code === "CANCEL_NOT_SUPPORTED" ? 501 : 502, body: { code, message: code === "THREAD_NOT_FOUND" ? "Thread not found" : code === "CANCEL_NOT_SUPPORTED" ? "Cancellation is not supported by the current Codex SDK" : "Codex Bridge request failed", details: {} } };
 }
 
-app.get("/health", async () => ({ status: "ok", mock_mode: process.env.CODEX_MOCK_MODE === "true" }));
+app.get("/health", async () => service.health());
 app.post<{ Body: ThreadRequest }>("/threads", async (request, reply) => {
   if (!request.body?.run_id || !request.body.workspace_path || !request.body.prompt) return reply.code(422).send({ code: "VALIDATION_ERROR", message: "run_id, workspace_path and prompt are required", details: {} });
   return service.create(request.body);

@@ -19,6 +19,7 @@ from app.models.run import (
     Observation,
     RunAttempt,
     RunEvent,
+    RunExecutionLease,
     SolveRun,
     ToolCall,
 )
@@ -33,6 +34,7 @@ __all__ = [
     "RunEvent",
     "ToolCall",
     "RunAttempt",
+    "RunExecutionLease",
     "Artifact",
     "Observation",
     "Hypothesis",

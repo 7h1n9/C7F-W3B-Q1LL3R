@@ -1,5 +1,6 @@
 param(
-    [switch]$SkipDocker
+    [switch]$SkipDocker,
+    [switch]$UseMockCodex
 )
 
 $ErrorActionPreference = "Stop"
@@ -197,7 +198,7 @@ Set-EnvValue -Name "RUNNER_API_TOKEN" -Value $runnerToken
 Set-EnvValue -Name "RUNNER_ENVIRONMENT" -Value "development"
 
 Set-EnvValue -Name "CODEX_BRIDGE_PORT" -Value $bridgePort
-Set-EnvValue -Name "CODEX_MOCK_MODE" -Value "true"
+Set-EnvValue -Name "CODEX_MOCK_MODE" -Value ($(if ($UseMockCodex) { "true" } else { "false" }))
 Set-EnvValue -Name "VITE_API_BASE_URL" -Value $frontendApiBase
 
 $pythonExe = Get-CommandPath -Name "python"

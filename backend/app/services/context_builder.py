@@ -290,6 +290,33 @@ class ContextBuilder:
             context["Artifacts"] = context["Artifacts"][-4:]
             context["Challenge Lesson"] = {key: value[:6] for key, value in lessons.items()}
             serialized = json.dumps(context, ensure_ascii=False)
+        if len(serialized) > budget:
+            context["Active Specialist Skills"] = [
+                {key: value for key, value in item.items() if key != "content"}
+                for item in context["Active Specialist Skills"][:3]
+            ]
+            context["Candidate Specialist Skill Summaries"] = context[
+                "Candidate Specialist Skill Summaries"
+            ][:5]
+            context["Solver State"]["confirmed_facts"] = context["Solver State"][
+                "confirmed_facts"
+            ][-5:]
+            context["Solver State"]["rejected_paths"] = context["Solver State"][
+                "rejected_paths"
+            ][-5:]
+            context["Rejected Paths"] = context["Rejected Paths"][-5:]
+            context["Previous Action Fingerprints"] = dict(
+                list(context["Previous Action Fingerprints"].items())[-5:]
+            )
+            serialized = json.dumps(context, ensure_ascii=False)
+        if len(serialized) > budget:
+            context["Recent Observations"] = context["Recent Observations"][-1:]
+            context["Artifacts"] = context["Artifacts"][-1:]
+            context["Challenge-Type Methodology Skill"]["methodology_skills"] = [
+                {**item, "content": str(item.get("content", ""))[:4000]}
+                for item in context["Challenge-Type Methodology Skill"]["methodology_skills"][:2]
+            ]
+            serialized = json.dumps(context, ensure_ascii=False)
         context["Context Budget"] = {"max_chars": budget, "used_chars": len(serialized), "approx_input_tokens": len(serialized) // 4, "trimmed": len(json.dumps(context, ensure_ascii=False)) > budget}
         # The model receives one system message with the core prompt and one user message
         # with ordered JSON context.

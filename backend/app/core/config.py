@@ -1,4 +1,5 @@
 import ipaddress
+import os
 import socket
 from functools import lru_cache
 from pathlib import Path
@@ -17,6 +18,7 @@ class Settings(BaseSettings):
     encryption_key: str = "development-only-change-me"
     allowed_service_cidrs: str = "127.0.0.0/8,192.168.56.0/24,192.168.236.0/24"
     environment: str = "development"
+    codex_diagnostic_mode: bool = False
 
     def require_safe_production_secrets(self) -> None:
         if self.environment.lower() not in {"dev", "development", "test", "testing"} and (
@@ -30,6 +32,13 @@ class Settings(BaseSettings):
     @property
     def cors_origin_list(self) -> list[str]:
         return [item.strip() for item in self.cors_origins.split(",") if item.strip()]
+
+    @property
+    def codex_diagnostics_enabled(self) -> bool:
+        raw = os.getenv("CODEX_DIAGNOSTIC_MODE")
+        if raw is not None:
+            return raw.strip().lower() in {"1", "true", "yes", "on"}
+        return bool(self.codex_diagnostic_mode)
 
 
 @lru_cache

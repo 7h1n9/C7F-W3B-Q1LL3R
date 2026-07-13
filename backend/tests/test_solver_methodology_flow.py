@@ -182,13 +182,23 @@ async def test_codex_materializer_backfills_workspace_details(tmp_path: Path) ->
                     run_id=run.id,
                     sequence=2,
                     event_type="tool.started",
-                    payload_json={"tool_call_id": "item_1", "tool": "command_execution", "command": "echo demo"},
+                    payload_json={
+                        "tool_call_id": "item_1",
+                        "tool": "ctfctl.http_request",
+                        "arguments": {"url": "http://demo.local/"},
+                    },
                 ),
                 RunEvent(
                     run_id=run.id,
                     sequence=3,
                     event_type="tool.completed",
-                    payload_json={"tool_call_id": "item_1", "tool": "command_execution", "command": "echo demo", "output": "flag{demo}", "exit_code": 0},
+                    payload_json={
+                        "tool_call_id": "item_1",
+                        "tool": "ctfctl.http_request",
+                        "arguments": {"url": "http://demo.local/"},
+                        "result": "flag{demo}",
+                        "exit_code": 0,
+                    },
                 ),
                 RunEvent(
                     run_id=run.id,
@@ -212,6 +222,63 @@ async def test_codex_materializer_backfills_workspace_details(tmp_path: Path) ->
     assert artifacts_rows and any(item.file_path.endswith("responses/codex_sdk/codex_item_1.txt") for item in artifacts_rows)
     assert flags and flags[0].candidate == "flag{demo}"
     assert report_path.is_file()
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_codex_materializer_ignores_direct_command_policy_events(tmp_path: Path) -> None:
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'codex-policy.db'}", poolclass=StaticPool)
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    async with sessions() as session:
+        challenge = Challenge(
+            name="demo",
+            target_url="http://demo.local",
+            allowed_hosts=["demo.local"],
+            challenge_type="WEB_TARGET",
+            flag_pattern=r"flag\{[^}]+\}",
+        )
+        session.add(challenge)
+        await session.flush()
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        run = SolveRun(
+            challenge_id=challenge.id,
+            workspace_path=str(workspace),
+            role_snapshot_json={},
+            engine_type="codex_sdk",
+            status="WAITING_USER",
+            current_phase="WAITING_USER",
+            event_sequence=1,
+        )
+        session.add(run)
+        await session.flush()
+        session.add(
+            RunEvent(
+                run_id=run.id,
+                sequence=1,
+                event_type="tool.failed",
+                payload_json={
+                    "tool_call_id": "item_1",
+                    "tool": "command_execution",
+                    "error_code": "CODEX_DIRECT_TOOL_FORBIDDEN",
+                    "output": "flag{not_evidence}",
+                },
+            )
+        )
+        await session.commit()
+        await codex_materializer.sync(session, run)
+
+        tools = (await session.scalars(select(ToolCall).where(ToolCall.run_id == run.id))).all()
+        observations = (await session.scalars(select(Observation).where(Observation.run_id == run.id))).all()
+        artifacts_rows = (await session.scalars(select(Artifact).where(Artifact.run_id == run.id))).all()
+        flags = (await session.scalars(select(FlagCandidate).where(FlagCandidate.run_id == run.id))).all()
+
+    assert tools == []
+    assert observations == []
+    assert artifacts_rows == []
+    assert flags == []
     await engine.dispose()
 
 

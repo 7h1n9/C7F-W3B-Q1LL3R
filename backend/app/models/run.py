@@ -69,10 +69,33 @@ class RunAttempt(UUIDTimestampMixin, Base):
     tool_calls: Mapped[int] = mapped_column(Integer, default=0)
     input_tokens: Mapped[int] = mapped_column(Integer, default=0)
     output_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    initial_agent_steps: Mapped[int] = mapped_column(Integer, default=0)
+    initial_tool_calls: Mapped[int] = mapped_column(Integer, default=0)
+    initial_input_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    initial_output_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     # The migration creates this column as NOT NULL.  Keep it in the ORM as
     # well so MySQL receives a value on the very first insert of an attempt.
     # Without this field a newly started run fails before the orchestrator can
     # transition it out of CREATED.
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(UTC),
+        onupdate=lambda: datetime.now(UTC),
+    )
+
+
+class RunExecutionLease(UUIDTimestampMixin, Base):
+    __tablename__ = "run_execution_leases"
+    __table_args__ = (UniqueConstraint("run_id", name="uq_run_execution_lease_run"),)
+
+    run_id: Mapped[str] = mapped_column(ForeignKey("solve_runs.id"), nullable=False, index=True)
+    attempt_id: Mapped[str] = mapped_column(ForeignKey("run_attempts.id"), nullable=False)
+    owner_instance_id: Mapped[str] = mapped_column(String(120), nullable=False)
+    lease_token: Mapped[str] = mapped_column(String(120), nullable=False, unique=True)
+    acquired_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    heartbeat_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=lambda: datetime.now(UTC),

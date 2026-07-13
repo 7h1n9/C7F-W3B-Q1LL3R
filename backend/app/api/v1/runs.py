@@ -27,6 +27,7 @@ from app.models.run import (
     Observation,
     RunAttempt,
     RunEvent,
+    RunExecutionLease,
     SolveRun,
     ToolCall,
 )
@@ -81,7 +82,9 @@ def read(item: SolveRun) -> RunRead:
     )
 
 
-async def read_with_summary(session: AsyncSession, item: SolveRun) -> RunRead:
+async def read_with_summary(
+    session: AsyncSession, item: SolveRun, *, include_diagnostics: bool = True
+) -> RunRead:
     challenge = await session.get(Challenge, item.challenge_id)
     model = await session.get(ModelConfig, item.model_config_id) if item.model_config_id else None
     state = await solver_state_service.load(session, item.id)
@@ -98,7 +101,14 @@ async def read_with_summary(session: AsyncSession, item: SolveRun) -> RunRead:
             ).all()
         )
         active_skill_names = [snapshot.skill_name for snapshot in skills]
-    diagnostics = await run_diagnostics_service.analyze(session, item)
+    diagnostics = (
+        await run_diagnostics_service.analyze(session, item)
+        if include_diagnostics
+        else {
+            "diagnostic_tags": [item.last_error_code] if item.last_error_code else [],
+            "diagnostic_summary": item.last_error_message,
+        }
+    )
     payload = {
         **item.__dict__,
         "challenge_name": challenge.name if challenge else None,
@@ -271,9 +281,12 @@ async def list_runs(session: AsyncSession = Depends(get_session)) -> dict:
     )
     payload = []
     for item in items:
-        await ensure_codex_materialized(session, item)
-        await ensure_flag_consistency(session, item)
-        payload.append(await read_with_summary(session, item))
+        # The list view must stay lightweight.  Codex materialization and deep
+        # diagnostics scan all events/tool outputs for a run; doing that for
+        # every row turns ordinary page loads into repeated full-history
+        # reprocessing.  Detail/diagnostic endpoints still materialize on
+        # demand before returning workspace-level data.
+        payload.append(await read_with_summary(session, item, include_diagnostics=False))
     return {"data": payload}
 
 
@@ -296,6 +309,7 @@ async def _delete_run_records(session: AsyncSession, run_id: str) -> None:
         RunEvent,
         RunSkillSnapshot,
         SolverState,
+        RunExecutionLease,
         RunAttempt,
     ):
         await session.execute(delete(model).where(model.run_id == run_id))
@@ -365,6 +379,9 @@ async def get_solver_state(run_id: str, session: AsyncSession = Depends(get_sess
 @router.post("/runs/{run_id}/start")
 async def start_run(run_id: str, session: AsyncSession = Depends(get_session)) -> dict:
     run = await require_run(run_id, session)
+    active_lease = await session.scalar(select(RunExecutionLease).where(RunExecutionLease.run_id == run.id))
+    if active_lease:
+        raise DomainError("RUN_ALREADY_EXECUTING", "Run already has an active execution lease.", status_code=409)
     if run.status != RunStatus.CREATED:
         raise DomainError(
             "RUN_INVALID_STATE",
@@ -386,6 +403,9 @@ async def restart_run(
         raise DomainError(
             "RUN_ALREADY_ACTIVE", "The run is already executing.", status_code=409
         )
+    active_lease = await session.scalar(select(RunExecutionLease).where(RunExecutionLease.run_id == run.id))
+    if active_lease:
+        raise DomainError("RUN_ALREADY_EXECUTING", "Run already has an active execution lease.", status_code=409)
     previous_status = run.status
     previous_error = {
         "code": run.last_error_code,
@@ -430,6 +450,9 @@ async def continue_run(
     run_id: str, payload: dict, session: AsyncSession = Depends(get_session)
 ) -> dict:
     run = await require_run(run_id, session)
+    active_lease = await session.scalar(select(RunExecutionLease).where(RunExecutionLease.run_id == run.id))
+    if active_lease:
+        raise DomainError("RUN_ALREADY_EXECUTING", "Run already has an active execution lease.", status_code=409)
     if run.status not in {RunStatus.WAITING_USER, RunStatus.PAUSED_RATE_LIMIT}:
         raise DomainError(
             "RUN_NOT_WAITING", "Only runs waiting for user input can continue.", status_code=409

@@ -15,6 +15,17 @@ from app.services.runner_client import runner_client
 
 
 class CodexMaterializer:
+    _FORBIDDEN_DIRECT_TOOLS = {
+        "command_execution",
+        "node_repl",
+        "node_repl.js",
+        "web_search",
+        "shell",
+        "powershell",
+        "cmd.exe",
+        "bash",
+    }
+
     async def sync(self, session: AsyncSession, run: SolveRun) -> None:
         if run.engine_type != "codex_sdk":
             return
@@ -65,6 +76,16 @@ class CodexMaterializer:
         tool_name = payload.get("tool")
         if not tool_call_ref or not tool_name:
             return
+        normalized_tool = str(tool_name)
+        if (
+            normalized_tool in self._FORBIDDEN_DIRECT_TOOLS
+            or payload.get("error_code") == "CODEX_DIRECT_TOOL_FORBIDDEN"
+        ):
+            # Policy violations are audit evidence, not successful CTF tool
+            # evidence.  Keeping them out of ToolCall/Artifact/Observation
+            # prevents reports and learned-skill candidates from treating
+            # forbidden host-side execution as a valid solving step.
+            return
         marker = f"codex:{tool_call_ref}"
         tool_call = await session.scalar(
             select(ToolCall).where(ToolCall.run_id == run.id, ToolCall.runner_job_id == marker)
@@ -109,6 +130,8 @@ class CodexMaterializer:
         safe_marker = str(tool_call.runner_job_id or tool_call.id).replace(":", "_")
         relative = Path("responses") / "codex_sdk" / f"{safe_marker}.txt"
         target = (root / relative).resolve()
+        if root not in target.parents:
+            return
         target.parent.mkdir(parents=True, exist_ok=True)
         if not target.exists() or target.read_text(encoding="utf-8", errors="replace") != output:
             target.write_text(output, encoding="utf-8")

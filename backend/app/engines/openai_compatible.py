@@ -6,6 +6,7 @@ from typing import Any
 import httpx
 from pydantic import TypeAdapter, ValidationError
 
+from app.engines.action_adapter import validate_action
 from app.engines.retry import TRANSIENT_HTTP_STATUSES, backoff_delay, parse_retry_after
 from app.schemas.agent import AgentAction
 
@@ -92,59 +93,6 @@ class OpenAICompatibleEngine:
                 return value
         raise ValueError("model response did not contain one JSON object")
 
-    @staticmethod
-    def _normalize_action_payload(raw_action: dict) -> dict:
-        """Normalize harmless gateway/model aliases before strict validation."""
-        normalized = dict(raw_action)
-        aliases = {"ToolAction": "tool", "SkillAction": "skill", "FinishAction": "finish"}
-        # Some OpenAI-compatible gateways ignore the discriminator in the
-        # response schema and return the action fields directly. Infer the
-        # variant from fields that are unique to each action before strict
-        # pydantic validation. This keeps the protocol strict at the boundary
-        # while remaining compatible with real-world providers.
-        action_type = normalized.get("type") or normalized.get("action_type")
-        if action_type is None:
-            if normalized.get("tool_name") or "arguments" in normalized:
-                action_type = "tool"
-            elif normalized.get("operation") and (
-                normalized.get("skill_id")
-                or normalized.get("skill_name")
-                or normalized.get("skill_identity")
-            ):
-                action_type = "skill"
-            elif normalized.get("result") is not None or normalized.get("flag_candidate") is not None:
-                action_type = "finish"
-        if isinstance(action_type, str):
-            normalized["type"] = aliases.get(action_type, action_type.lower())
-        normalized.pop("action_type", None)
-        if normalized.get("type") == "tool":
-            # Older prompts used active_hypothesis and some providers copied
-            # that name back verbatim. ToolAction calls the field hypothesis.
-            if "hypothesis" not in normalized and "active_hypothesis" in normalized:
-                normalized["hypothesis"] = normalized["active_hypothesis"]
-            normalized.pop("active_hypothesis", None)
-            # reason is required by the strict schema. A small compatibility
-            # fallback is preferable to dropping a valid tool request solely
-            # because a provider omitted this explanatory field.
-            if not isinstance(normalized.get("reason"), str) or not normalized["reason"].strip():
-                for alias in ("tool_reason", "action_reason"):
-                    value = normalized.pop(alias, None)
-                    if isinstance(value, str) and value.strip():
-                        normalized["reason"] = value.strip()
-                        break
-            normalized.setdefault("reason", "Continue the authorized investigation")
-        if normalized.get("type") == "skill":
-            identity = normalized.pop("skill_identity", None)
-            if isinstance(identity, dict):
-                normalized.setdefault("skill_id", identity.get("skill_id") or identity.get("id"))
-                normalized.setdefault("skill_name", identity.get("skill_name") or identity.get("name"))
-            evidence = normalized.get("supporting_evidence")
-            if isinstance(evidence, str):
-                normalized["supporting_evidence"] = [evidence]
-            elif evidence is None:
-                normalized["supporting_evidence"] = []
-        return normalized
-
     async def next_action(self, messages: list[dict]) -> AgentAction:
         if time.monotonic() < self.cooldown_until:
             raise ModelRateLimitError("MODEL_RATE_LIMITED: provider cooldown is active")
@@ -187,8 +135,7 @@ class OpenAICompatibleEngine:
                 if not isinstance(content, str):
                     raise ValueError("model response did not contain JSON content")
                 raw_action = self._extract_json(content)
-                raw_action = self._normalize_action_payload(raw_action)
-                action = action_adapter.validate_python(raw_action)
+                action, normalization_trace = validate_action(raw_action)
                 usage = body.get("usage") or {}
                 self.last_trace = {
                     "latency_ms": round((time.perf_counter() - started) * 1000),
@@ -198,6 +145,7 @@ class OpenAICompatibleEngine:
                     "parse_attempts": parse_attempts + 1,
                     "response_excerpt": content[:2000],
                     "action": action.model_dump(),
+                    "normalization": normalization_trace,
                 }
                 return action
             except httpx.HTTPStatusError as error:

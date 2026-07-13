@@ -116,6 +116,31 @@ class _LegacyToolEnvelopeClient:
         return Response()
 
 
+class _NestedToolClient:
+    def __init__(self, **_: object) -> None: pass
+
+    async def __aenter__(self): return self
+    async def __aexit__(self, *_: object) -> None: pass
+
+    async def post(self, *_: object, **__: object):
+        class Response:
+            def raise_for_status(self) -> None:
+                pass
+
+            def json(self) -> dict:
+                return {
+                    "choices": [{"message": {"content": """{
+                        \"tool\": {
+                            \"toolName\": \"http_request\",
+                            \"params\": {\"url\": \"http://target.test/\"},
+                            \"action_reason\": \"Probe nested tool object\"
+                        }
+                    }"""}}]
+                }
+
+        return Response()
+
+
 @pytest.mark.asyncio
 async def test_provider_429_is_classified_as_rate_limited(monkeypatch: pytest.MonkeyPatch) -> None:
     async def no_sleep(_: float) -> None: pass
@@ -167,3 +192,13 @@ async def test_provider_normalizes_legacy_tool_envelope(monkeypatch: pytest.Monk
     assert action.tool_name == "http_request"
     assert action.hypothesis == "Probe the disclosed endpoint"
     assert action.reason == "Continue the authorized investigation"
+
+
+@pytest.mark.asyncio
+async def test_provider_normalizes_nested_tool_object(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("app.engines.openai_compatible.httpx.AsyncClient", _NestedToolClient)
+    action = await OpenAICompatibleEngine("https://provider.test/v1", "secret", "model").next_action([])
+    assert action.type == "tool"
+    assert action.tool_name == "http_request"
+    assert action.arguments == {"url": "http://target.test/"}
+    assert action.reason == "Probe nested tool object"

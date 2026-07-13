@@ -1,12 +1,26 @@
 import type { ThreadEvent, ThreadItem } from "@openai/codex-sdk";
 import type { BridgeEvent } from "./types.js";
 
-const WAITING_USER_MARKER = /\[\[\s*C7F_WAITING_USER\s*\]\]/i;
+const WAITING_USER_MARKER = /^\s*\[\[\s*C7F_WAITING_USER\s*\]\]\s*$/i;
 
 function normalizeAgentMessage(text: string): { message: string; waitingUser: boolean } {
-  const waitingUser = WAITING_USER_MARKER.test(text);
+  const lines = text.split(/\r?\n/);
+  let lastContentIndex = -1;
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    if (lines[index].trim().length > 0) {
+      lastContentIndex = index;
+      break;
+    }
+  }
+  const waitingUser = lastContentIndex >= 0 && WAITING_USER_MARKER.test(lines[lastContentIndex]);
+  const message = waitingUser
+    ? lines
+        .filter((_, index) => index !== lastContentIndex)
+        .join("\n")
+        .trim()
+    : text.trim();
   return {
-    message: text.replace(WAITING_USER_MARKER, "").trim(),
+    message,
     waitingUser,
   };
 }

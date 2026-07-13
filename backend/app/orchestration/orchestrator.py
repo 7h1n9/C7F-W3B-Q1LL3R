@@ -2,7 +2,6 @@ import asyncio
 import contextlib
 import hashlib
 import json
-from datetime import UTC, datetime
 from pathlib import Path
 from time import monotonic
 
@@ -24,7 +23,7 @@ from app.engines import (
 )
 from app.models.challenge import Challenge
 from app.models.model_config import ModelConfig
-from app.models.run import AgentTurn, Artifact, Observation, RunAttempt, SolveRun, ToolCall
+from app.models.run import AgentTurn, Artifact, FlagCandidate, Observation, SolveRun, ToolCall
 from app.models.skill import RunSkillSnapshot, Skill
 from app.orchestration.state_machine import TERMINAL, RunStatus, transition
 from app.schemas.agent import ActionHypothesis, FinishAction, SkillAction, ToolAction
@@ -38,6 +37,7 @@ from app.services.flags import flag_service
 from app.services.hypotheses import hypothesis_service
 from app.services.progress_evaluator import progress_evaluator
 from app.services.reports import report_service
+from app.services.run_attempts import run_attempt_service
 from app.services.runner_client import runner_client
 from app.services.solver_state import solver_state_service
 from app.services.tool_permissions import effective_tools_for
@@ -123,6 +123,26 @@ class SolveOrchestrator:
         await session.commit()
         await solver_state_service.sync_from_run(session, run)
         await event_service.append(session, run.id, "run.status_changed", {"status": run.status})
+
+    async def _stop_if_no_progress(
+        self,
+        session,
+        run: SolveRun,
+        challenge: Challenge,
+        no_progress_count: int,
+    ) -> bool:
+        if no_progress_count < 6:
+            return False
+        await self._transition(session, run, RunStatus.REPORTING)
+        await report_service.generate(
+            session,
+            run,
+            challenge,
+            "unsolved",
+            "连续 6 次动作没有产生新的结构化证据，任务受控结束。",
+        )
+        await self._transition(session, run, RunStatus.COMPLETED_UNSOLVED)
+        return True
 
     async def _resolve_skill(self, session, skill_id: str | None, skill_name: str | None) -> Skill | None:
         if skill_id:
@@ -427,15 +447,15 @@ class SolveOrchestrator:
             self.active_tasks[run_id] = task
         async with SessionLocal() as session:
             attempt = None
+            lease = None
             try:
                 run = await session.scalar(select(SolveRun).where(SolveRun.id == run_id))
                 if not run:
                     return
-                previous_attempts = await session.scalar(select(func.count()).select_from(RunAttempt).where(RunAttempt.run_id == run.id))
-                attempt = RunAttempt(run_id=run.id, attempt_number=int(previous_attempts or 0) + 1, engine_type=run.engine_type, model_config_id=run.model_config_id, started_at=datetime.now(UTC), status="RUNNING")
-                session.add(attempt)
                 try:
-                    await session.commit()
+                    attempt, lease = await run_attempt_service.begin(session, run)
+                except DomainError:
+                    raise
                 except Exception as error:
                     # A newly created attempt is the first database write in
                     # the background task.  If that write fails, the old
@@ -476,9 +496,9 @@ class SolveOrchestrator:
                 engine = await self.build_engine(run, session)
                 self.active_engines[run_id] = engine
                 if run.engine_type == "openai_compatible":
-                    await self._run_openai(session, run, engine, user_message)
+                    await self._run_openai(session, run, engine, user_message, attempt, lease)
                 else:
-                    await self._run_event_engine(session, run, engine, user_message)
+                    await self._run_event_engine(session, run, engine, user_message, attempt, lease)
             except asyncio.CancelledError:
                 raise
             except Exception as error:
@@ -493,6 +513,8 @@ class SolveOrchestrator:
                         code = error.code
                     elif isinstance(error, BridgeUnavailableError):
                         code = "CODEX_BRIDGE_UNAVAILABLE"
+                    elif isinstance(error, DomainError):
+                        code = error.code
                     else:
                         code = "ENGINE_ERROR"
                     run.last_error_code, run.last_error_message = code, str(error)[:4000]
@@ -511,12 +533,7 @@ class SolveOrchestrator:
                     )
             finally:
                 if attempt is not None and "run" in locals():
-                    attempt.finished_at = datetime.now(UTC)
-                    attempt.status = str(run.status)
-                    attempt.error_code = run.last_error_code
-                    attempt.agent_steps = run.agent_step_count
-                    attempt.tool_calls = run.tool_call_count
-                    await session.commit()
+                    await run_attempt_service.finish(session, run, attempt, lease)
                 self.active_engines.pop(run_id, None)
                 self.active_tasks.pop(run_id, None)
                 close = getattr(locals().get("engine"), "close", None)
@@ -524,7 +541,13 @@ class SolveOrchestrator:
                     await close()
 
     async def _run_openai(
-        self, session, run: SolveRun, engine: OpenAICompatibleEngine, user_message: str | None
+        self,
+        session,
+        run: SolveRun,
+        engine: OpenAICompatibleEngine,
+        user_message: str | None,
+        attempt=None,
+        lease=None,
     ) -> None:
         if run.status == RunStatus.CREATED:
             await self._transition(session, run, RunStatus.PREPARING)
@@ -541,6 +564,7 @@ class SolveOrchestrator:
         consecutive_runner_failures = 0
         last_runner_failure: tuple[str, str] | None = None
         while run.agent_step_count < run.max_agent_steps:
+            await run_attempt_service.heartbeat(session, attempt, lease)
             if RunStatus(run.status) == RunStatus.CANCELLED:
                 return
             if monotonic() - started > run.max_runtime_seconds:
@@ -657,11 +681,28 @@ class SolveOrchestrator:
                             "agent.replan_required",
                             {"reason": "Repeated no-progress actions"},
                         )
+                    if await self._stop_if_no_progress(
+                        session, run, challenge, no_progress_count
+                    ):
+                        return
                 continue
             if isinstance(action, ToolAction):
                 if decision_required:
                     await event_service.append(session, run.id, "agent.action_rejected", {"type": "tool", "code": "SKILL_DECISION_REQUIRED"})
                     await solver_state_service.record_rejected_path(session, run.id, {"code": "SKILL_DECISION_REQUIRED", "tool": action.tool_name})
+                    no_progress_count = await solver_state_service.record_progress(
+                        session, run.id, False
+                    )
+                    await event_service.append(
+                        session,
+                        run.id,
+                        "agent.no_progress",
+                        {"tool": action.tool_name, "no_progress_count": no_progress_count},
+                    )
+                    if await self._stop_if_no_progress(
+                        session, run, challenge, no_progress_count
+                    ):
+                        return
                     await self._transition(session, run, RunStatus.PLANNING)
                     continue
                 hypothesis = (
@@ -716,6 +757,10 @@ class SolveOrchestrator:
                         "agent.no_progress",
                         {"tool": action.tool_name, "no_progress_count": no_progress_count},
                     )
+                    if await self._stop_if_no_progress(
+                        session, run, challenge, no_progress_count
+                    ):
+                        return
                     continue
                 fingerprint = fingerprint_action(action.tool_name, action.arguments)
                 state = await solver_state_service.load(session, run.id)
@@ -752,6 +797,10 @@ class SolveOrchestrator:
                             "agent.replan_required",
                             {"reason": "Repeated no-progress actions"},
                         )
+                    if await self._stop_if_no_progress(
+                        session, run, challenge, no_progress_count
+                    ):
+                        return
                     continue
                 if action.activate_skill:
                     if await solver_state_service.activate_skill(session, run.id, action.activate_skill):
@@ -782,6 +831,10 @@ class SolveOrchestrator:
                         "agent.no_progress",
                         {"tool": action.tool_name, "no_progress_count": no_progress_count},
                     )
+                    if await self._stop_if_no_progress(
+                        session, run, challenge, no_progress_count
+                    ):
+                        return
                     break
                 await self._transition(session, run, RunStatus.EXECUTING)
                 run.tool_call_count += 1
@@ -832,6 +885,10 @@ class SolveOrchestrator:
                             "agent.replan_required",
                             {"reason": "Repeated no-progress actions"},
                         )
+                    if await self._stop_if_no_progress(
+                        session, run, challenge, no_progress_count
+                    ):
+                        return
                     await self._transition(session, run, RunStatus.EVALUATING)
                     continue
                 call = await session.scalar(
@@ -858,6 +915,7 @@ class SolveOrchestrator:
                         session,
                         run,
                         challenge,
+                        action.arguments,
                         action.tool_name,
                         result,
                         observation,
@@ -930,6 +988,17 @@ class SolveOrchestrator:
                         "agent.replan_required",
                         {"reason": "Repeated no-progress actions"},
                     )
+                if progress["no_progress_count"] >= 6:
+                    await self._transition(session, run, RunStatus.REPORTING)
+                    await report_service.generate(
+                        session,
+                        run,
+                        challenge,
+                        "unsolved",
+                        "连续 6 次动作没有产生新的结构化证据，任务受控结束。",
+                    )
+                    await self._transition(session, run, RunStatus.COMPLETED_UNSOLVED)
+                    return
                 if result.get("status") == "COMPLETED":
                     consecutive_runner_failures = 0
                     last_runner_failure = None
@@ -1025,7 +1094,13 @@ class SolveOrchestrator:
         return True
 
     async def _run_event_engine(
-        self, session, run: SolveRun, engine: SolveEngine, user_message: str | None
+        self,
+        session,
+        run: SolveRun,
+        engine: SolveEngine,
+        user_message: str | None,
+        attempt=None,
+        lease=None,
     ) -> None:
         if run.status == RunStatus.CREATED:
             await self._transition(session, run, RunStatus.PREPARING)
@@ -1042,8 +1117,12 @@ class SolveOrchestrator:
         auto_turns = 0
         max_auto_turns = max(1, run.max_agent_steps)
         auto_started = monotonic()
+        no_progress_turns = 0
+        no_progress_threshold = 2
         while True:
+            await run_attempt_service.heartbeat(session, attempt, lease)
             auto_turns += 1
+            before_progress = await self._codex_progress_snapshot(session, run.id)
             async for item in iterator:
                 thread_id = item.payload.get("thread_id")
                 if isinstance(thread_id, str):
@@ -1053,6 +1132,11 @@ class SolveOrchestrator:
                     await self._transition(session, run, RunStatus(item.status))
                 await event_service.append(session, run.id, item.event_type, item.payload)
             await codex_materializer.sync(session, run)
+            after_progress = await self._codex_progress_snapshot(session, run.id)
+            if after_progress == before_progress:
+                no_progress_turns += 1
+            else:
+                no_progress_turns = 0
             current_status = RunStatus(run.status)
             if current_status in TERMINAL or current_status == RunStatus.WAITING_USER:
                 return
@@ -1071,6 +1155,19 @@ class SolveOrchestrator:
                     },
                 )
                 return
+            if no_progress_turns >= no_progress_threshold:
+                await self._transition(session, run, RunStatus.WAITING_USER)
+                await event_service.append(
+                    session,
+                    run.id,
+                    "agent.message",
+                    {
+                        "message": "Codex 连续两轮没有产生新的事件、证据或状态变化，已暂停等待人工确认。",
+                        "requires_user_confirmation": True,
+                        "reason": "CODEX_NO_PROGRESS",
+                    },
+                )
+                return
             if monotonic() - auto_started >= run.max_runtime_seconds:
                 await self._transition(session, run, RunStatus.WAITING_USER)
                 await event_service.append(
@@ -1085,6 +1182,34 @@ class SolveOrchestrator:
                 )
                 return
             iterator = engine.resume(run.id)
+
+    async def _codex_progress_snapshot(
+        self, session, run_id: str
+    ) -> tuple[int, int, int, int, str | None]:
+        # Do not count raw RunEvent rows here.  Codex mock mode and some SDK
+        # failures can emit fresh agent.message/turn.completed rows forever
+        # without producing any usable evidence.  Only durable solving outputs
+        # or a status change count as meaningful progress for auto-resume.
+        tool_count = await session.scalar(
+            select(func.count()).select_from(ToolCall).where(ToolCall.run_id == run_id)
+        )
+        artifact_count = await session.scalar(
+            select(func.count()).select_from(Artifact).where(Artifact.run_id == run_id)
+        )
+        observation_count = await session.scalar(
+            select(func.count()).select_from(Observation).where(Observation.run_id == run_id)
+        )
+        flag_count = await session.scalar(
+            select(func.count()).select_from(FlagCandidate).where(FlagCandidate.run_id == run_id)
+        )
+        status = await session.scalar(select(SolveRun.status).where(SolveRun.id == run_id))
+        return (
+            int(tool_count or 0),
+            int(artifact_count or 0),
+            int(observation_count or 0),
+            int(flag_count or 0),
+            status,
+        )
 
     async def continue_with_message(self, run_id: str, message: str) -> None:
         await self.start(run_id, message)

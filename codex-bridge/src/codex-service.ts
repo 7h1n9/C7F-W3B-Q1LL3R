@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, symlinkSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Codex } from "@openai/codex-sdk";
@@ -15,6 +15,16 @@ export class CodexService {
   private readonly mock = process.env.CODEX_MOCK_MODE === "true";
   private readonly threads = new ThreadStore<SdkThread>();
   private readonly codex = this.mock ? undefined : new Codex();
+
+  health(): Record<string, unknown> {
+    return {
+      status: "ok",
+      mock_mode: this.mock,
+      codex_sdk_loaded: true,
+      version: bridgeVersion(),
+      active_threads: this.threads.size(),
+    };
+  }
 
   async create(input: ThreadRequest): Promise<ThreadResponse> {
     const thread = this.mock
@@ -71,6 +81,15 @@ export class CodexService {
         })(),
       }),
     };
+  }
+}
+
+function bridgeVersion(): string {
+  try {
+    const packageJson = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf-8"));
+    return String(packageJson.version || "unknown");
+  } catch {
+    return "unknown";
   }
 }
 

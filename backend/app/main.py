@@ -14,14 +14,22 @@ from app.models.run import SolveRun
 from app.orchestration.state_machine import TERMINAL, RunStatus, transition
 from app.services.builtin_skills import builtin_skill_sync_service
 from app.services.events import event_service
+from app.services.run_attempts import run_attempt_service
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    get_settings().require_safe_production_secrets()
+    settings = get_settings()
+    settings.require_safe_production_secrets()
+    if settings.codex_diagnostics_enabled:
+        # Diagnostic mode must preserve the live incident scene: do not close
+        # attempts, delete leases, fail in-flight runs, or start recovery work.
+        yield
+        return
     # The service intentionally does not resume autonomous work after a restart.
     async with SessionLocal() as session:
         await builtin_skill_sync_service.sync(session)
+        await run_attempt_service.reconcile_startup(session)
         runs = list((await session.scalars(select(SolveRun))).all())
         for run in runs:
             if RunStatus(run.status) not in TERMINAL and run.status != RunStatus.CREATED:
