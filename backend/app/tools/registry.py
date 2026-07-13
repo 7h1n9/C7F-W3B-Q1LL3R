@@ -5,6 +5,7 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    StrictBool,
     StrictInt,
     StrictStr,
     ValidationError,
@@ -27,7 +28,7 @@ class ToolDefinition(BaseModel):
 
     def validate_arguments(self, arguments: dict) -> dict:
         """Validate invocation input from the declarative YAML parameter schema."""
-        type_map = {"string": StrictStr, "integer": StrictInt, "object": dict, "array": list}
+        type_map = {"string": StrictStr, "integer": StrictInt, "object": dict, "array": list, "boolean": StrictBool}
         fields: dict[str, tuple[object, object]] = {}
         for name, specification in self.parameters.items():
             declared_type = type_map.get(specification.get("type"))

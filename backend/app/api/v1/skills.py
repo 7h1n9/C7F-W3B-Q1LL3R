@@ -24,6 +24,7 @@ def read(skill: Skill, binding_count: int = 0) -> dict:
         "skill_kind": skill.skill_kind,
         "activation_mode": skill.activation_mode,
         "triggers": skill.triggers,
+        "negative_triggers": skill.negative_triggers,
         "prerequisites": skill.prerequisites,
         "required_tools": skill.required_tools,
         "recommended_tools": skill.recommended_tools,
@@ -35,6 +36,7 @@ def read(skill: Skill, binding_count: int = 0) -> dict:
         "risk_level": skill.risk_level,
         "version": skill.version,
         "enabled": skill.enabled,
+        "catalog_scope": skill.catalog_scope,
         "builtin_path": skill.builtin_path,
         "binding_count": binding_count,
         "created_at": skill.created_at.isoformat(),
@@ -147,6 +149,7 @@ async def duplicate_skill(skill_id: str, session: AsyncSession = Depends(get_ses
         skill_kind=item.skill_kind,
         activation_mode=item.activation_mode,
         triggers=item.triggers,
+        negative_triggers=item.negative_triggers,
         prerequisites=item.prerequisites,
         required_tools=item.required_tools,
         recommended_tools=item.recommended_tools,
@@ -157,6 +160,7 @@ async def duplicate_skill(skill_id: str, session: AsyncSession = Depends(get_ses
         allowed_tools=item.allowed_tools,
         risk_level=item.risk_level,
         enabled=item.enabled,
+        catalog_scope=item.catalog_scope,
         checksum=hashlib.sha256(item.content_markdown.encode()).hexdigest(),
     )
     session.add(copy)

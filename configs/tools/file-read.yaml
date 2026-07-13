@@ -4,6 +4,10 @@ category: workspace
 description: Read a file within the current run workspace only.
 risk_level: low
 enabled: true
-parameters: {path: {type: string, required: true}}
+parameters:
+  path: {type: string, required: true}
+  start_line: {type: integer, required: false}
+  end_line: {type: integer, required: false}
+  max_chars: {type: integer, required: false}
 limits: {max_output_bytes: 1048576}
 permissions: {workspace_only: true}

@@ -27,12 +27,32 @@ app = FastAPI(title="CTF Kali Runner", version="0.2.0", lifespan=lifespan)
 
 @app.get("/health")
 async def health() -> dict:
-    return {"status": "ok", "execution_backend": "KaliVmExecutionBackend", "capabilities": {"tshark": bool(shutil.which("tshark")), "capinfos": bool(shutil.which("capinfos"))}}
+    capabilities = await capability_registry()
+    return {"status": "ok", "execution_backend": "KaliVmExecutionBackend", "capabilities": capabilities}
+
+
+async def capability_registry() -> dict:
+    tools = [
+        "http_request", "http_session_request", "http_extract", "whatweb_fingerprint", "js_asset_analyze", "source_map_analyze",
+        "file_type", "strings_extract", "archive_list", "content_discovery", "jwt_inspect", "file_read",
+        "file_search", "python_run", "pcap_metadata", "pcap_protocols", "pcap_query", "pcap_tcp_stream",
+        "pcap_http_objects", "pcap_dns_summary", "pcap_credentials", "sqlmap_detect", "nmap_service_probe",
+        "nikto_scan", "binwalk_scan", "exiftool_metadata",
+    ]
+    return {
+        "tools": [{"name": name, "available": True, "version": "policy-wrapper", "last_self_check": None} for name in tools],
+        "binaries": {name: bool(shutil.which(name)) for name in ("tshark", "capinfos", "ffuf", "feroxbuster", "sqlmap", "nmap", "nikto", "binwalk", "exiftool")},
+    }
 
 
 def require_token(x_runner_token: str | None = Header(default=None)) -> None:
     if not settings.api_token or not x_runner_token or not secrets.compare_digest(x_runner_token, settings.api_token):
         raise HTTPException(401, detail="runner token required")
+
+
+@app.get("/api/v1/capabilities")
+async def capabilities(_: None = Depends(require_token)) -> dict:
+    return await capability_registry()
 
 
 def digest(path: Path) -> str:

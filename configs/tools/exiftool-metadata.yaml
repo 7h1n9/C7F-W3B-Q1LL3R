@@ -1,0 +1,9 @@
+name: exiftool_metadata
+display_name: Exif Metadata
+category: workspace
+description: Read metadata from an existing workspace file.
+risk_level: low
+enabled: true
+parameters: {path: {type: string, required: true}}
+limits: {timeout_seconds: 20, max_output_bytes: 131072}
+permissions: {workspace_only: true}

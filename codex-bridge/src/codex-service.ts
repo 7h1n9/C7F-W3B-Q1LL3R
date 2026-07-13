@@ -37,7 +37,8 @@ export class CodexService {
   async *stream(threadId: string, prompt: string): AsyncGenerator<BridgeEvent> {
     const thread = this.threads.get(threadId);
     if (!thread) throw new Error("THREAD_NOT_FOUND");
-    const streamed = await thread.runStreamed(prompt);
+    const guardedPrompt = `${prompt}\n\n[EXECUTION BOUNDARY]\nDo not use direct PowerShell, shell, curl, Invoke-WebRequest, or arbitrary command execution for network or challenge analysis. Route authorized actions through the backend Tool Gateway/ctfctl interface and keep local edits inside the current Run Workspace.`;
+    const streamed = await thread.runStreamed(guardedPrompt);
     for await (const event of streamed.events) {
       for (const bridgeEvent of threadEventsToBridgeEvents(event)) yield bridgeEvent;
     }

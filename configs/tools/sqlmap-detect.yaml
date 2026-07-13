@@ -1,0 +1,9 @@
+name: sqlmap_detect
+display_name: SQL Injection Detect
+category: web
+description: Policy-controlled low-risk SQL injection detection wrapper.
+risk_level: high
+enabled: true
+parameters: {url: {type: string, required: true}, parameter: {type: string, required: false}}
+limits: {timeout_seconds: 60, max_requests: 30}
+permissions: {target_allowlist_required: true, dump_forbidden: true, os_shell_forbidden: true}

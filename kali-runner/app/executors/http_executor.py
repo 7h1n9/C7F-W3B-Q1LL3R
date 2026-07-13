@@ -1,3 +1,6 @@
+import json
+import re
+from html.parser import HTMLParser
 from urllib.parse import urljoin, urlparse
 
 import httpx
@@ -5,6 +8,73 @@ from fastapi import HTTPException
 
 from app.config import settings
 from app.models import JobRequest
+
+
+class _HTMLSummary(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__()
+        self.title = ""
+        self.comments: list[str] = []
+        self.links: list[str] = []
+        self.scripts: list[str] = []
+        self.forms: list[dict] = []
+        self._title = False
+        self._title_parts: list[str] = []
+        self._form: dict | None = None
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        values = dict(attrs)
+        if tag == "title":
+            self._title = True
+        elif tag == "a" and values.get("href"):
+            self.links.append(values["href"] or "")
+        elif tag == "script" and values.get("src"):
+            self.scripts.append(values["src"] or "")
+        elif tag == "form":
+            self._form = {"action": values.get("action", ""), "method": values.get("method", "GET").upper(), "inputs": []}
+            self.forms.append(self._form)
+        elif tag == "input" and self._form is not None:
+            self._form["inputs"].append({"name": values.get("name"), "type": values.get("type", "text"), "hidden": values.get("type") == "hidden"})
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag == "title":
+            self._title = False
+            self.title = "".join(self._title_parts).strip()
+        elif tag == "form":
+            self._form = None
+
+    def handle_data(self, data: str) -> None:
+        if self._title:
+            self._title_parts.append(data)
+
+    def handle_comment(self, data: str) -> None:
+        if data.strip():
+            self.comments.append(data.strip()[:500])
+
+
+def _safe_headers(headers: dict[str, str]) -> dict[str, str]:
+    blocked = {"authorization", "cookie", "set-cookie", "proxy-authorization"}
+    return {key: ("<redacted>" if key.lower() in blocked else value[:500]) for key, value in headers.items() if key.lower() in {"content-type", "location", "server", "x-powered-by", "www-authenticate"}}
+
+
+def _extract_body(body: str, content_type: str) -> dict:
+    facts: dict = {"json_keys": [], "suspected_credentials": [], "suspected_flags": []}
+    if "json" in content_type.lower():
+        try:
+            value = json.loads(body)
+            facts["json_keys"] = list(value.keys())[:100] if isinstance(value, dict) else []
+        except json.JSONDecodeError:
+            pass
+    if "html" in content_type.lower() or "<html" in body.lower():
+        parser = _HTMLSummary()
+        parser.feed(body)
+        facts.update({"html_title": parser.title, "html_comments": parser.comments[:20], "forms": parser.forms[:20], "links": parser.links[:50], "script_urls": parser.scripts[:50]})
+        facts["form_actions"] = [item["action"] for item in parser.forms]
+        facts["parameter_names"] = [field.get("name") for form in parser.forms for field in form.get("inputs", []) if field.get("name")]
+    lowered = body.lower()
+    facts["suspected_credentials"] = [term for term in ("password", "passwd", "secret", "token", "api_key", "authorization") if term in lowered]
+    facts["suspected_flags"] = re.findall(r"flag\{[^}]{1,200}\}", body, flags=re.I)[:20]
+    return facts
 
 
 async def execute_http(request: JobRequest) -> dict:
@@ -16,10 +86,12 @@ async def execute_http(request: JobRequest) -> dict:
             raise HTTPException(403, detail="target host is not allowlisted")
     validate(url)
     follow = bool(args.get("follow_redirects", False))
+    redirect_history: list[dict] = []
     async with httpx.AsyncClient(follow_redirects=False, timeout=min(float(args.get("timeout", 30)), settings.job_timeout_seconds), trust_env=False) as client:
         for hop in range(6):
             response = await client.request(method=str(args.get("method", "GET")).upper(), url=url, headers=args.get("headers", {}), params=args.get("query", {}), content=args.get("body"))
             location = response.headers.get("location")
+            redirect_history.append({"status_code": response.status_code, "url": str(response.url), "location": location})
             if not location or response.status_code not in {301, 302, 303, 307, 308}:
                 break
             if not follow:
@@ -28,5 +100,22 @@ async def execute_http(request: JobRequest) -> dict:
                 raise HTTPException(400, detail="too many redirects")
             url = urljoin(str(response.url), location)
             validate(url)
-    body = response.content[:settings.max_output_bytes]
-    return {"status_code": response.status_code, "headers": dict(response.headers), "body": body.decode(errors="replace"), "truncated": len(response.content) > len(body), "summary": f"HTTP {response.status_code} from {urlparse(str(response.url)).hostname}"}
+    body = response.content[: settings.http_excerpt_bytes]
+    content_type = response.headers.get("content-type", "")
+    body_text = body.decode(errors="replace") if not content_type.startswith(("image/", "audio/", "video/", "application/octet-stream")) else None
+    extracted = _extract_body(body_text or "", content_type) if body_text is not None else {"binary": True}
+    return {
+        "status_code": response.status_code,
+        "final_url": str(response.url),
+        "redirect_history": redirect_history[:-1],
+        "content_type": content_type,
+        "headers": dict(response.headers),
+        "selected_headers": _safe_headers(dict(response.headers)),
+        "cookie_names": [part.split("=", 1)[0].strip() for part in response.headers.get("set-cookie", "").split(";") if "=" in part],
+        "body": body_text or "",
+        "body_excerpt": body_text,
+        "body_length": len(response.content),
+        "truncated": len(response.content) > len(body),
+        "extracted_facts": extracted,
+        "summary": f"HTTP {response.status_code} from {urlparse(str(response.url)).hostname}",
+    }

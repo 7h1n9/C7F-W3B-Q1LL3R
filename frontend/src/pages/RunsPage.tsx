@@ -1,4 +1,4 @@
-import { ArrowRightOutlined, DeleteOutlined } from "@ant-design/icons";
+import { ArrowRightOutlined, DeleteOutlined, ReloadOutlined } from "@ant-design/icons";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Button, Card, Empty, message, Popconfirm, Space, Table, Tag } from "antd";
 import { Link } from "react-router-dom";
@@ -28,6 +28,9 @@ export function RunsPage() {
           <h1>解题任务</h1>
           <p>查看每次自动化分析的状态、阶段、时间线与审计证据。</p>
         </div>
+        <Button icon={<ReloadOutlined />} loading={query.isFetching} onClick={() => void query.refetch()}>
+          刷新
+        </Button>
       </div>
       <Card className="panel-card">
         <Table<SolveRun>

@@ -22,6 +22,7 @@ import {
   Tabs,
   Tag,
   Timeline,
+  Typography,
   message,
 } from "antd";
 import { useEffect, useMemo, useState } from "react";
@@ -517,7 +518,19 @@ export function WorkspacePage() {
                   rowKey="id"
                   dataSource={flagRows}
                   columns={[
-                    { title: "候选", dataIndex: "candidate" },
+                    {
+                      title: "候选",
+                      dataIndex: "candidate",
+                      width: "68%",
+                      render: (value: string) => (
+                        <Typography.Text
+                          ellipsis={{ tooltip: value }}
+                          style={{ display: "inline-block", maxWidth: "100%" }}
+                        >
+                          {value}
+                        </Typography.Text>
+                      ),
+                    },
                     {
                       title: "状态",
                       dataIndex: "review_state",

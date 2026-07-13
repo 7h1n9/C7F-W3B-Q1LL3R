@@ -1,4 +1,5 @@
 import hashlib
+import re
 from pathlib import Path
 
 from sqlalchemy import select
@@ -144,6 +145,13 @@ class CodexMaterializer:
             "output_length": len(content),
             "truncated": False,
             "source": "codex_sdk",
+            "tool_model_view": {
+                "summary": summary,
+                "content_excerpt": re.sub(r"(?i)(authorization|cookie|token|password)(\s*[:=]\s*)([^;\s,]+)", r"\1\2<redacted>", content[:8192]),
+                "extracted_facts": {"tool": tool_call.tool_name, "exit_code": payload.get("exit_code"), "output_length": len(content)},
+                "warnings": [],
+                "suggested_next_dimensions": [],
+            },
         }
         if observation is None:
             observation = Observation(

@@ -82,11 +82,12 @@ class CodexSdkEngine(SolveEngine):
                 ) from error
             except httpx.RequestError as error:
                 last_error = error
+                detail = f"{type(error).__name__}: {error}".strip()
                 if attempt < self.max_attempts - 1:
                     await self._sleep_for_retry(attempt)
                     continue
                 raise BridgeUnavailableError(
-                    f"CODEX_BRIDGE_UNAVAILABLE: {error}"
+                    f"CODEX_BRIDGE_UNAVAILABLE: {detail} ({url})"
                 ) from error
         raise BridgeUnavailableError(
             f"CODEX_BRIDGE_UNAVAILABLE: retry exhausted during {timeout_label}: {last_error}"
@@ -102,7 +103,7 @@ class CodexSdkEngine(SolveEngine):
         for attempt in range(self.max_attempts):
             yielded_any = False
             try:
-                async with httpx.AsyncClient(timeout=300) as client:
+                async with httpx.AsyncClient(timeout=300, trust_env=False) as client:
                     async with client.stream("POST", url, json=payload) as response:
                         response.raise_for_status()
                         async for line in response.aiter_lines():
@@ -136,8 +137,9 @@ class CodexSdkEngine(SolveEngine):
             except (httpx.RequestError, json.JSONDecodeError, ValueError) as error:
                 last_error = error
                 if yielded_any or attempt == self.max_attempts - 1:
+                    detail = f"{type(error).__name__}: {error}".strip()
                     raise BridgeUnavailableError(
-                        f"CODEX_BRIDGE_UNAVAILABLE: {error}"
+                        f"CODEX_BRIDGE_UNAVAILABLE: {detail} ({url})"
                     ) from error
                 await self._sleep_for_retry(attempt)
         if last_error is not None:
@@ -149,7 +151,7 @@ class CodexSdkEngine(SolveEngine):
             "Read the challenge description and workspace files before taking the next step."
         )
         prompt = f"{prompt}{CODEX_CONTROL_PROTOCOL}"
-        async with httpx.AsyncClient(timeout=300) as client:
+        async with httpx.AsyncClient(timeout=300, trust_env=False) as client:
             payload = await self._post_json_with_retry(
                 client,
                 f"{self.bridge_url}/threads",
@@ -189,7 +191,7 @@ class CodexSdkEngine(SolveEngine):
         thread_id = self._thread_for(run_id)
         if not thread_id:
             return
-        async with httpx.AsyncClient(timeout=15) as client:
+        async with httpx.AsyncClient(timeout=15, trust_env=False) as client:
             response = await self._post_json_with_retry(
                 client,
                 f"{self.bridge_url}/threads/{thread_id}/cancel",

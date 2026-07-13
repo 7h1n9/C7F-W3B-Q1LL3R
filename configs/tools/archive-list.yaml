@@ -1,0 +1,9 @@
+name: archive_list
+display_name: Archive List
+category: workspace
+description: List entries of an existing workspace archive using a fixed safe command.
+risk_level: low
+enabled: true
+parameters: {path: {type: string, required: true}}
+limits: {max_output_bytes: 262144}
+permissions: {workspace_only: true}

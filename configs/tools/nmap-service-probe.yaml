@@ -1,0 +1,9 @@
+name: nmap_service_probe
+display_name: Controlled Service Probe
+category: web
+description: Probe only the current challenge host and controlled ports.
+risk_level: high
+enabled: false
+parameters: {host: {type: string, required: true}, ports: {type: array, required: false}}
+limits: {timeout_seconds: 60, max_ports: 20}
+permissions: {target_allowlist_required: true, subnet_forbidden: true}

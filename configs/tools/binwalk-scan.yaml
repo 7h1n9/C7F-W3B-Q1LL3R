@@ -1,0 +1,9 @@
+name: binwalk_scan
+display_name: Binwalk Scan
+category: workspace
+description: Inspect an existing workspace binary with a bounded extraction-free scan.
+risk_level: medium
+enabled: true
+parameters: {path: {type: string, required: true}}
+limits: {timeout_seconds: 30, max_output_bytes: 131072}
+permissions: {workspace_only: true, extraction_forbidden: true}

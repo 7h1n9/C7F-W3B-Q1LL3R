@@ -12,6 +12,11 @@ from app.schemas.skill import SkillWrite
 
 class BuiltinSkillSyncService:
     max_content_length = 24_000
+    unrelated = {
+        "security-awareness-training", "incident-response", "cloud-security-audit",
+        "container-security-testing", "mobile-app-security-testing", "network-penetration-testing",
+        "vulnerability-assessment",
+    }
 
     def __init__(self, root: Path | None = None) -> None:
         self.root = root or Path(__file__).resolve().parents[3] / "configs" / "skills"
@@ -32,8 +37,8 @@ class BuiltinSkillSyncService:
     @staticmethod
     def _challenge_tools(challenge_types: list[str]) -> list[str]:
         if challenge_types == ["TRAFFIC_ANALYSIS"]:
-            return ["file_read", "file_search", "python_run", "pcap_metadata", "pcap_protocols", "pcap_query"]
-        return ["http_request", "file_read", "file_search", "python_run"]
+            return ["file_read", "file_search", "python_run", "pcap_metadata", "pcap_protocols", "pcap_query", "pcap_tcp_stream", "pcap_http_objects", "pcap_dns_summary", "pcap_credentials"]
+        return ["http_request", "http_session_request", "http_extract", "whatweb_fingerprint", "js_asset_analyze", "source_map_analyze", "file_type", "strings_extract", "archive_list", "file_read", "file_search", "python_run", "content_discovery", "jwt_inspect"]
 
     @staticmethod
     def _infer_kind(name: str, metadata: dict) -> str:
@@ -94,10 +99,13 @@ class BuiltinSkillSyncService:
                 challenge_types = list(metadata.get("challenge_types") or ["WEB_TARGET"])
                 skill_kind = self._infer_kind(path.parent.name, metadata)
                 activation_mode = self._infer_activation_mode(skill_kind, metadata)
-                required_tools = list(metadata.get("required_tools") or self._challenge_tools(challenge_types))
-                recommended_tools = list(metadata.get("recommended_tools") or required_tools)
+                is_unrelated = path.parent.name in self.unrelated
+                is_core = path.parent.name == "ctf-solver-core"
+                required_tools = list(metadata.get("required_tools") or ([] if is_core else self._challenge_tools(challenge_types)))
+                recommended_tools = list(metadata.get("recommended_tools") or ([] if is_core else required_tools))
                 forbidden_tools = list(metadata.get("forbidden_tools") or [])
-                triggers = self._infer_triggers(path.parent.name, str(metadata.get("description") or ""), metadata, skill_kind)
+                trigger_metadata = {**metadata, "triggers": metadata.get("positive_triggers") or metadata.get("triggers") or []}
+                triggers = self._infer_triggers(path.parent.name, str(metadata.get("description") or ""), trigger_metadata, skill_kind)
                 ctf_phases = list(metadata.get("ctf_phases") or self._default_phases(challenge_types))
                 payload = SkillWrite(
                     name=str(metadata.get("name") or path.parent.name),
@@ -108,6 +116,7 @@ class BuiltinSkillSyncService:
                     skill_kind=skill_kind,
                     activation_mode=activation_mode,
                     triggers=triggers,
+                    negative_triggers=list(metadata.get("negative_triggers") or []),
                     prerequisites=list(metadata.get("prerequisites") or []),
                     required_tools=required_tools,
                     recommended_tools=recommended_tools,
@@ -117,6 +126,8 @@ class BuiltinSkillSyncService:
                     allowed_tools=metadata.get("allowed_tools") or required_tools,
                     risk_level=str(metadata.get("risk_level") or "low"),
                     content_markdown=content,
+                    catalog_scope=str(metadata.get("catalog_scope") or ("GENERAL_SECURITY" if is_unrelated else "WEB_CTF")),
+                    enabled=bool(metadata.get("enabled", not is_unrelated)),
                 )
                 checksum = hashlib.sha256(path.read_bytes()).hexdigest()
                 skill = await session.scalar(select(Skill).where(Skill.builtin_path == relative))
@@ -135,6 +146,12 @@ class BuiltinSkillSyncService:
                     skill.version += 1
                     skill.checksum = checksum
                     results.append(f"updated:{relative}")
+                if is_unrelated or is_core:
+                    skill.enabled = bool(metadata.get("enabled", not is_unrelated))
+                    skill.catalog_scope = "GENERAL_SECURITY" if is_unrelated else "WEB_CTF"
+                    if is_core:
+                        skill.required_tools = []
+                        skill.recommended_tools = []
             except (OSError, ValueError, yaml.YAMLError) as error:
                 results.append(f"error:{relative}:{error}")
         await session.commit()

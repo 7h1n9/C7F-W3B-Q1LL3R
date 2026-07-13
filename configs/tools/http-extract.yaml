@@ -1,0 +1,9 @@
+name: http_extract
+display_name: HTTP Response Extract
+category: web
+description: Extract bounded HTML, JSON, headers, forms and redirect facts from an authorized response.
+risk_level: low
+enabled: true
+parameters: {method: {type: string, required: true}, url: {type: string, required: true}, headers: {type: object, required: false}, query: {type: object, required: false}, body: {type: string, required: false}}
+limits: {timeout_seconds: 30, max_output_bytes: 1048576}
+permissions: {target_allowlist_required: true}

@@ -1,0 +1,9 @@
+name: source_map_analyze
+display_name: Source Map Analyze
+category: workspace
+description: Inspect an existing workspace source map without arbitrary local paths.
+risk_level: low
+enabled: true
+parameters: {path: {type: string, required: true}}
+limits: {max_output_bytes: 262144}
+permissions: {workspace_only: true}

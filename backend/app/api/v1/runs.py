@@ -1,6 +1,7 @@
 import asyncio
 import contextlib
 import shutil
+from datetime import UTC, datetime
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -61,13 +62,20 @@ def runner_is_remote() -> bool:
 
 
 def read(item: SolveRun) -> RunRead:
+    def iso(value: datetime | None) -> str | None:
+        if value is None:
+            return None
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=UTC)
+        return value.astimezone(UTC).isoformat()
+
     return RunRead.model_validate(
         {
             **item.__dict__,
-            "created_at": item.created_at.isoformat(),
-            "updated_at": item.updated_at.isoformat(),
-            "started_at": item.started_at.isoformat() if item.started_at else None,
-            "finished_at": item.finished_at.isoformat() if item.finished_at else None,
+            "created_at": iso(item.created_at),
+            "updated_at": iso(item.updated_at),
+            "started_at": iso(item.started_at),
+            "finished_at": iso(item.finished_at),
         }
     )
 
@@ -99,10 +107,10 @@ async def read_with_summary(session: AsyncSession, item: SolveRun) -> RunRead:
         "active_skill_names": active_skill_names,
         "diagnostic_tags": diagnostics["diagnostic_tags"],
         "diagnostic_summary": diagnostics["diagnostic_summary"],
-        "created_at": item.created_at.isoformat(),
-        "updated_at": item.updated_at.isoformat(),
-        "started_at": item.started_at.isoformat() if item.started_at else None,
-        "finished_at": item.finished_at.isoformat() if item.finished_at else None,
+        "created_at": read(item).created_at,
+        "updated_at": read(item).updated_at,
+        "started_at": read(item).started_at,
+        "finished_at": read(item).finished_at,
     }
     return RunRead.model_validate(payload)
 
@@ -330,10 +338,11 @@ async def get_solver_state(run_id: str, session: AsyncSession = Depends(get_sess
         "active_hypotheses_json": state.active_hypotheses_json,
         "action_fingerprints_json": state.action_fingerprints_json,
         "active_skill_ids_json": state.active_skill_ids_json,
+        "skill_recommendations_json": state.skill_recommendations_json or [],
         "no_progress_count": state.no_progress_count,
-        "last_progress_at": state.last_progress_at.isoformat() if state.last_progress_at else None,
-        "created_at": state.created_at.isoformat(),
-        "updated_at": state.updated_at.isoformat(),
+        "last_progress_at": state.last_progress_at.replace(tzinfo=UTC).astimezone(UTC).isoformat() if state.last_progress_at and state.last_progress_at.tzinfo is None else (state.last_progress_at.astimezone(UTC).isoformat() if state.last_progress_at else None),
+        "created_at": state.created_at.replace(tzinfo=UTC).astimezone(UTC).isoformat() if state.created_at.tzinfo is None else state.created_at.astimezone(UTC).isoformat(),
+        "updated_at": state.updated_at.replace(tzinfo=UTC).astimezone(UTC).isoformat() if state.updated_at.tzinfo is None else state.updated_at.astimezone(UTC).isoformat(),
     }
     return {
         "data": SolverStateRead.model_validate(payload)
@@ -406,7 +415,7 @@ async def continue_run(
     run_id: str, payload: dict, session: AsyncSession = Depends(get_session)
 ) -> dict:
     run = await require_run(run_id, session)
-    if run.status != RunStatus.WAITING_USER:
+    if run.status not in {RunStatus.WAITING_USER, RunStatus.PAUSED_RATE_LIMIT}:
         raise DomainError(
             "RUN_NOT_WAITING", "Only runs waiting for user input can continue.", status_code=409
         )
@@ -524,9 +533,25 @@ async def get_artifact(
 async def list_flags(run_id: str, session: AsyncSession = Depends(get_session)) -> dict:
     run = await ensure_codex_materialized(session, await require_run(run_id, session))
     await ensure_flag_consistency(session, run)
+    challenge = await session.get(Challenge, run.challenge_id)
     items = list(
         (await session.scalars(select(FlagCandidate).where(FlagCandidate.run_id == run_id))).all()
     )
+    if challenge:
+        items = [
+            item
+            for item in items
+            if flag_service._is_displayable(item.candidate, challenge.flag_pattern)
+        ]
+    # Older runs could persist the same candidate more than once when a tool
+    # result was materialized repeatedly. Keep one row per candidate, preferring
+    # a manually validated review state.
+    unique_items: dict[str, FlagCandidate] = {}
+    for item in items:
+        previous = unique_items.get(item.candidate)
+        if previous is None or (item.review_state == "VALID" and previous.review_state != "VALID"):
+            unique_items[item.candidate] = item
+    items = list(unique_items.values())
     return {
         "data": [
             {

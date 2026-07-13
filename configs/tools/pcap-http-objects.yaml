@@ -1,0 +1,9 @@
+name: pcap_http_objects
+display_name: PCAP HTTP Objects
+category: traffic
+description: Extract bounded HTTP objects from an attached PCAP.
+risk_level: low
+enabled: true
+parameters: {path: {type: string, required: true}, limit: {type: integer, required: false}}
+limits: {timeout_seconds: 30, max_output_bytes: 262144}
+permissions: {pcap_only: true}

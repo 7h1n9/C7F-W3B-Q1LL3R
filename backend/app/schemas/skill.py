@@ -3,13 +3,13 @@ import re
 from pydantic import BaseModel, Field, field_validator
 
 KNOWN_TOOLS = {
-    "http_request",
+    "http_request", "http_session_request", "http_extract", "whatweb_fingerprint", "js_asset_analyze", "source_map_analyze", "file_type", "strings_extract", "archive_list", "content_discovery", "sqlmap_detect", "jwt_inspect", "nmap_service_probe", "nikto_scan", "binwalk_scan", "exiftool_metadata",
     "file_read",
     "file_search",
     "python_run",
     "pcap_metadata",
     "pcap_protocols",
-    "pcap_query",
+    "pcap_query", "pcap_tcp_stream", "pcap_http_objects", "pcap_dns_summary", "pcap_credentials",
 }
 CHALLENGE_TYPES = {"WEB_TARGET", "TRAFFIC_ANALYSIS"}
 SKILL_KINDS = {"CORE", "METHODOLOGY", "SPECIALIST"}
@@ -23,6 +23,7 @@ class SkillWrite(BaseModel):
     skill_kind: str = Field(default="SPECIALIST", pattern=r"^(CORE|METHODOLOGY|SPECIALIST)$")
     activation_mode: str = Field(default="MANUAL", pattern=r"^(ALWAYS|AUTO|MANUAL)$")
     triggers: list[str] = Field(default_factory=list)
+    negative_triggers: list[str] = Field(default_factory=list)
     prerequisites: list[str] = Field(default_factory=list)
     required_tools: list[str] = Field(default_factory=list)
     recommended_tools: list[str] = Field(default_factory=list)
@@ -33,6 +34,7 @@ class SkillWrite(BaseModel):
     allowed_tools: list[str] = Field(default_factory=list)
     risk_level: str = Field(default="low", pattern="^(low|medium|high)$")
     enabled: bool = True
+    catalog_scope: str = "WEB_CTF"
 
     @field_validator("skill_kind")
     @classmethod
@@ -48,7 +50,7 @@ class SkillWrite(BaseModel):
             raise ValueError("activation_mode contains an unsupported value")
         return value
 
-    @field_validator("triggers", "prerequisites", "required_tools", "recommended_tools", "forbidden_tools", "ctf_phases")
+    @field_validator("triggers", "negative_triggers", "prerequisites", "required_tools", "recommended_tools", "forbidden_tools", "ctf_phases")
     @classmethod
     def validate_string_lists(cls, value: list[str]) -> list[str]:
         clean = sorted({str(item).strip() for item in value if str(item).strip()})

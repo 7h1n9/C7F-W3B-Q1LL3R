@@ -1,3 +1,5 @@
+import json
+
 import httpx
 from fastapi import APIRouter, Depends
 from sqlalchemy import select
@@ -20,6 +22,23 @@ def read(item: ModelConfig) -> dict:
         "model_name": item.model_name,
         "enabled": item.enabled,
         "api_key_configured": bool(item.encrypted_api_key),
+        "action_protocol": item.action_protocol,
+        "structured_output_mode": item.structured_output_mode,
+        "supports_json_schema": item.supports_json_schema,
+        "supports_json_object": item.supports_json_object,
+        "supports_native_tool_call": item.supports_native_tool_call,
+        "request_timeout_seconds": item.request_timeout_seconds,
+        "max_output_tokens": item.max_output_tokens,
+        "temperature": item.temperature,
+        "max_retries": item.max_retries,
+        "retry_base_seconds": item.retry_base_seconds,
+        "rate_limit_cooldown_seconds": item.rate_limit_cooldown_seconds,
+        "requests_per_minute": item.requests_per_minute,
+        "max_concurrency": item.max_concurrency,
+        "context_token_limit": item.context_token_limit,
+        "last_test_at": item.last_test_at.isoformat() if item.last_test_at else None,
+        "last_test_ok": item.last_test_ok,
+        "capabilities": item.capabilities_json or {},
     }
 
 
@@ -40,6 +59,9 @@ async def create_model_config(
         model_name=payload.model_name,
         encrypted_api_key=encrypt_api_key(payload.api_key or ""),
         enabled=payload.enabled,
+        **payload.model_dump(
+            exclude={"name", "provider_type", "base_url", "model_name", "api_key", "enabled"}
+        ),
     )
     session.add(item)
     await session.commit()
@@ -64,6 +86,10 @@ async def update_model_config(
         payload.model_name,
         payload.enabled,
     )
+    for key, value in payload.model_dump(
+        exclude={"name", "provider_type", "base_url", "model_name", "api_key", "enabled"}
+    ).items():
+        setattr(item, key, value)
     if payload.api_key:
         item.encrypted_api_key = encrypt_api_key(payload.api_key)
     await session.commit()
@@ -92,18 +118,70 @@ async def test_model_config(config_id: str, session: AsyncSession = Depends(get_
         raise DomainError(
             "MODEL_CONFIG_NOT_FOUND", "Model configuration not found.", status_code=404
         )
+    import time
+
+    started = time.perf_counter()
+    capabilities: dict[str, object] = {
+        "reachable": False,
+        "normal_chat": False,
+        "json_object": False,
+        "json_schema": False,
+        "native_tool_call": False,
+        "agent_action": False,
+        "recommended_protocol": item.action_protocol,
+        "skill_action": False,
+        "max_output_tokens": item.max_output_tokens,
+        "retry_after": None,
+    }
+    headers = {"Authorization": f"Bearer {decrypt_api_key(item.encrypted_api_key)}"}
     try:
-        async with httpx.AsyncClient(timeout=10, trust_env=False) as client:
-            response = await client.post(
-                f"{item.base_url.rstrip('/')}/chat/completions",
-                headers={"Authorization": f"Bearer {decrypt_api_key(item.encrypted_api_key)}"},
-                json={
-                    "model": item.model_name,
-                    "messages": [{"role": "user", "content": "Reply with OK."}],
-                    "max_tokens": 4,
-                },
-            )
+        async with httpx.AsyncClient(timeout=item.request_timeout_seconds, trust_env=False) as client:
+            base_payload = {
+                "model": item.model_name,
+                "messages": [{"role": "user", "content": "Reply with a short health response."}],
+                "max_tokens": min(item.max_output_tokens, 32),
+                "temperature": item.temperature,
+            }
+            response = await client.post(f"{item.base_url.rstrip('/')}/chat/completions", headers=headers, json=base_payload)
             response.raise_for_status()
-    except httpx.HTTPError as error:
-        return {"data": {"ok": False, "message": "Model connection failed", "details": str(error)}}
-    return {"data": {"ok": True, "message": "Model connection succeeded"}}
+            capabilities["reachable"] = capabilities["normal_chat"] = True
+            body = response.json()
+            capabilities["usage"] = body.get("usage", {})
+            for mode, fmt in (
+                ("json_object", {"type": "json_object"}),
+                ("json_schema", {"type": "json_schema", "json_schema": {"name": "probe", "strict": True, "schema": {"type": "object", "properties": {"ok": {"type": "boolean"}}, "required": ["ok"], "additionalProperties": False}}}),
+            ):
+                try:
+                    check = await client.post(f"{item.base_url.rstrip('/')}/chat/completions", headers=headers, json={**base_payload, "messages": [{"role": "user", "content": 'Return {"ok":true} as JSON.'}], "response_format": fmt})
+                    check.raise_for_status()
+                    capabilities[mode] = True
+                except httpx.HTTPError:
+                    capabilities[mode] = False
+            for probe_name, probe in (
+                ("agent_action", {"type": "finish", "result": "unsolved", "summary": "capability probe"}),
+                ("skill_action", {"type": "skill", "operation": "inspect", "phase": "INTAKE", "objective": "capability probe", "reason": "capability probe", "expected_use": "capability probe"}),
+            ):
+                try:
+                    probe_response = await client.post(
+                        f"{item.base_url.rstrip('/')}/chat/completions",
+                        headers=headers,
+                        json={**base_payload, "messages": [{"role": "user", "content": json.dumps(probe)}], "response_format": {"type": "json_object"}},
+                    )
+                    probe_response.raise_for_status()
+                    capabilities[probe_name] = True
+                except httpx.HTTPStatusError as probe_error:
+                    if probe_error.response.status_code == 429:
+                        capabilities["retry_after"] = probe_error.response.headers.get("Retry-After")
+                except httpx.HTTPError:
+                    pass
+    except (httpx.HTTPError, ValueError) as error:
+        capabilities["error"] = str(error)
+    capabilities["latency_ms"] = round((time.perf_counter() - started) * 1000)
+    item.capabilities_json = capabilities
+    item.supports_json_schema = bool(capabilities.get("json_schema"))
+    item.supports_json_object = bool(capabilities.get("json_object"))
+    item.supports_native_tool_call = bool(capabilities.get("native_tool_call"))
+    item.last_test_at = __import__("datetime").datetime.now(__import__("datetime").UTC)
+    item.last_test_ok = bool(capabilities["reachable"] and capabilities["normal_chat"])
+    await session.commit()
+    return {"data": {"ok": item.last_test_ok, "message": "模型能力测试完成", "capabilities": capabilities}}

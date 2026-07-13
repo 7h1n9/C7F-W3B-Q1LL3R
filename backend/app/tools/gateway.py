@@ -3,12 +3,14 @@ import json
 from datetime import UTC, datetime
 from pathlib import Path
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import DomainError
 from app.models.challenge import Challenge
 from app.models.run import Artifact, Observation, SolveRun, ToolCall
 from app.orchestration.state_machine import RunStatus
+from app.schemas.tool import ToolArtifactRef, ToolExecutionResult, ToolModelView
 from app.services.events import event_service
 from app.services.flags import flag_service
 from app.services.runner_client import runner_client
@@ -75,6 +77,8 @@ class ToolGateway:
         root = Path(run.workspace_path).resolve()
         relative = str(result.get("artifact_path") or "")
         target = (root / relative).resolve()
+        artifact: Artifact | None = None
+        artifact_event_payload: dict | None = None
         if relative and root in target.parents:
             try:
                 size, checksum = await runner_client.download_artifact(
@@ -88,55 +92,120 @@ class ToolGateway:
                     "error": str(error),
                 }
                 relative = ""
-        if not relative:
+        # file_read is an inspection operation. Its bounded content is already
+        # carried by ToolModelView/Observation; do not create a new runner_error
+        # artifact for every read of the same workspace file.
+        if not relative and name == "file_read":
+            structured = result.get("structured_result") if isinstance(result.get("structured_result"), dict) else result
+            candidate_path = str(structured.get("path") or "").replace("\\", "/")
+            candidate = (root / candidate_path).resolve() if candidate_path else root
+            if candidate_path and root in candidate.parents and candidate.is_file():
+                checksum = hashlib.sha256(candidate.read_bytes()).hexdigest()
+                artifact = await session.scalar(
+                    select(Artifact)
+                    .where(
+                        Artifact.run_id == run.id,
+                        Artifact.file_path == candidate_path,
+                        Artifact.sha256 == checksum,
+                    )
+                    .order_by(Artifact.created_at.desc())
+                )
+                target, relative = candidate, candidate_path
+        if not relative and name != "file_read":
             relative = f"outputs/runner_error_{call.id}.json"
             target = root / relative
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
             size, checksum = target.stat().st_size, hashlib.sha256(target.read_bytes()).hexdigest()
-        artifact = Artifact(
-            run_id=run.id,
-            tool_call_id=call.id,
-            artifact_type="tool_output",
-            file_path=relative.replace("\\", "/"),
-            size=size,
-            sha256=checksum,
-            summary=str(result.get("summary", ""))[:1000],
-        )
-        session.add(artifact)
-        await session.flush()
-        facts = self._facts(name, result, artifact.file_path)
-        observation = Observation(
-            run_id=run.id,
-            tool_call_id=call.id,
-            artifact_id=artifact.id,
-            observation_type="tool_result",
-            summary=artifact.summary,
-            facts_json=facts,
-        )
-        session.add(observation)
-        await session.commit()
-        await event_service.append(
-            session,
-            run.id,
-            "artifact.created",
-            {
+        if artifact is None and name != "file_read":
+            artifact = Artifact(
+                run_id=run.id,
+                tool_call_id=call.id,
+                artifact_type="tool_output",
+                file_path=relative.replace("\\", "/"),
+                size=size,
+                sha256=checksum,
+                summary=str(result.get("summary", ""))[:1000],
+            )
+            session.add(artifact)
+            await session.flush()
+            artifact_event_payload = {
                 "artifact_id": artifact.id,
                 "path": artifact.file_path,
                 "size": artifact.size,
                 "sha256": artifact.sha256,
-            },
+            }
+        unified = self._unified_result(result, artifact)
+        facts = self._facts(name, result, relative.replace("\\", "/"))
+        facts["tool_model_view"] = unified.model_view.model_dump()
+        observation = Observation(
+            run_id=run.id,
+            tool_call_id=call.id,
+            artifact_id=artifact.id if artifact else None,
+            observation_type="tool_result",
+            summary=str(result.get("summary", "Tool execution completed"))[:1000],
+            facts_json=facts,
         )
-        candidates = await flag_service.extract_candidates(
-            session, run, challenge, artifact, target.read_text(encoding="utf-8", errors="replace")
-        )
+        session.add(observation)
+        await session.commit()
+        if artifact_event_payload:
+            await event_service.append(session, run.id, "artifact.created", artifact_event_payload)
+        candidates = []
+        if artifact is not None and target.is_file():
+            candidates = await flag_service.extract_candidates(
+                session, run, challenge, artifact, target.read_text(encoding="utf-8", errors="replace")
+            )
         observation.facts_json["flag_candidate_count"] = len(candidates)
         await session.commit()
-        event_type = "tool.completed" if result.get("status") == "COMPLETED" else "tool.failed"
+        event_type = "tool.completed" if unified.status == "COMPLETED" else "tool.failed"
         await event_service.append(
-            session, run.id, event_type, {"tool_call_id": call.id, "result": result}
+            session, run.id, event_type, {"tool_call_id": call.id, "result": unified.model_dump()}
         )
-        return result
+        return unified.model_dump()
+
+    @staticmethod
+    def _redact(text: str | None) -> str | None:
+        if text is None:
+            return None
+        import re
+
+        value = text[:8192]
+        value = re.sub(r"(?i)(authorization|cookie|set-cookie|token|api[_-]?key|password)(\s*[:=]\s*)([^;\s,]+)", r"\1\2<redacted>", value)
+        return value
+
+    def _unified_result(self, result: dict, artifact: Artifact | None) -> ToolExecutionResult:
+        status = str(result.get("status") or "FAILED")
+        if status not in {"COMPLETED", "FAILED", "TIMEOUT", "CANCELLED"}:
+            status = "FAILED"
+        structured = result.get("structured_result") if isinstance(result.get("structured_result"), dict) else result
+        facts = dict(structured.get("extracted_facts") or result.get("extracted_facts") or {})
+        for key in ("status_code", "final_url", "redirect_history", "content_type", "selected_headers", "cookie_names", "body_length", "html_title", "html_comments", "forms", "form_actions", "parameter_names", "links", "script_urls", "json_keys", "suspected_credentials", "suspected_flags", "path", "start_line", "end_line", "content_sha256"):
+            if key in structured and key not in facts:
+                facts[key] = structured[key]
+        excerpt = structured.get("body_excerpt") or structured.get("content_excerpt") or structured.get("content") or structured.get("output")
+        warnings = []
+        if structured.get("truncated"):
+            warnings.append("结果正文已截断，完整内容保存在 Artifact")
+        if status != "COMPLETED":
+            warnings.append("工具执行未成功完成")
+        suggestions = []
+        if facts.get("status_code") in {301, 302, 303, 307, 308}:
+            suggestions.append("检查重定向目标和登录流程")
+        if facts.get("suspected_credentials"):
+            suggestions.append("核对凭据线索并进行最小化登录验证")
+        return ToolExecutionResult(
+            status=status,
+            model_view=ToolModelView(
+                summary=str(structured.get("summary") or result.get("summary") or "工具执行完成")[:1000],
+                content_excerpt=self._redact(str(excerpt) if excerpt is not None else None),
+                extracted_facts=facts,
+                warnings=warnings,
+                suggested_next_dimensions=suggestions,
+            ),
+            artifacts=[ToolArtifactRef(artifact_id=artifact.id, relative_path=artifact.file_path, sha256=artifact.sha256, size=artifact.size, mime_type=artifact.mime_type or "text/plain")] if artifact else [],
+            error_code=str(result.get("error_code") or "RUNNER_ERROR") if status != "COMPLETED" else None,
+            error_message=str(result.get("error") or result.get("error_message")) if status != "COMPLETED" else None,
+        )
 
     @staticmethod
     def _facts(name: str, result: dict, artifact_path: str) -> dict:

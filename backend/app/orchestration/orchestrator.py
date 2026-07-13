@@ -1,4 +1,6 @@
 import asyncio
+import hashlib
+import json
 from pathlib import Path
 from time import monotonic
 
@@ -19,10 +21,10 @@ from app.engines import (
 )
 from app.models.challenge import Challenge
 from app.models.model_config import ModelConfig
-from app.models.run import Artifact, Observation, SolveRun, ToolCall
+from app.models.run import AgentTurn, Artifact, Observation, SolveRun, ToolCall
 from app.models.skill import RunSkillSnapshot, Skill
 from app.orchestration.state_machine import TERMINAL, RunStatus, transition
-from app.schemas.agent import FinishAction, SkillAction, ToolAction
+from app.schemas.agent import ActionHypothesis, FinishAction, SkillAction, ToolAction
 from app.services.action_fingerprint import fingerprint_action
 from app.services.codex_materializer import codex_materializer
 from app.services.context_builder import context_builder
@@ -62,7 +64,16 @@ class SolveOrchestrator:
             if not config or not config.enabled or not config.base_url or not config.model_name:
                 raise ValueError("OpenAI-compatible engine requires an enabled model configuration")
             return OpenAICompatibleEngine(
-                config.base_url, decrypt_api_key(config.encrypted_api_key), config.model_name
+                config.base_url,
+                decrypt_api_key(config.encrypted_api_key),
+                config.model_name,
+                timeout=config.request_timeout_seconds,
+                action_protocol=config.action_protocol,
+                max_output_tokens=config.max_output_tokens,
+                temperature=config.temperature,
+                max_retries=config.max_retries,
+                retry_base_seconds=config.retry_base_seconds,
+                rate_limit_cooldown_seconds=config.rate_limit_cooldown_seconds,
             )
         return MockSolveEngine()
 
@@ -377,7 +388,13 @@ class SolveOrchestrator:
                     else:
                         code = "ENGINE_ERROR"
                     run.last_error_code, run.last_error_message = code, str(error)[:4000]
-                    await self._transition(session, run, RunStatus.FAILED_ENGINE)
+                    await self._transition(
+                        session,
+                        run,
+                        RunStatus.PAUSED_RATE_LIMIT
+                        if isinstance(error, ModelRateLimitError)
+                        else RunStatus.FAILED_ENGINE,
+                    )
                     await event_service.append(
                         session,
                         run_id,
@@ -387,6 +404,9 @@ class SolveOrchestrator:
             finally:
                 self.active_engines.pop(run_id, None)
                 self.active_tasks.pop(run_id, None)
+                close = getattr(locals().get("engine"), "close", None)
+                if close is not None:
+                    await close()
 
     async def _run_openai(
         self, session, run: SolveRun, engine: OpenAICompatibleEngine, user_message: str | None
@@ -395,7 +415,7 @@ class SolveOrchestrator:
             await self._transition(session, run, RunStatus.PREPARING)
             await event_service.append(session, run.id, "run.started", {})
             await self._transition(session, run, RunStatus.ANALYZING)
-        elif run.status == RunStatus.WAITING_USER:
+        elif run.status in {RunStatus.WAITING_USER, RunStatus.PAUSED_RATE_LIMIT}:
             await self._transition(session, run, RunStatus.PLANNING)
         else:
             raise DomainError("RUN_INVALID_STATE", "Run cannot be started from its current state.")
@@ -417,9 +437,58 @@ class SolveOrchestrator:
             if user_message:
                 messages.append({"role": "user", "content": f"User supplied: {user_message}"})
                 user_message = None
-            action = await engine.next_action(messages)
+            action_started = monotonic()
+            try:
+                action = await engine.next_action(messages)
+            except Exception:
+                # Preserve provider parse/retry telemetry even when no action
+                # can be executed. This makes FAILED_ENGINE diagnosable without
+                # persisting secrets or the full prompt.
+                trace = getattr(engine, "last_trace", {})
+                session.add(
+                    AgentTurn(
+                        run_id=run.id,
+                        step_number=run.agent_step_count + 1,
+                        model_config_id=run.model_config_id,
+                        action_protocol=getattr(engine, "action_protocol", "json_schema"),
+                        prompt_hash=hashlib.sha256(json.dumps(messages, ensure_ascii=False, sort_keys=True).encode()).hexdigest(),
+                        context_size_chars=sum(len(str(item.get("content", ""))) for item in messages),
+                        provider_request_id=trace.get("provider_request_id"),
+                        latency_ms=trace.get("latency_ms") or round((monotonic() - action_started) * 1000),
+                        input_tokens=trace.get("input_tokens"),
+                        output_tokens=trace.get("output_tokens"),
+                        parse_attempts=trace.get("parse_attempts", 0),
+                        parse_error_code=trace.get("parse_error_code") or "ENGINE_ACTION_FAILED",
+                        response_excerpt_redacted=trace.get("response_excerpt"),
+                        action_json=trace.get("action") or {},
+                    )
+                )
+                await session.commit()
+                raise
+            trace = getattr(engine, "last_trace", {})
+            session.add(
+                AgentTurn(
+                    run_id=run.id,
+                    step_number=run.agent_step_count + 1,
+                    model_config_id=run.model_config_id,
+                    action_protocol=getattr(engine, "action_protocol", "json_schema"),
+                    prompt_hash=hashlib.sha256(json.dumps(messages, ensure_ascii=False, sort_keys=True).encode()).hexdigest(),
+                    context_size_chars=sum(len(str(item.get("content", ""))) for item in messages),
+                    provider_request_id=trace.get("provider_request_id"),
+                    latency_ms=trace.get("latency_ms") or round((monotonic() - action_started) * 1000),
+                    input_tokens=trace.get("input_tokens"),
+                    output_tokens=trace.get("output_tokens"),
+                    parse_attempts=trace.get("parse_attempts", 1),
+                    parse_error_code=trace.get("parse_error_code"),
+                    response_excerpt_redacted=trace.get("response_excerpt"),
+                    action_json=trace.get("action") or action.model_dump(),
+                )
+            )
             run.agent_step_count += 1
             await session.commit()
+            hypothesis_payload = getattr(action, "hypothesis", None)
+            if isinstance(hypothesis_payload, ActionHypothesis):
+                hypothesis_payload = hypothesis_payload.model_dump()
             await event_service.append(
                 session,
                 run.id,
@@ -428,7 +497,7 @@ class SolveOrchestrator:
                     "type": action.type,
                     "phase": getattr(action, "phase", None),
                     "objective": getattr(action, "objective", None),
-                    "hypothesis": getattr(action, "hypothesis", None),
+                    "hypothesis": hypothesis_payload,
                     "reason": action.reason
                     if isinstance(action, (ToolAction, SkillAction))
                     else action.summary,
@@ -471,12 +540,17 @@ class SolveOrchestrator:
                         )
                 continue
             if isinstance(action, ToolAction):
+                hypothesis = (
+                    action.hypothesis.statement
+                    if isinstance(action.hypothesis, ActionHypothesis)
+                    else str(action.hypothesis)
+                )
                 hypothesis_item, created = await hypothesis_service.upsert_from_action(
                     session,
                     run.id,
                     phase=getattr(action, "phase", None),
                     objective=getattr(action, "objective", None),
-                    hypothesis_text=getattr(action, "hypothesis", None),
+                    hypothesis_text=hypothesis,
                     evidence={
                         "expected_evidence": getattr(action, "expected_evidence", None),
                         "success_condition": getattr(action, "success_condition", None),
@@ -691,7 +765,10 @@ class SolveOrchestrator:
                             {
                                 "skill_id": recommendation["skill_id"],
                                 "skill_name": recommendation["skill_name"],
-                                "matched_triggers": recommendation["matched_triggers"],
+                                "matched_triggers": recommendation.get(
+                                    "matched_positive_triggers",
+                                    recommendation.get("matched_triggers", []),
+                                ),
                                 "confidence": recommendation["confidence"],
                                 "source": "observation",
                             },

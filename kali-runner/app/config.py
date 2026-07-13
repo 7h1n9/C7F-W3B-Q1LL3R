@@ -13,6 +13,7 @@ class Settings(BaseSettings):
     pcap_timeout_seconds: int = 20
     pcap_max_fields: int = 12
     pcap_max_limit: int = 500
+    http_excerpt_bytes: int = 8 * 1024
 
     environment: str = "development"
 

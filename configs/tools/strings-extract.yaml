@@ -1,0 +1,9 @@
+name: strings_extract
+display_name: Strings Extract
+category: workspace
+description: Extract bounded printable text from an existing workspace file.
+risk_level: low
+enabled: true
+parameters: {path: {type: string, required: true}}
+limits: {max_output_bytes: 262144}
+permissions: {workspace_only: true}

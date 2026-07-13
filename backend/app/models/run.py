@@ -37,6 +37,24 @@ class SolveRun(UUIDTimestampMixin, Base):
     )
 
 
+class AgentTurn(UUIDTimestampMixin, Base):
+    __tablename__ = "agent_turns"
+    run_id: Mapped[str] = mapped_column(ForeignKey("solve_runs.id"), nullable=False, index=True)
+    step_number: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    model_config_id: Mapped[str | None] = mapped_column(ForeignKey("model_configs.id"))
+    action_protocol: Mapped[str] = mapped_column(String(30), nullable=False, default="json_schema")
+    prompt_hash: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    context_size_chars: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    provider_request_id: Mapped[str | None] = mapped_column(String(255))
+    latency_ms: Mapped[int | None] = mapped_column(Integer)
+    input_tokens: Mapped[int | None] = mapped_column(Integer)
+    output_tokens: Mapped[int | None] = mapped_column(Integer)
+    parse_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    parse_error_code: Mapped[str | None] = mapped_column(String(100))
+    response_excerpt_redacted: Mapped[str | None] = mapped_column(Text)
+    action_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+
+
 class RunEvent(UUIDTimestampMixin, Base):
     __tablename__ = "run_events"
     __table_args__ = (UniqueConstraint("run_id", "sequence", name="uq_run_event_sequence"),)

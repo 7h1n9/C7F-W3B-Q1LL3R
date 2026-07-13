@@ -1,0 +1,9 @@
+name: whatweb_fingerprint
+display_name: Web Fingerprint
+category: web
+description: Identify low-risk technology indicators from an authorized target response.
+risk_level: low
+enabled: true
+parameters: {method: {type: string, required: false}, url: {type: string, required: true}}
+limits: {timeout_seconds: 15, max_output_bytes: 65536}
+permissions: {target_allowlist_required: true}

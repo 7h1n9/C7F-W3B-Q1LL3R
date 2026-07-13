@@ -1,0 +1,9 @@
+name: js_asset_analyze
+display_name: JavaScript Asset Analyze
+category: web
+description: Extract URLs and client-side security indicators from an authorized JavaScript asset.
+risk_level: low
+enabled: true
+parameters: {method: {type: string, required: false}, url: {type: string, required: true}}
+limits: {timeout_seconds: 20, max_output_bytes: 131072}
+permissions: {target_allowlist_required: true}

@@ -1,0 +1,9 @@
+name: file_type
+display_name: File Type
+category: workspace
+description: Identify an existing workspace file type and checksum.
+risk_level: low
+enabled: true
+parameters: {path: {type: string, required: true}}
+limits: {max_output_bytes: 65536}
+permissions: {workspace_only: true}

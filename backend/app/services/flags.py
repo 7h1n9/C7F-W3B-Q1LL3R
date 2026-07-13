@@ -10,6 +10,47 @@ from app.services.events import event_service
 
 
 class FlagService:
+    _STRICT_DEFAULT_FLAG = re.compile(r"(?i)flag\{[^{}\r\n\"\\]{1,256}\}")
+
+    @staticmethod
+    def _is_displayable(candidate: str, pattern: str) -> bool:
+        if (
+            not candidate
+            or len(candidate) > 512
+            or any(char in candidate for char in ('\r', '\n', '"', "'", "\\"))
+            or candidate.count("{") != candidate.count("}")
+        ):
+            return False
+        try:
+            return re.fullmatch(pattern, candidate) is not None
+        except re.error:
+            return False
+
+    @classmethod
+    def _extract_matches(cls, pattern: str, content: str) -> list[str]:
+        """Extract stable, displayable candidates without crossing JSON/text boundaries."""
+        try:
+            compiled = re.compile(pattern)
+        except re.error:
+            return []
+        matches: list[str] = []
+        for match in compiled.finditer(content):
+            candidate = match.group(0)
+            # A permissive ``[^}]+`` pattern can consume an incomplete token,
+            # escaped JSON, and the next real flag. Never persist that blob.
+            if not cls._is_displayable(candidate, pattern) or candidate.count("{") != 1:
+                continue
+            if candidate not in matches:
+                matches.append(candidate)
+        # Recover a valid default-shaped flag nested inside a serialized tool
+        # result that was already captured by an older permissive regex.
+        if not matches and "flag\\{" in pattern.replace(" ", ""):
+            for match in cls._STRICT_DEFAULT_FLAG.finditer(content):
+                candidate = match.group(0)
+                if candidate not in matches:
+                    matches.append(candidate)
+        return matches
+
     async def _mark_challenge_solved(self, session: AsyncSession, run: SolveRun) -> None:
         challenge = await session.get(Challenge, run.challenge_id)
         if challenge and challenge.status != "SOLVED":
@@ -56,10 +97,7 @@ class FlagService:
         artifact: Artifact,
         content: str,
     ) -> list[FlagCandidate]:
-        try:
-            matches = set(re.findall(challenge.flag_pattern, content))
-        except re.error:
-            matches = set()
+        matches = self._extract_matches(challenge.flag_pattern, content)
         candidates: list[FlagCandidate] = []
         for candidate in matches:
             existing = await session.scalar(

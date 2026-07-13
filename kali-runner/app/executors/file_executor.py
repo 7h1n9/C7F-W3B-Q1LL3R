@@ -1,4 +1,6 @@
 
+import hashlib
+
 from fastapi import HTTPException
 
 from app.config import settings
@@ -12,8 +14,25 @@ async def file_read(request: JobRequest) -> dict:
     if not path.is_file():
         raise HTTPException(404, detail="file not found")
     raw = path.read_bytes()
-    content = raw[:settings.max_output_bytes].decode(errors="replace")
-    return {"path": str(path.relative_to(workspace)), "content": content, "truncated": len(raw) > len(content.encode()), "summary": f"Read {path.name}"}
+    text = raw.decode(errors="replace")
+    lines = text.splitlines()
+    start = max(1, int(request.arguments.get("start_line", 1)))
+    end = int(request.arguments.get("end_line", len(lines)))
+    end = max(start, min(end, len(lines)))
+    max_chars = max(1, min(int(request.arguments.get("max_chars", settings.max_output_bytes)), settings.max_output_bytes))
+    content = "\n".join(lines[start - 1 : end])[:max_chars]
+    relative = str(path.relative_to(workspace)).replace("\\", "/")
+    return {
+        "path": relative,
+        "start_line": start,
+        "end_line": end,
+        "content": content,
+        "content_excerpt": content,
+        "truncated": len(content) < len("\n".join(lines[start - 1 : end])),
+        "content_sha256": hashlib.sha256(raw).hexdigest(),
+        "summary": f"Read {relative}:{start}-{end}",
+        "extracted_facts": {"path": relative, "start_line": start, "end_line": end, "content_sha256": hashlib.sha256(raw).hexdigest()},
+    }
 
 
 async def file_search(request: JobRequest) -> dict:

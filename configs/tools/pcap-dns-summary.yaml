@@ -1,0 +1,9 @@
+name: pcap_dns_summary
+display_name: PCAP DNS Summary
+category: traffic
+description: Summarize DNS queries and answers from an attached PCAP.
+risk_level: low
+enabled: true
+parameters: {path: {type: string, required: true}}
+limits: {timeout_seconds: 30, max_output_bytes: 131072}
+permissions: {pcap_only: true}

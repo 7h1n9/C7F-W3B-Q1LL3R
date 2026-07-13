@@ -1,0 +1,15 @@
+name: http_session_request
+display_name: HTTP Session Request
+category: web
+description: Send a bounded allowlisted HTTP request with controlled session headers.
+risk_level: medium
+enabled: true
+parameters:
+  method: {type: string, required: true}
+  url: {type: string, required: true}
+  headers: {type: object, required: false}
+  query: {type: object, required: false}
+  body: {type: string, required: false}
+  follow_redirects: {type: boolean, required: false}
+limits: {timeout_seconds: 30, max_output_bytes: 1048576}
+permissions: {target_allowlist_required: true}

@@ -49,7 +49,7 @@ export const api = {
   restartRun: (id: string, message = "") => request<{ run_id: string; status: string }>(`/runs/${id}/restart`, { method: "POST", body: JSON.stringify({ message }) }),
   cancelRun: (id: string) => request<SolveRun>(`/runs/${id}/cancel`, { method: "POST" }),
   deleteRun: (id: string) => request<void>(`/runs/${id}`, { method: "DELETE" }),
-  listModelConfigs: () => request<Array<{ id: string; name: string; provider_type: string; base_url?: string; model_name?: string; enabled: boolean; api_key_configured: boolean }>>("/model-configs"),
+  listModelConfigs: () => request<Array<{ id: string; name: string; provider_type: string; base_url?: string; model_name?: string; enabled: boolean; api_key_configured: boolean; action_protocol?: string; structured_output_mode?: string; request_timeout_seconds?: number; max_output_tokens?: number; temperature?: number; max_retries?: number; retry_base_seconds?: number; rate_limit_cooldown_seconds?: number; requests_per_minute?: number; max_concurrency?: number; context_token_limit?: number; capabilities?: Record<string, unknown>; last_test_at?: string | null; last_test_ok?: boolean | null }>>("/model-configs"),
   createModelConfig: (payload: Record<string, unknown>) => request<unknown>("/model-configs", { method: "POST", body: JSON.stringify(payload) }),
   updateModelConfig: (id: string, payload: Record<string, unknown>) => request<unknown>(`/model-configs/${id}`, { method: "PUT", body: JSON.stringify(payload) }),
   deleteModelConfig: (id: string) => request<void>(`/model-configs/${id}`, { method: "DELETE" }),

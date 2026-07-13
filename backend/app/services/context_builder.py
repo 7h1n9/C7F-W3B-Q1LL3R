@@ -9,8 +9,8 @@ from app.models.challenge import Challenge
 from app.models.run import Artifact, FlagCandidate, Hypothesis, Observation, SolveRun, ToolCall
 from app.models.skill import RunSkillSnapshot, Skill
 from app.services.run_diagnostics import run_diagnostics_service
-from app.services.solver_state import solver_state_service
 from app.services.skill_selection import specialist_skill_catalog
+from app.services.solver_state import solver_state_service
 from app.services.tool_permissions import effective_tools_for
 from app.tools.registry import load_tool_definitions
 
@@ -162,25 +162,24 @@ class ContextBuilder:
                     select(SolveRun)
                     .where(SolveRun.challenge_id == challenge.id, SolveRun.id != run.id)
                     .order_by(SolveRun.created_at.desc())
-                    .limit(3)
+                    .limit(5)
                 )
             ).all()
         )
-        recent_run_diagnostics = []
+        lessons = {"known_failure_modes": [], "verified_paths": [], "avoid_repeated_behaviors": []}
         for recent_run in recent_runs:
             diag = await run_diagnostics_service.analyze(session, recent_run)
-            recent_run_diagnostics.append(
-                {
-                    "run_id": recent_run.id,
-                    "engine_type": recent_run.engine_type,
-                    "status": recent_run.status,
-                    "diagnostic_tags": diag["diagnostic_tags"],
-                    "diagnostic_summary": diag["diagnostic_summary"],
-                    "anomalies": [item["code"] for item in diag["anomalies"]],
-                }
-            )
+            lessons["known_failure_modes"].extend(diag["diagnostic_tags"])
+            if recent_run.status == "COMPLETED_SOLVED":
+                lessons["verified_paths"].append(f"{recent_run.engine_type} completed a verified run")
+            lessons["avoid_repeated_behaviors"].extend(item["code"] for item in diag["anomalies"])
+        for key in lessons:
+            lessons[key] = sorted(set(lessons[key]))[:12]
+        latest_tool_view = (last_observation.facts_json or {}).get("tool_model_view") if last_observation else None
+        started_at = run.started_at
+        if started_at and started_at.tzinfo is None:
+            started_at = started_at.replace(tzinfo=UTC)
         context = {
-            "Core Solver Prompt": CORE_PROMPT,
             "Role Snapshot": run.role_snapshot_json or {},
             "Challenge-Type Methodology Skill": {
                 "challenge_type": challenge.challenge_type,
@@ -246,15 +245,15 @@ class ContextBuilder:
             "Active Specialist Skills": active_skill_details,
             "Candidate Specialist Skill Summaries": candidate_skill_summaries,
             "Skill Recommendations": skill_recommendations,
-            "Recent Run Diagnostics For This Challenge": recent_run_diagnostics,
+            "Challenge Lesson": lessons,
             "Remaining Budget": {
                 "agent_steps": max(run.max_agent_steps - run.agent_step_count, 0),
                 "tool_calls": max(run.max_tool_calls - run.tool_call_count, 0),
                 "runtime_seconds": max(
                     run.max_runtime_seconds
                     - (
-                        int((datetime.now(UTC) - run.started_at).total_seconds())
-                        if run.started_at
+                        int((datetime.now(UTC) - started_at).total_seconds())
+                        if started_at
                         else 0
                     ),
                     0,
@@ -274,7 +273,7 @@ class ContextBuilder:
         }
         # The model receives one system message with the core prompt and one user message
         # with ordered JSON context.
-        return [
+        messages = [
             {
                 "role": "system",
                 "content": (
@@ -285,6 +284,15 @@ class ContextBuilder:
             },
             {"role": "user", "content": json.dumps(context, ensure_ascii=False)},
         ]
+        if latest_tool_view:
+            messages.append(
+                {
+                    "role": "user",
+                    "content": "The latest tool result is below. Consume it before selecting another action.\n"
+                    + json.dumps(latest_tool_view, ensure_ascii=False),
+                }
+            )
+        return messages
 
 
 context_builder = ContextBuilder()

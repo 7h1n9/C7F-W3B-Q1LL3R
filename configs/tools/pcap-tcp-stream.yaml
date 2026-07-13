@@ -1,0 +1,9 @@
+name: pcap_tcp_stream
+display_name: PCAP TCP Stream
+category: traffic
+description: Reassemble a bounded TCP stream from an attached PCAP.
+risk_level: low
+enabled: true
+parameters: {path: {type: string, required: true}, stream: {type: integer, required: false}}
+limits: {timeout_seconds: 30, max_output_bytes: 262144}
+permissions: {pcap_only: true}

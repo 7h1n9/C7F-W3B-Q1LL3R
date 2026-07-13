@@ -1,0 +1,9 @@
+name: jwt_inspect
+display_name: JWT Inspect
+category: web
+description: Decode JWT headers and non-sensitive claims without brute force or signing.
+risk_level: low
+enabled: true
+parameters: {token: {type: string, required: true}}
+limits: {max_output_bytes: 65536}
+permissions: {}

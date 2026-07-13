@@ -22,6 +22,7 @@ class RunStatus(StrEnum):
     TIMEOUT = "TIMEOUT"
     CANCELLED = "CANCELLED"
     POLICY_BLOCKED = "POLICY_BLOCKED"
+    PAUSED_RATE_LIMIT = "PAUSED_RATE_LIMIT"
 
 
 TERMINAL = {status for status in RunStatus if status.name.startswith(("COMPLETED", "FAILED"))} | {
@@ -37,6 +38,7 @@ RESTARTABLE = {
     RunStatus.TIMEOUT,
     RunStatus.COMPLETED_UNSOLVED,
     RunStatus.CANCELLED,
+    RunStatus.PAUSED_RATE_LIMIT,
 }
 TIMEOUT_SOURCES = {
     RunStatus.CREATED,
@@ -106,11 +108,13 @@ ALLOWED: dict[RunStatus, set[RunStatus]] = {
         RunStatus.FAILED_ENGINE,
         RunStatus.CANCELLED,
     },
+    RunStatus.PAUSED_RATE_LIMIT: {RunStatus.PLANNING, RunStatus.WAITING_USER, RunStatus.CANCELLED},
 }
 
 for status in TIMEOUT_SOURCES:
     if status not in TERMINAL:
         ALLOWED.setdefault(status, set()).add(RunStatus.TIMEOUT)
+    ALLOWED.setdefault(status, set()).add(RunStatus.PAUSED_RATE_LIMIT)
 
 
 def transition(run: object, target: RunStatus) -> None:

@@ -1,0 +1,9 @@
+name: content_discovery
+display_name: Controlled Content Discovery
+category: web
+description: Probe a fixed bounded wordlist on the current authorized host.
+risk_level: medium
+enabled: true
+parameters: {url: {type: string, required: true}, words: {type: array, required: false}}
+limits: {timeout_seconds: 60, max_requests: 50, max_output_bytes: 131072}
+permissions: {target_allowlist_required: true, wordlist_required: true}

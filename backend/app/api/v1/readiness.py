@@ -8,7 +8,7 @@ from app.models.skill import Skill
 from app.services.runner_client import runner_client
 
 router = APIRouter(prefix="/readiness", tags=["readiness"])
-EXPECTED_REVISION = "0005_solver_methodology_flow"
+EXPECTED_REVISION = "0010_skill_neg_triggers"
 
 
 @router.get("/range-test")
@@ -29,7 +29,19 @@ async def range_test_readiness(session: AsyncSession = Depends(get_session)) -> 
         checks.append({"name": "database", "ok": False, "message": str(error)[:200]})
     try:
         health = await runner_client.health()
-        capabilities = health.get("capabilities", {})
+        raw_capabilities = health.get("capabilities", {})
+        # Runner v0.2 exposes a structured registry while older Runners used
+        # flat tshark/capinfos keys. Normalize both shapes for readiness.
+        capabilities = dict(raw_capabilities.get("binaries", {})) if isinstance(raw_capabilities, dict) else {}
+        if isinstance(raw_capabilities, dict):
+            capabilities.update(
+                {
+                    item.get("name"): item.get("available")
+                    for item in raw_capabilities.get("tools", [])
+                    if isinstance(item, dict) and item.get("name")
+                }
+            )
+            capabilities.update({key: value for key, value in raw_capabilities.items() if key not in {"binaries", "tools"}})
         checks.extend(
             [
                 {"name": "runner", "ok": True, "message": "Runner is reachable"},

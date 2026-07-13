@@ -15,6 +15,7 @@ class Skill(UUIDTimestampMixin, Base):
     skill_kind: Mapped[str] = mapped_column(String(20), nullable=False, default="SPECIALIST")
     activation_mode: Mapped[str] = mapped_column(String(20), nullable=False, default="MANUAL")
     triggers: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
+    negative_triggers: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
     prerequisites: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
     required_tools: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
     recommended_tools: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
@@ -26,6 +27,7 @@ class Skill(UUIDTimestampMixin, Base):
     risk_level: Mapped[str] = mapped_column(String(20), default="low")
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    catalog_scope: Mapped[str] = mapped_column(String(30), default="WEB_CTF")
     builtin_path: Mapped[str | None] = mapped_column(String(512), unique=True)
     checksum: Mapped[str] = mapped_column(String(64), default="")
     updated_at: Mapped[datetime] = mapped_column(

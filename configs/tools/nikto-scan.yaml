@@ -1,0 +1,9 @@
+name: nikto_scan
+display_name: Nikto Scan
+category: web
+description: High-cost scanner disabled by default and requires explicit policy enablement.
+risk_level: high
+enabled: false
+parameters: {url: {type: string, required: true}}
+limits: {timeout_seconds: 120, max_output_bytes: 262144}
+permissions: {target_allowlist_required: true, explicit_enable_required: true}

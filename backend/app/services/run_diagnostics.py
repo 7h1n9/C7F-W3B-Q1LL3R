@@ -1,12 +1,11 @@
 import json
-import re
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.challenge import Challenge
 from app.models.model_config import ModelConfig
-from app.models.run import Artifact, FlagCandidate, Observation, RunEvent, SolveRun, ToolCall
+from app.models.run import Artifact, FlagCandidate, Observation, SolveRun, ToolCall
 from app.models.skill import Skill
 from app.orchestration.state_machine import RunStatus
 from app.services.events import event_service
