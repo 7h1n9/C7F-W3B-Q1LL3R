@@ -1,10 +1,12 @@
 import asyncio
+import contextlib
 import hashlib
 import json
+from datetime import UTC, datetime
 from pathlib import Path
 from time import monotonic
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from app.core.config import get_settings
 from app.core.database import SessionLocal
@@ -14,6 +16,7 @@ from app.engines import (
     BridgeUnavailableError,
     CodexSdkEngine,
     MockSolveEngine,
+    ModelProviderError,
     ModelRateLimitError,
     ModelUnavailableError,
     OpenAICompatibleEngine,
@@ -21,7 +24,7 @@ from app.engines import (
 )
 from app.models.challenge import Challenge
 from app.models.model_config import ModelConfig
-from app.models.run import AgentTurn, Artifact, Observation, SolveRun, ToolCall
+from app.models.run import AgentTurn, Artifact, Observation, RunAttempt, SolveRun, ToolCall
 from app.models.skill import RunSkillSnapshot, Skill
 from app.orchestration.state_machine import TERMINAL, RunStatus, transition
 from app.schemas.agent import ActionHypothesis, FinishAction, SkillAction, ToolAction
@@ -41,12 +44,48 @@ from app.services.tool_permissions import effective_tools_for
 from app.tools.gateway import tool_gateway
 from app.tools.registry import load_tool_definitions
 
+CTF_PHASE_ORDER = (
+    "INTAKE",
+    "BASELINE",
+    "MAPPING",
+    "HYPOTHESIS",
+    "TESTING",
+    "CHAINING",
+    "FLAG_SEARCH",
+    "FLAG_VERIFICATION",
+    "REPORTING",
+)
+CTF_PHASE_INDEX = {phase: index for index, phase in enumerate(CTF_PHASE_ORDER)}
+
 
 class SolveOrchestrator:
     def __init__(self, engine_factory=None) -> None:
         self.engine_factory = engine_factory
         self.active_engines: dict[str, object] = {}
         self.active_tasks: dict[str, asyncio.Task[None]] = {}
+
+    async def _correct_phase(self, session, run: SolveRun, requested: str | None) -> None:
+        phase = str(requested or "").upper()
+        current = str(run.current_phase or "").upper()
+        if phase not in CTF_PHASE_INDEX or phase == current:
+            return
+        # Do not let a generic model label (for example INTAKE) move a run
+        # backwards after useful evidence has already advanced the method.
+        if current in CTF_PHASE_INDEX and CTF_PHASE_INDEX[phase] < CTF_PHASE_INDEX[current]:
+            return
+        previous = run.current_phase
+        run.current_phase = phase
+        await session.commit()
+        await solver_state_service.sync_from_run(session, run)
+        await event_service.append(session, run.id, "phase.corrected", {"previous_phase": previous, "phase": phase, "source": "model_action"})
+
+    async def _skill_decision_required(self, session, run: SolveRun) -> bool:
+        state = await solver_state_service.load(session, run.id)
+        if not state:
+            return False
+        active = set(state.active_skill_ids_json or [])
+        specialists = list((await session.scalars(select(Skill).where(Skill.id.in_(active), Skill.skill_kind == "SPECIALIST"))).all()) if active else []
+        return not specialists and any(item.get("confidence", 0) >= 80 and item.get("supporting_fact_ids") for item in (state.skill_recommendations_json or []))
 
     async def build_engine(self, run: SolveRun, session) -> object:
         if self.engine_factory:
@@ -126,6 +165,11 @@ class SolveOrchestrator:
         challenge: Challenge,
         action: SkillAction,
     ) -> bool:
+        if action.operation == "decline" and not (action.skill_id or action.skill_name):
+            await event_service.append(session, run.id, "skill.declined", {"reason": action.reason, "phase": action.phase})
+            await solver_state_service.record_rejected_path(session, run.id, {"source": "skill_decision", "reason": action.reason})
+            await self._transition(session, run, RunStatus.PLANNING)
+            return True
         skill = await self._resolve_skill(session, action.skill_id, action.skill_name)
         if not skill:
             await event_service.append(
@@ -206,6 +250,11 @@ class SolveOrchestrator:
                 },
             )
             return False
+        if action.operation == "decline":
+            await event_service.append(session, run.id, "skill.declined", {"skill_id": skill.id, "skill_name": skill.name, "reason": action.reason, "phase": action.phase})
+            await solver_state_service.record_rejected_path(session, run.id, {"source": "skill_decision", "skill_id": skill.id, "reason": action.reason})
+            await self._transition(session, run, RunStatus.PLANNING)
+            return True
         if skill.skill_kind == "SPECIALIST" and challenge.challenge_type not in (skill.challenge_types or []):
             await event_service.append(
                 session,
@@ -220,20 +269,48 @@ class SolveOrchestrator:
                 },
             )
             return False
-        if skill.ctf_phases and action.phase not in skill.ctf_phases:
-            await event_service.append(
-                session,
-                run.id,
-                "skill.activation_rejected",
-                {
-                    "skill_id": skill.id,
-                    "skill_name": skill.name,
-                    "operation": action.operation,
-                    "error_code": "SKILL_PHASE_NOT_APPLICABLE",
-                    "reason": "Skill is not applicable to the current phase.",
-                },
-            )
-            return False
+        if skill.ctf_phases:
+            current_phase = str(run.current_phase or "").upper()
+            allowed_phases = [str(item).upper() for item in skill.ctf_phases]
+            if current_phase not in allowed_phases:
+                current_index = CTF_PHASE_INDEX.get(current_phase, -1)
+                next_phases = sorted(
+                    (
+                        phase
+                        for phase in allowed_phases
+                        if CTF_PHASE_INDEX.get(phase, -1) >= current_index
+                    ),
+                    key=lambda phase: CTF_PHASE_INDEX.get(phase, 10_000),
+                )
+                if next_phases:
+                    target_phase = next_phases[0]
+                    await self._correct_phase(session, run, target_phase)
+                    await event_service.append(
+                        session,
+                        run.id,
+                        "skill.phase_advanced",
+                        {
+                            "skill_id": skill.id,
+                            "skill_name": skill.name,
+                            "from_phase": current_phase,
+                            "to_phase": target_phase,
+                            "reason": "Specialist skill activation requires this phase.",
+                        },
+                    )
+                else:
+                    await event_service.append(
+                        session,
+                        run.id,
+                        "skill.activation_rejected",
+                        {
+                            "skill_id": skill.id,
+                            "skill_name": skill.name,
+                            "operation": action.operation,
+                            "error_code": "SKILL_PHASE_NOT_APPLICABLE",
+                            "reason": "Skill is not applicable to the current phase.",
+                        },
+                    )
+                    return False
         prerequisites = [str(item).lower() for item in (skill.prerequisites or [])]
         if prerequisites and not all(
             any(required in candidate for candidate in active_skill_names) for required in prerequisites
@@ -349,9 +426,38 @@ class SolveOrchestrator:
         if task:
             self.active_tasks[run_id] = task
         async with SessionLocal() as session:
+            attempt = None
             try:
                 run = await session.scalar(select(SolveRun).where(SolveRun.id == run_id))
                 if not run:
+                    return
+                previous_attempts = await session.scalar(select(func.count()).select_from(RunAttempt).where(RunAttempt.run_id == run.id))
+                attempt = RunAttempt(run_id=run.id, attempt_number=int(previous_attempts or 0) + 1, engine_type=run.engine_type, model_config_id=run.model_config_id, started_at=datetime.now(UTC), status="RUNNING")
+                session.add(attempt)
+                try:
+                    await session.commit()
+                except Exception as error:
+                    # A newly created attempt is the first database write in
+                    # the background task.  If that write fails, the old
+                    # implementation left the run in CREATED and then tried
+                    # to use the failed SQLAlchemy transaction again, hiding
+                    # the real cause behind PendingRollbackError.  Roll back,
+                    # persist a clear terminal state in a clean transaction,
+                    # and stop the finalizer from touching the failed attempt.
+                    await session.rollback()
+                    attempt = None
+                    failed_run = await session.scalar(select(SolveRun).where(SolveRun.id == run_id))
+                    if failed_run and RunStatus(failed_run.status) not in TERMINAL:
+                        failed_run.last_error_code = "DATABASE_ERROR"
+                        failed_run.last_error_message = str(error)[:4000]
+                        await self._transition(session, failed_run, RunStatus.FAILED_ENGINE)
+                        await session.commit()
+                        await event_service.append(
+                            session,
+                            run_id,
+                            "run.failed",
+                            {"code": "DATABASE_ERROR", "message": str(error)[:1000]},
+                        )
                     return
                 if run.status == RunStatus.CREATED and run.engine_type != "mock":
                     try:
@@ -383,6 +489,8 @@ class SolveOrchestrator:
                         code = "CODEX_BRIDGE_RATE_LIMITED"
                     elif isinstance(error, ModelUnavailableError):
                         code = "MODEL_UNAVAILABLE"
+                    elif isinstance(error, ModelProviderError):
+                        code = error.code
                     elif isinstance(error, BridgeUnavailableError):
                         code = "CODEX_BRIDGE_UNAVAILABLE"
                     else:
@@ -402,6 +510,13 @@ class SolveOrchestrator:
                         {"code": code, "message": str(error)[:1000]},
                     )
             finally:
+                if attempt is not None and "run" in locals():
+                    attempt.finished_at = datetime.now(UTC)
+                    attempt.status = str(run.status)
+                    attempt.error_code = run.last_error_code
+                    attempt.agent_steps = run.agent_step_count
+                    attempt.tool_calls = run.tool_call_count
+                    await session.commit()
                 self.active_engines.pop(run_id, None)
                 self.active_tasks.pop(run_id, None)
                 close = getattr(locals().get("engine"), "close", None)
@@ -434,6 +549,9 @@ class SolveOrchestrator:
             if RunStatus(run.status) in {RunStatus.ANALYZING, RunStatus.EVALUATING}:
                 await self._transition(session, run, RunStatus.PLANNING)
             messages = await context_builder.build(session, run, challenge)
+            decision_required = await self._skill_decision_required(session, run)
+            if decision_required:
+                messages.append({"role": "system", "content": "SKILL_DECISION_REQUIRED: before any tool action, return SkillAction with operation activate, inspect, or decline and provide a reason."})
             if user_message:
                 messages.append({"role": "user", "content": f"User supplied: {user_message}"})
                 user_message = None
@@ -486,6 +604,7 @@ class SolveOrchestrator:
             )
             run.agent_step_count += 1
             await session.commit()
+            await self._correct_phase(session, run, getattr(action, "phase", None))
             hypothesis_payload = getattr(action, "hypothesis", None)
             if isinstance(hypothesis_payload, ActionHypothesis):
                 hypothesis_payload = hypothesis_payload.model_dump()
@@ -540,6 +659,11 @@ class SolveOrchestrator:
                         )
                 continue
             if isinstance(action, ToolAction):
+                if decision_required:
+                    await event_service.append(session, run.id, "agent.action_rejected", {"type": "tool", "code": "SKILL_DECISION_REQUIRED"})
+                    await solver_state_service.record_rejected_path(session, run.id, {"code": "SKILL_DECISION_REQUIRED", "tool": action.tool_name})
+                    await self._transition(session, run, RunStatus.PLANNING)
+                    continue
                 hypothesis = (
                     action.hypothesis.statement
                     if isinstance(action.hypothesis, ActionHypothesis)
@@ -896,6 +1020,8 @@ class SolveOrchestrator:
             run,
             RunStatus.COMPLETED_SOLVED if result == "solved" else RunStatus.COMPLETED_UNSOLVED,
         )
+        with contextlib.suppress(Exception):
+            await runner_client.clear_sessions(run.id)
         return True
 
     async def _run_event_engine(

@@ -19,7 +19,7 @@ export class CodexService {
   async create(input: ThreadRequest): Promise<ThreadResponse> {
     const thread = this.mock
       ? this.mockThread(input)
-      : this.codex!.startThread({ workingDirectory: codexWorkingDirectory(input.workspace_path), skipGitRepoCheck: true, sandboxMode: "workspace-write", networkAccessEnabled: false });
+      : this.codex!.startThread({ workingDirectory: codexWorkingDirectory(input.workspace_path), skipGitRepoCheck: true, sandboxMode: "workspace-write", networkAccessEnabled: false, webSearchMode: "disabled", approvalPolicy: "never" });
     // The SDK only assigns its real thread id after the first turn starts. Keep
     // a bridge-local id so the backend can trigger that first turn explicitly.
     const threadId = randomUUID();
@@ -37,7 +37,7 @@ export class CodexService {
   async *stream(threadId: string, prompt: string): AsyncGenerator<BridgeEvent> {
     const thread = this.threads.get(threadId);
     if (!thread) throw new Error("THREAD_NOT_FOUND");
-    const guardedPrompt = `${prompt}\n\n[EXECUTION BOUNDARY]\nDo not use direct PowerShell, shell, curl, Invoke-WebRequest, or arbitrary command execution for network or challenge analysis. Route authorized actions through the backend Tool Gateway/ctfctl interface and keep local edits inside the current Run Workspace.`;
+    const guardedPrompt = `${prompt}\n\n[EXECUTION BOUNDARY]\nYou are forbidden from direct PowerShell, shell, command_execution, node repl, web_search, curl, Invoke-WebRequest, localhost/backend API calls, source-code browsing outside the current Run Workspace, or creating other Runs. Route every authorized action through ctfctl/Backend Tool Gateway, and only edit scripts/, notes/, and final/ inside the current Run Workspace.`;
     const streamed = await thread.runStreamed(guardedPrompt);
     for await (const event of streamed.events) {
       for (const bridgeEvent of threadEventsToBridgeEvents(event)) yield bridgeEvent;

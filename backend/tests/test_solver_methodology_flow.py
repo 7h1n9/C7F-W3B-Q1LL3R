@@ -9,17 +9,17 @@ from app.models.base import Base
 from app.models.challenge import Challenge
 from app.models.run import Artifact, FlagCandidate, Observation, RunEvent, SolveRun, ToolCall
 from app.models.skill import RunSkillSnapshot, Skill
+from app.orchestration.state_machine import RunStatus, transition
+from app.schemas.agent import SkillAction
 from app.services.action_fingerprint import fingerprint_action
 from app.services.builtin_skills import BuiltinSkillSyncService
 from app.services.codex_materializer import codex_materializer
 from app.services.finish_gate import finish_gate
 from app.services.flags import flag_service
 from app.services.hypotheses import hypothesis_service
-from app.schemas.agent import SkillAction
 from app.services.role_loader import role_loader
 from app.services.run_diagnostics import run_diagnostics_service
 from app.services.solver_state import solver_state_service
-from app.orchestration.state_machine import RunStatus, transition
 
 
 def test_role_loader_selects_role_by_challenge_type() -> None:
@@ -336,7 +336,7 @@ async def test_skill_action_activation_creates_snapshot(tmp_path: Path) -> None:
             required_tools=[],
             recommended_tools=["http_request"],
             forbidden_tools=[],
-            ctf_phases=["PLANNING"],
+            ctf_phases=["MAPPING"],
             challenge_types=["WEB_TARGET"],
             content_markdown="Use a login-aware approach.",
             allowed_tools=["http_request"],
@@ -350,7 +350,7 @@ async def test_skill_action_activation_creates_snapshot(tmp_path: Path) -> None:
         session.add(run)
         await session.flush()
         run.status = "PLANNING"
-        run.current_phase = "PLANNING"
+        run.current_phase = "BASELINE"
         await solver_state_service.initialize(session, run, challenge.challenge_type, [])
         from app.orchestration.orchestrator import SolveOrchestrator
 
@@ -361,7 +361,7 @@ async def test_skill_action_activation_creates_snapshot(tmp_path: Path) -> None:
             SkillAction(
                 type="skill",
                 operation="activate",
-                phase="PLANNING",
+                phase="INTAKE",
                 objective="Enable login methodology",
                 reason="Need a login-aware path",
                 skill_id=skill.id,
@@ -376,10 +376,16 @@ async def test_skill_action_activation_creates_snapshot(tmp_path: Path) -> None:
                 RunSkillSnapshot.run_id == run.id, RunSkillSnapshot.skill_id == skill.id
             )
         )
+        phase_event = await session.scalar(
+            select(RunEvent).where(
+                RunEvent.run_id == run.id, RunEvent.event_type == "skill.phase_advanced"
+            )
+        )
 
     assert handled is True
     assert state is not None and skill.id in (state.active_skill_ids_json or [])
     assert snapshot is not None and snapshot.skill_name == skill.name
+    assert phase_event is not None and phase_event.payload_json["to_phase"] == "MAPPING"
     await engine.dispose()
 
 

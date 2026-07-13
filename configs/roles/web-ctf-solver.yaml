@@ -1,10 +1,10 @@
 name: web-ctf-solver
-display_name: Web CTF Solver
-version: 1
+display_name: Web CTF 解题智能体
+version: 2
 description: Solver for explicitly authorized CTF Web challenges.
 challenge_types: [WEB_TARGET]
 enabled: true
-tools: [http_request, file_read, file_search, python_run]
+tools: [http_request, http_session_request, http_extract, file_read, file_search, python_run, jwt_inspect, js_asset_analyze, source_map_analyze, content_discovery, file_type, strings_extract, archive_list, sqlmap_detect, nmap_service_probe, nikto_scan, binwalk_scan, exiftool_metadata]
 skills: [ctf-solver-core, web-ctf-methodology]
 limits:
   max_tool_calls: 40

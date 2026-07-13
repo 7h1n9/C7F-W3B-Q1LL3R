@@ -22,6 +22,12 @@ class RunnerClient:
             response.raise_for_status()
             return response.json()
 
+    async def capabilities(self) -> dict:
+        async with httpx.AsyncClient(timeout=5, trust_env=False) as client:
+            response = await client.get(f"{self.base_url}/api/v1/capabilities", headers=self._headers())
+            response.raise_for_status()
+            return response.json()
+
     async def initialize_workspace(self, run_id: str) -> None:
         async with httpx.AsyncClient(timeout=15, trust_env=False) as client:
             response = await client.post(
@@ -154,6 +160,11 @@ class RunnerClient:
             response = await client.delete(
                 f"{self.base_url}/api/v1/workspaces/{run_id}", headers=self._headers()
             )
+            response.raise_for_status()
+
+    async def clear_sessions(self, run_id: str) -> None:
+        async with httpx.AsyncClient(timeout=10, trust_env=False) as client:
+            response = await client.delete(f"{self.base_url}/api/v1/sessions/{run_id}", headers=self._headers())
             response.raise_for_status()
 
 

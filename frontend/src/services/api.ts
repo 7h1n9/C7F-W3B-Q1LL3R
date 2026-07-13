@@ -1,7 +1,7 @@
 import type { ApiEnvelope, Challenge, ChallengeConversation, ChallengeMessage, FlagCandidate, RunDiagnostics, RunEvent, Skill, SolveRun, SolverState } from "../types/api";
 
 const base = import.meta.env.VITE_API_BASE_URL ?? "/api/v1";
-const runEventTypes = ["run.created", "run.started", "run.restarted", "run.status_changed", "agent.message", "agent.plan_created", "agent.hypothesis_created", "agent.hypothesis_updated", "agent.action_requested", "agent.action_rejected", "agent.action_completed", "agent.replan_required", "agent.progress_detected", "agent.no_progress", "skill.requested", "skill.snapshot_created", "skill.activated", "skill.deactivated", "skill.recommended", "skill.activation_rejected", "tool.requested", "tool.started", "tool.output", "tool.completed", "tool.failed", "artifact.created", "flag.candidate_found", "flag.reviewed", "flag.verified", "report.started", "report.completed", "run.completed", "run.failed"];
+const runEventTypes = ["run.created", "run.started", "run.restarted", "run.status_changed", "phase.corrected", "agent.message", "agent.plan_created", "agent.hypothesis_created", "agent.hypothesis_updated", "agent.action_requested", "agent.action_rejected", "agent.action_completed", "agent.replan_required", "agent.progress_detected", "agent.no_progress", "skill.requested", "skill.snapshot_created", "skill.activated", "skill.deactivated", "skill.declined", "skill.recommended", "skill.activation_rejected", "tool.requested", "tool.started", "tool.output", "tool.completed", "tool.failed", "artifact.created", "flag.candidate_found", "flag.reviewed", "flag.verified", "report.started", "report.completed", "run.completed", "run.failed"];
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   let response: Response;
   try {
@@ -25,6 +25,8 @@ export const api = {
   validateSkill: (id: string) => request<{ ok: boolean; message: string }>(`/skills/${id}/validate`, { method: "POST" }),
   duplicateSkill: (id: string) => request<Skill>(`/skills/${id}/duplicate`, { method: "POST" }),
   deleteSkill: (id: string) => request<void>(`/skills/${id}`, { method: "DELETE" }),
+  listLearnedSkillCandidates: () => request<Array<Record<string, unknown>>>("/learned-skill-candidates"),
+  reviewLearnedSkillCandidate: (id: string, decision: "APPROVE" | "REJECT") => request<Record<string, unknown>>(`/learned-skill-candidates/${id}/review`, { method: "POST", body: JSON.stringify({ decision, reviewer: "human" }) }),
   getModelSkills: (id: string) => request<Array<Record<string, unknown>>>(`/model-configs/${id}/skills`),
   setModelSkills: (id: string, payload: Array<Record<string, unknown>>) => request<Array<Record<string, unknown>>>(`/model-configs/${id}/skills`, { method: "PUT", body: JSON.stringify(payload) }),
   getChallengeSkills: (id: string) => request<Array<Record<string, unknown>>>(`/challenges/${id}/skills`),

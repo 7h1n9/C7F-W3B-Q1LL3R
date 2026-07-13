@@ -5,6 +5,7 @@ from app.api.v1 import (
     conversations,
     events,
     health,
+    learned_skills,
     models,
     readiness,
     runner,
@@ -24,3 +25,4 @@ router.include_router(runner.router)
 router.include_router(models.router)
 router.include_router(system_settings.router)
 router.include_router(readiness.router)
+router.include_router(learned_skills.router)

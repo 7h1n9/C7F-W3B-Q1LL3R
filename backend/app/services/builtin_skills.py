@@ -35,6 +35,18 @@ class BuiltinSkillSyncService:
         return metadata, content.strip()
 
     @staticmethod
+    def _zh(value: str, fallback: str) -> str:
+        return value if re.search(r"[\u4e00-\u9fff]", value) else fallback
+
+    @classmethod
+    def _localize(cls, name: str, display_name: str, description: str, content: str) -> tuple[str, str, str]:
+        title = cls._zh(display_name, f"中文方法论 · {display_name}")
+        desc = cls._zh(description, f"用于授权 CTF 解题的结构化方法：{description}")
+        if not re.search(r"[\u4e00-\u9fff]", content[:300]):
+            content = f"# 中文方法论：{title}\n\n{content}"
+        return title, desc, content
+
+    @staticmethod
     def _challenge_tools(challenge_types: list[str]) -> list[str]:
         if challenge_types == ["TRAFFIC_ANALYSIS"]:
             return ["file_read", "file_search", "python_run", "pcap_metadata", "pcap_protocols", "pcap_query", "pcap_tcp_stream", "pcap_http_objects", "pcap_dns_summary", "pcap_credentials"]
@@ -107,12 +119,16 @@ class BuiltinSkillSyncService:
                 trigger_metadata = {**metadata, "triggers": metadata.get("positive_triggers") or metadata.get("triggers") or []}
                 triggers = self._infer_triggers(path.parent.name, str(metadata.get("description") or ""), trigger_metadata, skill_kind)
                 ctf_phases = list(metadata.get("ctf_phases") or self._default_phases(challenge_types))
+                display_name, description, content = self._localize(
+                    path.parent.name,
+                    str(metadata.get("display_name") or metadata.get("name") or path.parent.name),
+                    str(metadata.get("description") or ""),
+                    content,
+                )
                 payload = SkillWrite(
                     name=str(metadata.get("name") or path.parent.name),
-                    display_name=str(
-                        metadata.get("display_name") or metadata.get("name") or path.parent.name
-                    ),
-                    description=str(metadata.get("description") or ""),
+                    display_name=display_name,
+                    description=description,
                     skill_kind=skill_kind,
                     activation_mode=activation_mode,
                     triggers=triggers,
@@ -126,7 +142,7 @@ class BuiltinSkillSyncService:
                     allowed_tools=metadata.get("allowed_tools") or required_tools,
                     risk_level=str(metadata.get("risk_level") or "low"),
                     content_markdown=content,
-                    catalog_scope=str(metadata.get("catalog_scope") or ("GENERAL_SECURITY" if is_unrelated else "WEB_CTF")),
+                    catalog_scope=str(metadata.get("catalog_scope") or ("GENERAL_SECURITY" if is_unrelated else "TRAFFIC_CTF" if challenge_types == ["TRAFFIC_ANALYSIS"] else "WEB_CTF")),
                     enabled=bool(metadata.get("enabled", not is_unrelated)),
                 )
                 checksum = hashlib.sha256(path.read_bytes()).hexdigest()
@@ -146,6 +162,14 @@ class BuiltinSkillSyncService:
                     skill.version += 1
                     skill.checksum = checksum
                     results.append(f"updated:{relative}")
+                else:
+                    # Localize existing rows without changing the immutable source checksum.
+                    skill.display_name = payload.display_name
+                    skill.description = payload.description
+                    skill.content_markdown = payload.content_markdown
+                    skill.catalog_scope = payload.catalog_scope
+                    skill.challenge_types = payload.challenge_types
+                    skill.enabled = payload.enabled
                 if is_unrelated or is_core:
                     skill.enabled = bool(metadata.get("enabled", not is_unrelated))
                     skill.catalog_scope = "GENERAL_SECURITY" if is_unrelated else "WEB_CTF"

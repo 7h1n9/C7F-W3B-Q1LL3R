@@ -90,7 +90,29 @@ export function WorkspacePage() {
   const [timelinePage, setTimelinePage] = useState(1);
   const timelinePageSize = 12;
 
-  const run = useQuery({ queryKey: ["run", id], queryFn: () => api.getRun(id) });
+  const run = useQuery({
+    queryKey: ["run", id],
+    queryFn: () => api.getRun(id),
+    // Starting is asynchronous.  A single invalidation can race the
+    // background orchestrator and read CREATED before it has committed its
+    // first transition, leaving the workspace looking stuck.  Keep polling
+    // until the run reaches a terminal state.
+    refetchInterval: (query) => {
+      const status = query.state.data?.status;
+      return status && [
+        "COMPLETED_SOLVED",
+        "COMPLETED_UNSOLVED",
+        "FAILED_ENGINE",
+        "FAILED_TOOL",
+        "FAILED_RUNNER",
+        "TIMEOUT",
+        "CANCELLED",
+        "POLICY_BLOCKED",
+      ].includes(status)
+        ? false
+        : 2000;
+    },
+  });
   const solverState = useQuery({ queryKey: ["solver-state", id], queryFn: () => api.getSolverState(id) });
   const diagnostics = useQuery({
     queryKey: ["run-diagnostics", id],

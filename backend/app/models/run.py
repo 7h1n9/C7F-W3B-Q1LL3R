@@ -55,6 +55,31 @@ class AgentTurn(UUIDTimestampMixin, Base):
     action_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
 
 
+class RunAttempt(UUIDTimestampMixin, Base):
+    __tablename__ = "run_attempts"
+    run_id: Mapped[str] = mapped_column(ForeignKey("solve_runs.id"), nullable=False, index=True)
+    attempt_number: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    engine_type: Mapped[str] = mapped_column(String(40), nullable=False)
+    model_config_id: Mapped[str | None] = mapped_column(ForeignKey("model_configs.id"))
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    status: Mapped[str] = mapped_column(String(40), default="RUNNING")
+    error_code: Mapped[str | None] = mapped_column(String(100))
+    agent_steps: Mapped[int] = mapped_column(Integer, default=0)
+    tool_calls: Mapped[int] = mapped_column(Integer, default=0)
+    input_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    output_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    # The migration creates this column as NOT NULL.  Keep it in the ORM as
+    # well so MySQL receives a value on the very first insert of an attempt.
+    # Without this field a newly started run fails before the orchestrator can
+    # transition it out of CREATED.
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(UTC),
+        onupdate=lambda: datetime.now(UTC),
+    )
+
+
 class RunEvent(UUIDTimestampMixin, Base):
     __tablename__ = "run_events"
     __table_args__ = (UniqueConstraint("run_id", "sequence", name="uq_run_event_sequence"),)

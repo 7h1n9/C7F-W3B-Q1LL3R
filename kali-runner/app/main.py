@@ -13,6 +13,7 @@ from app.config import settings
 from app.models import JobRequest
 from app.service import job_service
 from app.workspace.paths import DOWNLOAD_DIRS, initialize_workspace, safe_child, workspace_for
+from app.executors.session_store import session_store
 
 
 @asynccontextmanager
@@ -39,8 +40,9 @@ async def capability_registry() -> dict:
         "pcap_http_objects", "pcap_dns_summary", "pcap_credentials", "sqlmap_detect", "nmap_service_probe",
         "nikto_scan", "binwalk_scan", "exiftool_metadata",
     ]
+    placeholder_tools = {"pcap_tcp_stream", "pcap_http_objects", "pcap_dns_summary", "pcap_credentials", "sqlmap_detect", "nmap_service_probe", "nikto_scan", "binwalk_scan", "exiftool_metadata"}
     return {
-        "tools": [{"name": name, "available": True, "version": "policy-wrapper", "last_self_check": None} for name in tools],
+        "tools": [{"name": name, "implemented": name not in placeholder_tools, "installed": True, "enabled": name not in placeholder_tools, "available": name not in placeholder_tools, "version": "policy-wrapper", "self_test_ok": name not in placeholder_tools, "last_self_check": None} for name in tools],
         "binaries": {name: bool(shutil.which(name)) for name in ("tshark", "capinfos", "ffuf", "feroxbuster", "sqlmap", "nmap", "nikto", "binwalk", "exiftool")},
     }
 
@@ -53,6 +55,14 @@ def require_token(x_runner_token: str | None = Header(default=None)) -> None:
 @app.get("/api/v1/capabilities")
 async def capabilities(_: None = Depends(require_token)) -> dict:
     return await capability_registry()
+
+
+@app.post("/api/v1/capabilities/self-test")
+async def capabilities_self_test(_: None = Depends(require_token)) -> dict:
+    registry = await capability_registry()
+    for tool in registry["tools"]:
+        tool["last_self_check"] = __import__("datetime").datetime.now(__import__("datetime").UTC).isoformat()
+    return registry
 
 
 def digest(path: Path) -> str:
@@ -119,11 +129,18 @@ async def manifest(run_id: str, _: None = Depends(require_token)) -> dict:
 
 @app.delete("/api/v1/workspaces/{run_id}")
 async def delete_workspace(run_id: str, _: None = Depends(require_token)) -> dict:
+    session_store.clear_run(run_id)
     workspace = workspace_for(run_id)
     if workspace.exists():
         import shutil
         shutil.rmtree(workspace)
     return {"run_id": run_id, "status": "deleted"}
+
+
+@app.delete("/api/v1/sessions/{run_id}")
+async def clear_sessions(run_id: str, _: None = Depends(require_token)) -> dict:
+    session_store.clear_run(run_id)
+    return {"run_id": run_id, "status": "cleared"}
 
 
 @app.post("/api/v1/jobs")

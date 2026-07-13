@@ -8,6 +8,7 @@ from fastapi import HTTPException
 
 from app.config import settings
 from app.models import JobRequest
+from app.executors.session_store import session_store
 
 
 class _HTMLSummary(HTMLParser):
@@ -84,12 +85,35 @@ async def execute_http(request: JobRequest) -> dict:
         parsed = urlparse(candidate)
         if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.hostname.lower() not in request.allowed_hosts or parsed.hostname == "169.254.169.254":
             raise HTTPException(403, detail="target host is not allowlisted")
+    is_session = request.tool == "http_session_request"
+    session_name = str(args.get("session_name") or "")
+    if is_session and not session_name:
+        raise HTTPException(422, detail="session_name is required for http_session_request")
+    operation = str(args.get("operation") or "request").lower()
+    if is_session and operation == "inspect":
+        return {"summary": "HTTP session inspected", "extracted_facts": session_store.inspect(request.run_id, session_name)}
+    if is_session and operation == "clear":
+        session_store.clear(request.run_id, session_name)
+        return {"summary": "HTTP session cleared", "extracted_facts": {"exists": False, "cookie_names": [], "authenticated": False}}
+    if is_session and operation == "create":
+        session_store.cookies(request.run_id, session_name)
+        return {"summary": "HTTP session created", "extracted_facts": session_store.inspect(request.run_id, session_name)}
+    if is_session and operation not in {"request", "create"}:
+        raise HTTPException(422, detail="unsupported session operation")
+    if is_session and (not args.get("url") or not args.get("method")):
+        raise HTTPException(422, detail="method and url are required for a session request")
     validate(url)
     follow = bool(args.get("follow_redirects", False))
     redirect_history: list[dict] = []
-    async with httpx.AsyncClient(follow_redirects=False, timeout=min(float(args.get("timeout", 30)), settings.job_timeout_seconds), trust_env=False) as client:
+    request_method = str(args.get("method", "GET")).upper()
+    request_body = args.get("body")
+    request_headers = dict(args.get("headers", {}))
+    request_cookies = session_store.cookies(request.run_id, session_name) if is_session else None
+    async with httpx.AsyncClient(follow_redirects=False, timeout=min(float(args.get("timeout", 30)), settings.job_timeout_seconds), trust_env=False, cookies=request_cookies) as client:
         for hop in range(6):
-            response = await client.request(method=str(args.get("method", "GET")).upper(), url=url, headers=args.get("headers", {}), params=args.get("query", {}), content=args.get("body"))
+            response = await client.request(method=request_method, url=url, headers=request_headers, params=args.get("query", {}), content=request_body)
+            if is_session:
+                session_store.update(request.run_id, session_name, response)
             location = response.headers.get("location")
             redirect_history.append({"status_code": response.status_code, "url": str(response.url), "location": location})
             if not location or response.status_code not in {301, 302, 303, 307, 308}:
@@ -100,6 +124,12 @@ async def execute_http(request: JobRequest) -> dict:
                 raise HTTPException(400, detail="too many redirects")
             url = urljoin(str(response.url), location)
             validate(url)
+            if response.status_code in {301, 302} and request_method not in {"GET", "HEAD"}:
+                request_method, request_body = "GET", None
+                request_headers = {key: value for key, value in request_headers.items() if key.lower() not in {"content-length", "content-type", "transfer-encoding"}}
+            elif response.status_code == 303 and request_method != "HEAD":
+                request_method, request_body = "GET", None
+                request_headers = {key: value for key, value in request_headers.items() if key.lower() not in {"content-length", "content-type", "transfer-encoding"}}
     body = response.content[: settings.http_excerpt_bytes]
     content_type = response.headers.get("content-type", "")
     body_text = body.decode(errors="replace") if not content_type.startswith(("image/", "audio/", "video/", "application/octet-stream")) else None
@@ -109,9 +139,9 @@ async def execute_http(request: JobRequest) -> dict:
         "final_url": str(response.url),
         "redirect_history": redirect_history[:-1],
         "content_type": content_type,
-        "headers": dict(response.headers),
+        "headers": _safe_headers(dict(response.headers)),
         "selected_headers": _safe_headers(dict(response.headers)),
-        "cookie_names": [part.split("=", 1)[0].strip() for part in response.headers.get("set-cookie", "").split(";") if "=" in part],
+        "cookie_names": [part.split("=", 1)[0].strip() for header in response.headers.get_list("set-cookie") for part in [header] if "=" in part],
         "body": body_text or "",
         "body_excerpt": body_text,
         "body_length": len(response.content),

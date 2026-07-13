@@ -25,6 +25,7 @@ from app.models.run import (
     FlagCandidate,
     Hypothesis,
     Observation,
+    RunAttempt,
     RunEvent,
     SolveRun,
     ToolCall,
@@ -295,8 +296,20 @@ async def _delete_run_records(session: AsyncSession, run_id: str) -> None:
         RunEvent,
         RunSkillSnapshot,
         SolverState,
+        RunAttempt,
     ):
         await session.execute(delete(model).where(model.run_id == run_id))
+    from app.models.learned_skill import (
+        LearnedSkillCandidate,
+        LearnedSkillCandidateSource,
+        LearnedSkillReview,
+        LearnedSkillValidationRun,
+    )
+    candidate_ids = select(LearnedSkillCandidate.id).where(LearnedSkillCandidate.source_run_id == run_id)
+    await session.execute(delete(LearnedSkillCandidateSource).where(LearnedSkillCandidateSource.candidate_id.in_(candidate_ids)))
+    await session.execute(delete(LearnedSkillReview).where(LearnedSkillReview.candidate_id.in_(candidate_ids)))
+    await session.execute(delete(LearnedSkillValidationRun).where(LearnedSkillValidationRun.candidate_id.in_(candidate_ids)))
+    await session.execute(delete(LearnedSkillCandidate).where(LearnedSkillCandidate.source_run_id == run_id))
     await session.execute(delete(SolveRun).where(SolveRun.id == run_id))
 
 
@@ -407,6 +420,8 @@ async def cancel_run(run_id: str, session: AsyncSession = Depends(get_session)) 
     await session.commit()
     await event_service.append(session, run.id, "run.status_changed", {"status": run.status})
     await orchestrator.cancel(run.id)
+    with contextlib.suppress(Exception):
+        await runner_client.clear_sessions(run.id)
     return {"data": read(run)}
 
 

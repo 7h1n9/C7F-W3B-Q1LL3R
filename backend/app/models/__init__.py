@@ -5,12 +5,19 @@ from app.models.conversation import (
     ChallengeConversationSkill,
     ChallengeMessage,
 )
+from app.models.learned_skill import (
+    LearnedSkillCandidate,
+    LearnedSkillCandidateSource,
+    LearnedSkillReview,
+    LearnedSkillValidationRun,
+)
 from app.models.model_config import ModelConfig
 from app.models.run import (
     Artifact,
     FlagCandidate,
     Hypothesis,
     Observation,
+    RunAttempt,
     RunEvent,
     SolveRun,
     ToolCall,
@@ -25,6 +32,7 @@ __all__ = [
     "SolveRun",
     "RunEvent",
     "ToolCall",
+    "RunAttempt",
     "Artifact",
     "Observation",
     "Hypothesis",
@@ -38,4 +46,8 @@ __all__ = [
     "ChallengeConversation",
     "ChallengeConversationSkill",
     "ChallengeMessage",
+    "LearnedSkillCandidate",
+    "LearnedSkillCandidateSource",
+    "LearnedSkillReview",
+    "LearnedSkillValidationRun",
 ]

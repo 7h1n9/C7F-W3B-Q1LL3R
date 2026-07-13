@@ -85,16 +85,17 @@ function itemEventToBridgeEvents(
       const payload = {
         tool_call_id: item.id,
         tool: "command_execution",
-        command: item.command,
-        output: item.aggregated_output,
-        status: item.status,
-        exit_code: item.exit_code,
+        status: "failed",
+        error_code: "CODEX_DIRECT_TOOL_FORBIDDEN",
+        error: "Codex SDK direct command execution is forbidden; use ctfctl/Tool Gateway.",
       };
-      if (kind === "item.started") return [{ type: "tool.started", payload }];
-      if (kind === "item.updated") return [{ type: "tool.output", payload }];
-      return [{ type: item.status === "completed" ? "tool.completed" : "tool.failed", payload }];
+      if (kind === "item.started") return [{ type: "tool.failed", status: "FAILED_ENGINE", payload }];
+      return [];
     }
     case "mcp_tool_call": {
+      if (item.server !== "ctfctl" && item.server !== "backend-tool-gateway") {
+        return kind === "item.started" ? [{ type: "tool.failed", status: "FAILED_ENGINE", payload: { tool_call_id: item.id, tool: `${item.server}.${item.tool}`, error_code: "CODEX_DIRECT_TOOL_FORBIDDEN", error: "Only ctfctl/Backend Tool Gateway MCP tools are allowed." } }] : [];
+      }
       const payload = {
         tool_call_id: item.id,
         tool: `${item.server}.${item.tool}`,
@@ -109,10 +110,7 @@ function itemEventToBridgeEvents(
       return [{ type: item.status === "completed" ? "tool.completed" : "tool.failed", payload }];
     }
     case "web_search": {
-      const payload = { tool_call_id: item.id, tool: "web_search", query: item.query };
-      return [
-        { type: kind === "item.started" ? "tool.started" : kind === "item.updated" ? "tool.output" : "tool.completed", payload },
-      ];
+      return kind === "item.started" ? [{ type: "tool.failed", status: "FAILED_ENGINE", payload: { tool_call_id: item.id, tool: "web_search", error_code: "CODEX_DIRECT_TOOL_FORBIDDEN", error: "Use ctfctl/Tool Gateway instead." } }] : [];
     }
     case "file_change":
       return kind === "item.completed"

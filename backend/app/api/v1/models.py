@@ -128,9 +128,15 @@ async def test_model_config(config_id: str, session: AsyncSession = Depends(get_
         "json_schema": False,
         "native_tool_call": False,
         "agent_action": False,
+        "tool_action": False,
+        "finish_action": False,
         "recommended_protocol": item.action_protocol,
         "skill_action": False,
         "max_output_tokens": item.max_output_tokens,
+        "latency": None,
+        "usage": {},
+        "quota_state": "unknown",
+        "rate_limit_state": "unknown",
         "retry_after": None,
     }
     headers = {"Authorization": f"Bearer {decrypt_api_key(item.encrypted_api_key)}"}
@@ -147,6 +153,7 @@ async def test_model_config(config_id: str, session: AsyncSession = Depends(get_
             capabilities["reachable"] = capabilities["normal_chat"] = True
             body = response.json()
             capabilities["usage"] = body.get("usage", {})
+            capabilities["latency"] = round((time.perf_counter() - started) * 1000)
             for mode, fmt in (
                 ("json_object", {"type": "json_object"}),
                 ("json_schema", {"type": "json_schema", "json_schema": {"name": "probe", "strict": True, "schema": {"type": "object", "properties": {"ok": {"type": "boolean"}}, "required": ["ok"], "additionalProperties": False}}}),
@@ -159,6 +166,8 @@ async def test_model_config(config_id: str, session: AsyncSession = Depends(get_
                     capabilities[mode] = False
             for probe_name, probe in (
                 ("agent_action", {"type": "finish", "result": "unsolved", "summary": "capability probe"}),
+                ("finish_action", {"type": "finish", "result": "unsolved", "summary": "capability probe"}),
+                ("tool_action", {"type": "tool", "phase": "INTAKE", "objective": "capability probe", "tool_name": "file_read", "arguments": {"path": "notes/probe.txt"}, "reason": "capability probe"}),
                 ("skill_action", {"type": "skill", "operation": "inspect", "phase": "INTAKE", "objective": "capability probe", "reason": "capability probe", "expected_use": "capability probe"}),
             ):
                 try:
@@ -172,11 +181,24 @@ async def test_model_config(config_id: str, session: AsyncSession = Depends(get_
                 except httpx.HTTPStatusError as probe_error:
                     if probe_error.response.status_code == 429:
                         capabilities["retry_after"] = probe_error.response.headers.get("Retry-After")
+                        capabilities["rate_limit_state"] = "limited"
                 except httpx.HTTPError:
                     pass
+    except httpx.HTTPStatusError as error:
+        capabilities["error_code"] = {400: "MODEL_BAD_REQUEST", 401: "MODEL_AUTH_FAILED", 402: "MODEL_QUOTA_EXCEEDED", 403: "MODEL_PERMISSION_DENIED", 429: "MODEL_RATE_LIMITED"}.get(error.response.status_code, "MODEL_UNAVAILABLE")
+        capabilities["quota_state"] = "exceeded" if error.response.status_code == 402 else capabilities["quota_state"]
+        capabilities["rate_limit_state"] = "limited" if error.response.status_code == 429 else capabilities["rate_limit_state"]
+        capabilities["error"] = str(error)
     except (httpx.HTTPError, ValueError) as error:
+        capabilities["error_code"] = "MODEL_UNAVAILABLE"
         capabilities["error"] = str(error)
     capabilities["latency_ms"] = round((time.perf_counter() - started) * 1000)
+    if capabilities.get("json_schema"):
+        capabilities["recommended_protocol"] = "json_schema"
+    elif capabilities.get("json_object"):
+        capabilities["recommended_protocol"] = "json_object"
+    else:
+        capabilities["recommended_protocol"] = "prompt_json"
     item.capabilities_json = capabilities
     item.supports_json_schema = bool(capabilities.get("json_schema"))
     item.supports_json_object = bool(capabilities.get("json_object"))

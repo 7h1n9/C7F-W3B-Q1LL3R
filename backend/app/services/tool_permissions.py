@@ -12,6 +12,25 @@ async def effective_tools_for(session: AsyncSession, run: SolveRun, challenge: C
     role_tools = set((run.role_snapshot_json or {}).get("tools") or [])
     if role_tools:
         allowed &= role_tools
+    try:
+        from app.services.runner_client import runner_client
+
+        capability = await runner_client.capabilities()
+        rows = capability.get("tools") if isinstance(capability, dict) else None
+        if isinstance(rows, list):
+            allowed &= {
+                str(item.get("name"))
+                for item in rows
+                if isinstance(item, dict)
+                and item.get("implemented", item.get("available", False))
+                and item.get("installed", True)
+                and item.get("enabled", True)
+                and item.get("self_test_ok", True)
+            }
+    except Exception:
+        # Keep local test/fallback engines usable when the optional Runner is down;
+        # actual invocation still fails closed in ToolGateway.
+        pass
     return allowed - await forbidden_tools_for(session, run.id)
 
 

@@ -1,4 +1,6 @@
+import hashlib
 import json
+import re
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -60,6 +62,15 @@ class ContextBuilder:
                 )
             ).all()
         )
+        # Keep one observation for the same semantic result. This is the first
+        # trim stage because repeated polling otherwise dominates provider input.
+        unique_observations: list[Observation] = []
+        seen_observations: set[str] = set()
+        for item in observations:
+            signature = hashlib.sha256(json.dumps([item.summary, item.facts_json], ensure_ascii=False, sort_keys=True, default=str).encode()).hexdigest()
+            if signature not in seen_observations:
+                unique_observations.append(item); seen_observations.add(signature)
+        observations = unique_observations
         artifacts = list(
             (
                 await session.scalars(
@@ -113,7 +124,13 @@ class ContextBuilder:
         permitted = await effective_tools_for(session, run, challenge)
         tool_schema = self._tool_schema(load_tool_definitions(), permitted)
         active_skill_ids = set((state.active_skill_ids_json if state else []) or [])
-        skill_recommendations = (state.skill_recommendations_json if state else []) or []
+        raw_recommendations = (state.skill_recommendations_json if state else []) or []
+        best_recommendations: dict[str, dict] = {}
+        for recommendation in raw_recommendations:
+            name = str(recommendation.get("skill_name") or recommendation.get("skill_id") or "")
+            if name and recommendation.get("confidence", 0) >= best_recommendations.get(name, {}).get("confidence", -1):
+                best_recommendations[name] = recommendation
+        skill_recommendations = list(best_recommendations.values())
         active_snapshots = [item for item in snapshots if item.skill_id in active_skill_ids]
         specialist_catalog = await specialist_skill_catalog(session, challenge.challenge_type, active_skill_ids)
         snapshot_by_skill = {snapshot.skill_id: snapshot for snapshot in snapshots}
@@ -202,7 +219,7 @@ class ContextBuilder:
                 "confirmed_facts": state.confirmed_facts_json if state else [],
                 "rejected_paths": state.rejected_paths_json if state else [],
                 "active_hypotheses": state.active_hypotheses_json if state else [],
-                "previous_action_fingerprints": state.action_fingerprints_json if state else {},
+                "previous_action_fingerprints": dict(list((state.action_fingerprints_json if state else {}).items())[-5:]),
                 "active_skill_ids": sorted(active_skill_ids),
                 "no_progress_count": state.no_progress_count if state else 0,
                 "last_progress_at": state.last_progress_at.isoformat() if state and state.last_progress_at else None,
@@ -260,17 +277,20 @@ class ContextBuilder:
                 ),
             },
             "Flag Candidates": [
-                {
-                    "candidate": item.candidate,
-                    "verified": item.verified,
-                    "review_state": item.review_state,
-                    "pattern_matched": item.pattern_matched,
-                }
-                for item in (
-                    await session.scalars(select(FlagCandidate).where(FlagCandidate.run_id == run.id))
-                ).all()
+                {"candidate_shape": re.sub(r"(?i)flag\{.*?\}", "flag{<dynamic>}", item.candidate), "verified": item.verified, "review_state": item.review_state, "pattern_matched": item.pattern_matched}
+                for item in (await session.scalars(select(FlagCandidate).where(FlagCandidate.run_id == run.id))).all()
             ],
         }
+        serialized = json.dumps(context, ensure_ascii=False)
+        budget = 48_000
+        if len(serialized) > budget:
+            # Preserve current state, latest evidence and schemas; discard oldest
+            # history before asking the provider for another action.
+            context["Recent Observations"] = context["Recent Observations"][-4:]
+            context["Artifacts"] = context["Artifacts"][-4:]
+            context["Challenge Lesson"] = {key: value[:6] for key, value in lessons.items()}
+            serialized = json.dumps(context, ensure_ascii=False)
+        context["Context Budget"] = {"max_chars": budget, "used_chars": len(serialized), "approx_input_tokens": len(serialized) // 4, "trimmed": len(json.dumps(context, ensure_ascii=False)) > budget}
         # The model receives one system message with the core prompt and one user message
         # with ordered JSON context.
         messages = [

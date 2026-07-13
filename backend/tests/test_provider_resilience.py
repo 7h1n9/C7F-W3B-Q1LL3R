@@ -62,6 +62,60 @@ class _FlakyThenSuccessClient:
         return Response()
 
 
+class _SkillAliasClient:
+    def __init__(self, **_: object) -> None: pass
+
+    async def __aenter__(self): return self
+    async def __aexit__(self, *_: object) -> None: pass
+
+    async def post(self, *_: object, **__: object):
+        class Response:
+            def raise_for_status(self) -> None:
+                pass
+
+            def json(self) -> dict:
+                return {
+                    "choices": [{"message": {"content": """{
+                        \"type\": \"SkillAction\",
+                        \"operation\": \"activate\",
+                        \"phase\": \"INTAKE\",
+                        \"objective\": \"Inspect backup paths\",
+                        \"reason\": \"robots.txt disclosed a backup path\",
+                        \"skill_identity\": {\"skill_id\": \"skill-1\", \"skill_name\": \"backup-config-leak-ctf\"},
+                        \"supporting_evidence\": \"robots.txt contains /backup/\",
+                        \"expected_use\": \"Probe the disclosed backup path\"
+                    }"""}}]
+                }
+
+        return Response()
+
+
+class _LegacyToolEnvelopeClient:
+    """Provider response missing the discriminator and using old field names."""
+
+    def __init__(self, **_: object) -> None: pass
+
+    async def __aenter__(self): return self
+    async def __aexit__(self, *_: object) -> None: pass
+
+    async def post(self, *_: object, **__: object):
+        class Response:
+            def raise_for_status(self) -> None:
+                pass
+
+            def json(self) -> dict:
+                return {
+                    "choices": [{"message": {"content": """{
+                        \"phase\": \"TESTING\",
+                        \"tool_name\": \"http_request\",
+                        \"arguments\": {\"url\": \"http://target.test/\"},
+                        \"active_hypothesis\": \"Probe the disclosed endpoint\"
+                    }"""}}]
+                }
+
+        return Response()
+
+
 @pytest.mark.asyncio
 async def test_provider_429_is_classified_as_rate_limited(monkeypatch: pytest.MonkeyPatch) -> None:
     async def no_sleep(_: float) -> None: pass
@@ -94,3 +148,22 @@ async def test_provider_transient_error_is_retried(monkeypatch: pytest.MonkeyPat
     assert action.type == "finish"
     assert _FlakyThenSuccessClient.attempts == 3
     assert len(sleeps) == 2
+
+
+@pytest.mark.asyncio
+async def test_provider_normalizes_skill_alias_fields(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("app.engines.openai_compatible.httpx.AsyncClient", _SkillAliasClient)
+    action = await OpenAICompatibleEngine("https://provider.test/v1", "secret", "model").next_action([])
+    assert action.type == "skill"
+    assert action.skill_id == "skill-1"
+    assert action.supporting_evidence == ["robots.txt contains /backup/"]
+
+
+@pytest.mark.asyncio
+async def test_provider_normalizes_legacy_tool_envelope(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("app.engines.openai_compatible.httpx.AsyncClient", _LegacyToolEnvelopeClient)
+    action = await OpenAICompatibleEngine("https://provider.test/v1", "secret", "model").next_action([])
+    assert action.type == "tool"
+    assert action.tool_name == "http_request"
+    assert action.hypothesis == "Probe the disclosed endpoint"
+    assert action.reason == "Continue the authorized investigation"

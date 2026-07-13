@@ -5,8 +5,10 @@ description: Send a bounded allowlisted HTTP request with controlled session hea
 risk_level: medium
 enabled: true
 parameters:
-  method: {type: string, required: true}
-  url: {type: string, required: true}
+  operation: {type: string, required: false}
+  session_name: {type: string, required: true}
+  method: {type: string, required: false}
+  url: {type: string, required: false}
   headers: {type: object, required: false}
   query: {type: object, required: false}
   body: {type: string, required: false}

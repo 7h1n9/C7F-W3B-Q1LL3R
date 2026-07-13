@@ -58,7 +58,7 @@ class SkillRouter:
                     "matched_negative_triggers": [trigger for trigger in (getattr(skill, "negative_triggers", []) or []) if trigger in observation_blob],
                     "confidence": confidence,
                     "reason": f"Observation matched {', '.join(matched)}.",
-                    "supporting_fact_ids": [str(item) for item in facts.get("fact_ids", [])] if isinstance(facts, dict) else [],
+                    "supporting_fact_ids": ([str(item) for item in facts.get("fact_ids", [])] if isinstance(facts, dict) else []) or ([str(observation.get("observation_id"))] if observation.get("observation_id") else []),
                     "supporting_observation_ids": [observation.get("observation_id")]
                     if observation.get("observation_id")
                     else [],

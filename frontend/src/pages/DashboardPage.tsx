@@ -1,6 +1,7 @@
 import { CheckCircleFilled, CheckCircleOutlined, ExperimentOutlined, PlayCircleOutlined, RadarChartOutlined, SafetyCertificateOutlined } from "@ant-design/icons";
 import { useQuery } from "@tanstack/react-query";
 import { Card, Col, Empty, Row, Statistic, Table, Tag } from "antd";
+import type { CSSProperties } from "react";
 import { Link } from "react-router-dom";
 import { RunStatusTag } from "../components/RunStatusTag";
 import { api } from "../services/api";
@@ -59,7 +60,17 @@ export function DashboardPage() {
     <Card className="panel-card readiness-card" title={<div className="readiness-card-title"><div><span className="readiness-eyebrow">RANGE OPS / SYSTEM CHECK</span><span className="readiness-heading">靶场测试就绪度</span></div><Tag className={readiness.data?.ready ? "readiness-tag is-ready" : "readiness-tag"} icon={<SafetyCertificateOutlined />}>{readiness.data?.ready ? "系统正常" : "需要关注"}</Tag></div>} style={{ marginTop: 22 }}>
       <div className="readiness-summary">
         <div className="readiness-score">
-          <div className={`readiness-ring ${readiness.data?.ready ? "is-ready" : ""}`}><strong>{healthyChecks}</strong><span>/{checks.length || "—"}</span></div>
+          <div className="readiness-chart-wrap">
+            <div
+              className={`readiness-ring ${readiness.data?.ready ? "is-ready" : ""}`}
+              style={{ "--readiness-angle": `${readinessPercent * 3.6}deg` } as CSSProperties}
+              aria-label={`${healthyChecks} / ${checks.length || 0} 项检查通过`}
+            >
+              <div className="readiness-ring-core"><strong>{healthyChecks}</strong><span>/{checks.length || "—"}</span><small>PASS</small></div>
+            </div>
+            <span className="readiness-float readiness-float-top">{readinessPercent}%</span>
+            <span className="readiness-float readiness-float-bottom">{checks.length} 项检查</span>
+          </div>
           <div><div className="readiness-status">{readinessTitle}</div><p>{readiness.isLoading ? "正在检查数据库、Runner 与工具能力…" : `${healthyChecks} / ${checks.length} 项检查通过`}</p></div>
         </div>
         <div className="readiness-progress"><div className="readiness-progress-meta"><span>系统能力覆盖率</span><strong>{readinessPercent}%</strong></div><div className="readiness-progress-track"><span style={{ width: `${readinessPercent}%` }} /></div><small>每 30 秒自动刷新一次</small></div>

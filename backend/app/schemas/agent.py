@@ -33,7 +33,7 @@ class SkillAction(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
     type: Literal["skill"]
-    operation: Literal["activate", "deactivate", "inspect"]
+    operation: Literal["activate", "deactivate", "inspect", "decline"]
     phase: str
     objective: str
     reason: str = Field(min_length=1, max_length=2000)

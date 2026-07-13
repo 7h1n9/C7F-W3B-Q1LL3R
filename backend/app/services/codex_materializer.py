@@ -1,3 +1,4 @@
+import contextlib
 import hashlib
 import re
 from pathlib import Path
@@ -10,6 +11,7 @@ from app.models.run import Artifact, Observation, RunEvent, SolveRun, ToolCall
 from app.orchestration.state_machine import TERMINAL, RunStatus
 from app.services.flags import flag_service
 from app.services.reports import report_service
+from app.services.runner_client import runner_client
 
 
 class CodexMaterializer:
@@ -44,6 +46,8 @@ class CodexMaterializer:
                     "solved" if RunStatus(run.status) == RunStatus.COMPLETED_SOLVED else "unsolved",
                     run.last_error_message or "",
                 )
+            with contextlib.suppress(Exception):
+                await runner_client.clear_sessions(run.id)
 
     async def _apply_event(
         self, session: AsyncSession, run: SolveRun, challenge: Challenge, event: RunEvent
