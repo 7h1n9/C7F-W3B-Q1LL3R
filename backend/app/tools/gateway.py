@@ -44,6 +44,16 @@ class ToolGateway:
             )
         arguments = definition.validate_arguments(arguments)
         enforce_tool_policy(name, arguments, challenge.allowed_hosts)
+        if name == "file_read":
+            cached = await self._cached_file_read(session, run, arguments)
+            if cached is not None:
+                await event_service.append(
+                    session,
+                    run.id,
+                    "tool.read_deduplicated",
+                    {"tool": name, "code": "FILE_RANGE_ALREADY_READ", "path": arguments.get("path")},
+                )
+                return cached.model_dump()
         call = ToolCall(
             run_id=run.id,
             tool_name=name,
@@ -63,10 +73,31 @@ class ToolGateway:
             session, run.id, "tool.started", {"tool_call_id": call.id, "tool": name}
         )
         try:
+            # ctfctl can create a bounded scripts/*.py file during a turn.
+            # The remote Runner has its own per-run workspace, so synchronize
+            # that file immediately before python_run instead of treating a
+            # missing remote copy as a request for arbitrary shell access.
+            if name == "python_run":
+                await runner_client.sync_workspace(run.id, Path(run.workspace_path))
             job_id = await runner_client.create_job(
                 run.id, challenge.allowed_hosts, name, arguments
             )
             result = await runner_client.wait_job(job_id)
+            if (
+                name == "file_read"
+                and result.get("status") != "COMPLETED"
+                and "not found" in str(result.get("error") or result.get("summary") or "").lower()
+            ):
+                # A Runner workspace can lag after attachment updates or a
+                # bridge/thread rebuild. Reconcile its manifest and retry the
+                # exact bounded read once before surfacing FILE_NOT_FOUND.
+                await runner_client.sync_workspace(run.id, Path(run.workspace_path))
+                retry_job_id = await runner_client.create_job(
+                    run.id, challenge.allowed_hosts, name, arguments
+                )
+                result = await runner_client.wait_job(retry_job_id)
+                if result.get("status") != "COMPLETED":
+                    result["error_code"] = "FILE_NOT_FOUND"
         except Exception as error:
             result = {"status": "FAILED", "summary": "Runner request failed", "error": str(error)}
         call.status, call.runner_job_id, call.finished_at = (
@@ -162,6 +193,50 @@ class ToolGateway:
             session, run.id, event_type, {"tool_call_id": call.id, "result": unified.model_dump()}
         )
         return unified.model_dump()
+
+    async def _cached_file_read(
+        self, session: AsyncSession, run: SolveRun, arguments: dict
+    ) -> ToolExecutionResult | None:
+        """Return the original bounded view for an identical file range.
+
+        The Runner is not contacted twice for content the model has already
+        received.  Keeping this lookup in the gateway gives both provider
+        engines identical behavior.
+        """
+        calls = list(
+            (
+                await session.scalars(
+                    select(ToolCall)
+                    .where(ToolCall.run_id == run.id, ToolCall.tool_name == "file_read")
+                    .order_by(ToolCall.created_at.desc())
+                )
+            ).all()
+        )
+        for call in calls:
+            if dict(call.arguments_json or {}) != arguments:
+                continue
+            observation = await session.scalar(
+                select(Observation)
+                .where(Observation.tool_call_id == call.id)
+                .order_by(Observation.created_at.desc())
+            )
+            if not observation:
+                continue
+            view = (observation.facts_json or {}).get("tool_model_view")
+            if not isinstance(view, dict) or not view.get("content_excerpt"):
+                continue
+            return ToolExecutionResult(
+                status="COMPLETED",
+                model_view=ToolModelView(
+                    summary=str(view.get("summary") or "已返回此前读取的文件范围"),
+                    content_excerpt=str(view.get("content_excerpt")),
+                    extracted_facts=dict(view.get("extracted_facts") or {}),
+                    warnings=[*list(view.get("warnings") or []), "FILE_RANGE_ALREADY_READ"],
+                    suggested_next_dimensions=list(view.get("suggested_next_dimensions") or []),
+                ),
+                artifacts=[],
+            )
+        return None
 
     @staticmethod
     def _redact(text: str | None) -> str | None:

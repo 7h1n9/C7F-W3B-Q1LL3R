@@ -66,5 +66,6 @@ export const api = {
   reviewFlagCandidate: (runId: string, candidateId: string, reviewState: "OPEN" | "VALID" | "INVALID") => request<FlagCandidate>(`/runs/${runId}/flag-candidates/${candidateId}`, { method: "PATCH", body: JSON.stringify({ review_state: reviewState }) }),
   getReport: (id: string) => request<{ content: string; path: string }>(`/runs/${id}/report`),
   continueRun: (id: string, message: string) => request<{ run_id: string }>(`/runs/${id}/continue`, { method: "POST", body: JSON.stringify({ message }) }),
+  sendRunMessage: (id: string, content: string) => request<{ accepted: boolean; revision: number; status: string; message: string }>(`/runs/${id}/messages`, { method: "POST", body: JSON.stringify({ content }) }),
   streamRunEvents: (id: string, onEvent: (event: RunEvent) => void) => { const source = new EventSource(`${base}/runs/${id}/events`); const handler = (message: MessageEvent<string>) => onEvent(JSON.parse(message.data) as RunEvent); source.onmessage = handler; runEventTypes.forEach((type) => source.addEventListener(type, handler)); return source; },
 };

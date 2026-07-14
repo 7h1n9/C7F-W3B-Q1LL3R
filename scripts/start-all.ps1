@@ -138,6 +138,7 @@ $backendRunnerUrl = "http://127.0.0.1:8091"
 $backendBridgeUrl = "http://127.0.0.1:8090"
 $backendCorsOrigins = "http://localhost:5173,http://127.0.0.1:5173"
 $backendEncryptionKey = "development-only-change-me"
+$ctfctlAccessKey = "development-ctfctl-access-key"
 $backendAllowedCidrs = "127.0.0.0/8,192.168.56.0/24,192.168.236.0/24"
 $sqliteFallbackUrl = "sqlite+aiosqlite:///./local-dev.db"
 $mysqlUrl = "mysql+asyncmy://ctf_agent:ctf_agent@127.0.0.1:3307/ctf_agent"
@@ -188,6 +189,7 @@ Set-EnvValue -Name "APP_RUNNER_API_TOKEN" -Value $runnerToken
 Set-EnvValue -Name "APP_CODEX_BRIDGE_URL" -Value $backendBridgeUrl
 Set-EnvValue -Name "APP_CORS_ORIGINS" -Value $backendCorsOrigins
 Set-EnvValue -Name "APP_ENCRYPTION_KEY" -Value $backendEncryptionKey
+Set-EnvValue -Name "APP_CTFCTL_INTERNAL_ACCESS_KEY" -Value $ctfctlAccessKey
 Set-EnvValue -Name "APP_ALLOWED_SERVICE_CIDRS" -Value $backendAllowedCidrs
 Set-EnvValue -Name "APP_ENVIRONMENT" -Value "development"
 
@@ -199,6 +201,8 @@ Set-EnvValue -Name "RUNNER_ENVIRONMENT" -Value "development"
 
 Set-EnvValue -Name "CODEX_BRIDGE_PORT" -Value $bridgePort
 Set-EnvValue -Name "CODEX_MOCK_MODE" -Value ($(if ($UseMockCodex) { "true" } else { "false" }))
+Set-EnvValue -Name "CTFCTL_BACKEND_URL" -Value "http://127.0.0.1:8000"
+Set-EnvValue -Name "CTFCTL_ACCESS_KEY" -Value $ctfctlAccessKey
 Set-EnvValue -Name "VITE_API_BASE_URL" -Value $frontendApiBase
 
 $pythonExe = Get-CommandPath -Name "python"

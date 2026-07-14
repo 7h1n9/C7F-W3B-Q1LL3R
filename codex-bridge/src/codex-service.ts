@@ -2,7 +2,8 @@ import { randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { Codex } from "@openai/codex-sdk";
 import type { ThreadEvent } from "@openai/codex-sdk";
 import { threadEventsToBridgeEvents } from "./event-adapter.js";
@@ -14,26 +15,35 @@ type SdkThread = { runStreamed(prompt: string): Promise<{ events: AsyncGenerator
 export class CodexService {
   private readonly mock = process.env.CODEX_MOCK_MODE === "true";
   private readonly threads = new ThreadStore<SdkThread>();
-  private readonly codex = this.mock ? undefined : new Codex();
+  private readonly scopes = new Map<string, CtfctlScope>();
 
   health(): Record<string, unknown> {
     return {
       status: "ok",
       mock_mode: this.mock,
+      executable: !this.mock,
       codex_sdk_loaded: true,
       version: bridgeVersion(),
       active_threads: this.threads.size(),
     };
   }
 
+  hasThread(threadId: string): boolean {
+    return this.threads.has(threadId);
+  }
+
   async create(input: ThreadRequest): Promise<ThreadResponse> {
+    if (this.mock && process.env.NODE_ENV !== "test") {
+      throw new Error("MOCK_MODE_DISABLED");
+    }
     const thread = this.mock
       ? this.mockThread(input)
-      : this.codex!.startThread({ workingDirectory: codexWorkingDirectory(input.workspace_path), skipGitRepoCheck: true, sandboxMode: "workspace-write", networkAccessEnabled: false, webSearchMode: "disabled", approvalPolicy: "never" });
+      : this.createRealThread(input);
     // The SDK only assigns its real thread id after the first turn starts. Keep
     // a bridge-local id so the backend can trigger that first turn explicitly.
     const threadId = randomUUID();
     this.threads.set(threadId, thread);
+    this.scopes.set(threadId, normalizeScope(input));
     this.threads.mapRun(input.run_id, threadId);
     return { thread_id: threadId, status: "created" };
   }
@@ -47,7 +57,7 @@ export class CodexService {
   async *stream(threadId: string, prompt: string): AsyncGenerator<BridgeEvent> {
     const thread = this.threads.get(threadId);
     if (!thread) throw new Error("THREAD_NOT_FOUND");
-    const guardedPrompt = `${prompt}\n\n[EXECUTION BOUNDARY]\nYou are forbidden from direct PowerShell, shell, command_execution, node repl, web_search, curl, Invoke-WebRequest, localhost/backend API calls, source-code browsing outside the current Run Workspace, or creating other Runs. Route every authorized action through ctfctl/Backend Tool Gateway, and only edit scripts/, notes/, and final/ inside the current Run Workspace.`;
+    const guardedPrompt = `${prompt}\n\n[EXECUTION BOUNDARY]\nUse the installed ctfctl MCP tools exclusively for workspace and target operations. Do not use direct shell, command_execution, node repl, web_search, curl, Invoke-WebRequest, localhost/backend API calls, source-code browsing outside the current Run Workspace, or create other Runs. ctfctl.workspace_write_note may only edit notes/, scripts/, and final/.`;
     const streamed = await thread.runStreamed(guardedPrompt);
     for await (const event of streamed.events) {
       for (const bridgeEvent of threadEventsToBridgeEvents(event)) yield bridgeEvent;
@@ -61,7 +71,7 @@ export class CodexService {
   }
 
   async *streamResume(threadId: string, prompt: string): AsyncGenerator<BridgeEvent> {
-    if (!this.threads.has(threadId) && !this.mock) this.threads.set(threadId, this.codex!.resumeThread(threadId) as unknown as SdkThread);
+    if (!this.threads.has(threadId) && !this.mock) throw new Error("THREAD_NOT_FOUND");
     for await (const event of this.stream(threadId, prompt)) yield event;
   }
 
@@ -82,6 +92,57 @@ export class CodexService {
       }),
     };
   }
+
+  private createRealThread(input: ThreadRequest): SdkThread {
+    const scope = normalizeScope(input);
+    const mcpProgram = resolve(fileURLToPath(new URL("./ctfctl-mcp.js", import.meta.url)));
+    // SDK 0.144.1 exposes MCP registration through Codex.config, which it
+    // serializes into native CLI configuration. The scope is supplied as
+    // subprocess environment, never through model-visible prompt text.
+    const codex = new Codex({
+      config: {
+        mcp_servers: {
+          ctfctl: {
+            command: process.execPath,
+            args: [mcpProgram],
+            env: {
+              CTFCTL_SCOPE: JSON.stringify(scope),
+              CTFCTL_BACKEND_URL: process.env.CTFCTL_BACKEND_URL ?? "http://127.0.0.1:8000",
+              CTFCTL_ACCESS_KEY: process.env.CTFCTL_ACCESS_KEY ?? "development-ctfctl-access-key",
+              ...(process.env.CTFCTL_DEBUG_LOG ? { CTFCTL_DEBUG_LOG: process.env.CTFCTL_DEBUG_LOG } : {}),
+            },
+            startup_timeout_sec: 120,
+          },
+        },
+      },
+    });
+    return codex.startThread({
+      workingDirectory: codexWorkingDirectory(input.workspace_path),
+      skipGitRepoCheck: true,
+      sandboxMode: "workspace-write",
+      // The run-scoped ctfctl stdio server calls the local Backend Tool Gateway.
+      // Denying all network access cancels that MCP call before the server can
+      // reach the gateway. Target access remains constrained by the backend's
+      // challenge allowlist and the Kali Runner.
+      networkAccessEnabled: true,
+      webSearchMode: "disabled",
+      approvalPolicy: "never",
+    }) as unknown as SdkThread;
+  }
+}
+
+type CtfctlScope = { run_id: string; challenge_id: string; workspace_root: string; allowed_hosts: string[] };
+
+function normalizeScope(input: ThreadRequest): CtfctlScope {
+  const raw = input.scope ?? {};
+  return {
+    run_id: input.run_id,
+    challenge_id: typeof raw.challenge_id === "string" ? raw.challenge_id : "",
+    workspace_root: input.workspace_path,
+    allowed_hosts: Array.isArray(raw.allowed_hosts)
+      ? raw.allowed_hosts.filter((item): item is string => typeof item === "string")
+      : [],
+  };
 }
 
 function bridgeVersion(): string {

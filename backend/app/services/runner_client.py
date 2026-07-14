@@ -54,20 +54,37 @@ class RunnerClient:
             response.raise_for_status()
             return response.json()
 
+    async def workspace_manifest(self, run_id: str) -> dict[str, dict]:
+        async with httpx.AsyncClient(timeout=15, trust_env=False) as client:
+            response = await client.get(
+                f"{self.base_url}/api/v1/workspaces/{run_id}/manifest", headers=self._headers()
+            )
+            response.raise_for_status()
+            payload = response.json()
+        return {
+            str(item.get("path")): item
+            for item in payload.get("files", [])
+            if isinstance(item, dict) and item.get("path")
+        }
+
     async def sync_workspace(self, run_id: str, local_root: Path) -> None:
         await self.initialize_workspace(run_id)
+        remote = await self.workspace_manifest(run_id)
+        candidates: list[tuple[str, Path]] = []
         for relative in ("challenge.json", "AGENTS.md"):
             path = local_root / relative
             if path.is_file():
-                await self.upload_file(run_id, relative, path)
-        for directory in ("source", "attachments", "scripts"):
+                candidates.append((relative, path))
+        for directory in ("source", "attachments", "scripts", "notes", "final"):
             root = local_root / directory
             if root.is_dir():
                 for path in root.rglob("*"):
                     if path.is_file() and not path.is_symlink():
-                        await self.upload_file(
-                            run_id, path.relative_to(local_root).as_posix(), path
-                        )
+                        candidates.append((path.relative_to(local_root).as_posix(), path))
+        for relative, path in candidates:
+            checksum = hashlib.sha256(path.read_bytes()).hexdigest()
+            if remote.get(relative, {}).get("sha256") != checksum:
+                await self.upload_file(run_id, relative, path)
 
     async def create_job(
         self, run_id: str, allowed_hosts: list[str], tool: str, arguments: dict

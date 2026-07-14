@@ -14,6 +14,9 @@ class Settings(BaseSettings):
     runner_url: str = "http://127.0.0.1:8091"
     runner_api_token: str = "development-runner-token"
     codex_bridge_url: str = "http://127.0.0.1:8090"
+    # Shared only with the local run-scoped ctfctl MCP subprocess. It is not
+    # included in browser responses or model context.
+    ctfctl_internal_access_key: str = "development-ctfctl-access-key"
     cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
     encryption_key: str = "development-only-change-me"
     allowed_service_cidrs: str = "127.0.0.0/8,192.168.56.0/24,192.168.236.0/24"

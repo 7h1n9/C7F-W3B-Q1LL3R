@@ -6,7 +6,7 @@ const app = Fastify({ logger: true });
 const service = new CodexService();
 function bridgeError(error: unknown) {
   const code = error instanceof Error ? error.message : "BRIDGE_ERROR";
-  return { status: code === "THREAD_NOT_FOUND" ? 404 : code === "CANCEL_NOT_SUPPORTED" ? 501 : 502, body: { code, message: code === "THREAD_NOT_FOUND" ? "Thread not found" : code === "CANCEL_NOT_SUPPORTED" ? "Cancellation is not supported by the current Codex SDK" : "Codex Bridge request failed", details: {} } };
+  return { status: code === "THREAD_NOT_FOUND" ? 404 : code === "CANCEL_NOT_SUPPORTED" ? 501 : code === "MOCK_MODE_DISABLED" ? 503 : 502, body: { code, message: code === "THREAD_NOT_FOUND" ? "Thread not found" : code === "CANCEL_NOT_SUPPORTED" ? "Cancellation is not supported by the current Codex SDK" : code === "MOCK_MODE_DISABLED" ? "MOCK MODE — not executable for solving runs." : "Codex Bridge request failed", details: {} } };
 }
 
 app.get("/health", async () => service.health());
@@ -15,6 +15,9 @@ app.post<{ Body: ThreadRequest }>("/threads", async (request, reply) => {
   return service.create(request.body);
 });
 app.post<{ Params: { thread_id: string }; Body: { prompt: string } }>("/threads/:thread_id/run", async (request, reply) => {
+  if (!service.hasThread(request.params.thread_id)) {
+    return reply.code(404).send({ code: "THREAD_NOT_FOUND", message: "Thread not found", details: {} });
+  }
   let wrote = false;
   try {
     reply.hijack();
@@ -35,6 +38,9 @@ app.post<{ Params: { thread_id: string }; Body: { prompt: string } }>("/threads/
   }
 });
 app.post<{ Params: { thread_id: string }; Body: { prompt: string } }>("/threads/:thread_id/resume", async (request, reply) => {
+  if (!service.hasThread(request.params.thread_id)) {
+    return reply.code(404).send({ code: "THREAD_NOT_FOUND", message: "Thread not found", details: {} });
+  }
   let wrote = false;
   try {
     reply.hijack();

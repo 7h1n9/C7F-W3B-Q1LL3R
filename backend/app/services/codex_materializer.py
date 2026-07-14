@@ -249,9 +249,8 @@ class CodexMaterializer:
         seen_tools: set[str] = set()
         for event in events:
             payload = event.payload_json or {}
-            item_id = payload.get("item_id")
-            if event.event_type == "agent.message" and isinstance(item_id, str) and item_id:
-                seen_steps.add(item_id)
+            if event.event_type == "agent.turn_completed":
+                seen_steps.add(str(event.sequence))
             tool_ref = payload.get("tool_call_id")
             if event.event_type.startswith("tool.") and isinstance(tool_ref, str) and tool_ref:
                 seen_tools.add(tool_ref)

@@ -613,8 +613,9 @@ export function WorkspacePage() {
         />
       </Card>
 
-      {run.data?.status === "WAITING_USER" && (
-        <Card className="panel-card" title="补充信息" style={{ marginTop: 18 }}>
+      {run.data && !["COMPLETED_SOLVED", "COMPLETED_UNSOLVED", "FAILED_ENGINE", "FAILED_TOOL", "FAILED_RUNNER", "TIMEOUT", "CANCELLED", "POLICY_BLOCKED"].includes(run.data.status) && (
+        <Card className="panel-card" title={`随时补充信息 · 当前版本 v${run.data.context_revision ?? 0}`} style={{ marginTop: 18 }}>
+          <Typography.Paragraph type="secondary">当前任务仍在运行。补充内容将在下一 Agent Step 生效，不会停止任务。</Typography.Paragraph>
           <Space.Compact style={{ width: "100%" }}>
             <Input
               value={continuation}
@@ -625,15 +626,15 @@ export function WorkspacePage() {
               type="primary"
               onClick={() =>
                 api
-                  .continueRun(id, continuation)
+                  .sendRunMessage(id, continuation)
                   .then(() => {
                     setContinuation("");
-                    message.success("已继续任务");
+                    message.success("补充信息已排队，将在下一步生效");
                   })
                   .catch((error: Error) => message.error(error.message))
               }
             >
-              继续
+              发送
             </Button>
           </Space.Compact>
         </Card>

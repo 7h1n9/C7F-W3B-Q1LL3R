@@ -28,13 +28,14 @@ from app.models.run import (
     RunAttempt,
     RunEvent,
     RunExecutionLease,
+    RunUserInput,
     SolveRun,
     ToolCall,
 )
 from app.models.skill import RunSkillSnapshot
 from app.models.solver_state import SolverState
 from app.orchestration.orchestrator import orchestrator
-from app.orchestration.state_machine import RunStatus, transition
+from app.orchestration.state_machine import TERMINAL, RunStatus, transition
 from app.orchestration.state_machine import restart as restart_state
 from app.schemas.flag import FlagReviewUpdate
 from app.schemas.run import RunCreate, RunRead
@@ -43,6 +44,7 @@ from app.services.codex_materializer import codex_materializer
 from app.services.events import event_service
 from app.services.flags import flag_service
 from app.services.role_loader import role_loader
+from app.services.run_attempts import run_attempt_service
 from app.services.run_diagnostics import run_diagnostics_service
 from app.services.runner_client import runner_client
 from app.services.skill_selection import snapshot_run_skills
@@ -379,17 +381,49 @@ async def get_solver_state(run_id: str, session: AsyncSession = Depends(get_sess
 @router.post("/runs/{run_id}/start")
 async def start_run(run_id: str, session: AsyncSession = Depends(get_session)) -> dict:
     run = await require_run(run_id, session)
+    await run_attempt_service.reclaim_expired_lease(session, run.id)
     active_lease = await session.scalar(select(RunExecutionLease).where(RunExecutionLease.run_id == run.id))
     if active_lease:
         raise DomainError("RUN_ALREADY_EXECUTING", "Run already has an active execution lease.", status_code=409)
-    if run.status != RunStatus.CREATED:
+    if run.status not in {RunStatus.CREATED, RunStatus.PAUSED_RECOVERY, RunStatus.PAUSED_CHECKPOINT, RunStatus.WAITING_CONFIGURATION}:
         raise DomainError(
             "RUN_INVALID_STATE",
-            "Only newly created runs can be started.",
+            "Only created or paused recoverable runs can be started.",
             {"current_state": run.status},
         )
     asyncio.create_task(orchestrator.start(run.id))
     return {"data": {"run_id": run.id, "status": "STARTING"}}
+
+
+@router.get("/runs/{run_id}/messages")
+async def list_run_messages(run_id: str, session: AsyncSession = Depends(get_session)) -> dict:
+    await require_run(run_id, session)
+    items = list(
+        (await session.scalars(select(RunUserInput).where(RunUserInput.run_id == run_id).order_by(RunUserInput.revision))).all()
+    )
+    return {"data": [{"id": item.id, "content": item.content, "input_type": item.input_type, "status": item.status, "revision": item.revision, "created_at": item.created_at.isoformat(), "consumed_at": item.consumed_at.isoformat() if item.consumed_at else None} for item in items]}
+
+
+@router.post("/runs/{run_id}/messages")
+async def enqueue_run_message(run_id: str, payload: dict, session: AsyncSession = Depends(get_session)) -> dict:
+    run = await require_run(run_id, session)
+    if RunStatus(run.status) in TERMINAL:
+        raise DomainError("RUN_TERMINAL", "Cannot add information to a terminal run.", status_code=409)
+    content = str(payload.get("content") or "").strip()
+    if not content:
+        raise DomainError("MESSAGE_EMPTY", "Supplemental information cannot be empty.", status_code=422)
+    latest = await session.scalar(select(RunUserInput.revision).where(RunUserInput.run_id == run.id).order_by(RunUserInput.revision.desc()))
+    revision = int(latest or 0) + 1
+    item = RunUserInput(run_id=run.id, content=content[:16000], input_type=str(payload.get("input_type") or "SUPPLEMENT")[:40], status="QUEUED", revision=revision)
+    session.add(item)
+    run.context_revision += 1
+    await session.commit()
+    await event_service.append(session, run.id, "user.input_received", {"revision": revision, "input_type": item.input_type})
+    # A running turn is never interrupted. Paused runs can safely resume so
+    # this input is consumed on the next Agent Step.
+    if run.id not in orchestrator.active_tasks and RunStatus(run.status) in {RunStatus.WAITING_USER, RunStatus.PAUSED_CHECKPOINT, RunStatus.PAUSED_RECOVERY, RunStatus.WAITING_CONFIGURATION, RunStatus.PAUSED_RATE_LIMIT}:
+        asyncio.create_task(orchestrator.start(run.id))
+    return {"data": {"accepted": True, "revision": revision, "status": "QUEUED", "message": "补充信息已加入，将在下一 Agent Step 使用。"}}
 
 
 @router.post("/runs/{run_id}/restart")
@@ -403,6 +437,7 @@ async def restart_run(
         raise DomainError(
             "RUN_ALREADY_ACTIVE", "The run is already executing.", status_code=409
         )
+    await run_attempt_service.reclaim_expired_lease(session, run.id)
     active_lease = await session.scalar(select(RunExecutionLease).where(RunExecutionLease.run_id == run.id))
     if active_lease:
         raise DomainError("RUN_ALREADY_EXECUTING", "Run already has an active execution lease.", status_code=409)
@@ -450,6 +485,7 @@ async def continue_run(
     run_id: str, payload: dict, session: AsyncSession = Depends(get_session)
 ) -> dict:
     run = await require_run(run_id, session)
+    await run_attempt_service.reclaim_expired_lease(session, run.id)
     active_lease = await session.scalar(select(RunExecutionLease).where(RunExecutionLease.run_id == run.id))
     if active_lease:
         raise DomainError("RUN_ALREADY_EXECUTING", "Run already has an active execution lease.", status_code=409)

@@ -24,11 +24,18 @@ class BridgeUnavailableError(RuntimeError):
 
 
 class CodexSdkEngine(SolveEngine):
-    def __init__(self, bridge_url: str, workspace_path: str, thread_id: str | None = None) -> None:
+    def __init__(
+        self,
+        bridge_url: str,
+        workspace_path: str,
+        thread_id: str | None = None,
+        scope: dict | None = None,
+    ) -> None:
         self.bridge_url, self.workspace_path = bridge_url.rstrip("/"), workspace_path
         self.thread_ids: dict[str, str] = {}
         self.max_attempts = 5
         self.initial_thread_id = thread_id
+        self.scope = scope or {}
 
     def _thread_for(self, run_id: str) -> str | None:
         if run_id not in self.thread_ids and self.initial_thread_id:
@@ -159,6 +166,7 @@ class CodexSdkEngine(SolveEngine):
                     "run_id": run_id,
                     "workspace_path": self.workspace_path,
                     "prompt": prompt,
+                    "scope": self.scope,
                 },
                 timeout_label="thread creation",
             )
@@ -181,11 +189,27 @@ class CodexSdkEngine(SolveEngine):
             async for event in self.start(run_id, message):
                 yield event
             return
-        async for event in self._stream_events(
-            f"{self.bridge_url}/threads/{thread_id}/run",
-            {"prompt": f"{message}{CODEX_CONTROL_PROTOCOL}"},
-        ):
-            yield event
+        try:
+            async for event in self._stream_events(
+                f"{self.bridge_url}/threads/{thread_id}/run",
+                {"prompt": f"{message}{CODEX_CONTROL_PROTOCOL}"},
+            ):
+                yield event
+        except httpx.HTTPStatusError as error:
+            # Bridge thread state is in-memory.  Recreate a thread after a
+            # Bridge restart instead of leaving the durable Run in PLANNING.
+            if error.response.status_code != 404:
+                raise
+            self.thread_ids.pop(run_id, None)
+            async for event in self.start(run_id, message):
+                # The orchestrator has already advanced a continued Run to
+                # PLANNING.  A newly created Bridge thread reports ANALYZING
+                # as its bootstrap status; forwarding that stale status would
+                # attempt an illegal PLANNING -> ANALYZING transition.
+                if event.event_type == "agent.message" and event.status == "ANALYZING":
+                    yield EngineEvent(event.event_type, event.payload)
+                else:
+                    yield event
 
     async def cancel(self, run_id: str) -> None:
         thread_id = self._thread_for(run_id)

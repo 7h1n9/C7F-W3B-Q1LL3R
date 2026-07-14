@@ -23,6 +23,9 @@ class SolveRun(UUIDTimestampMixin, Base):
     max_tool_calls: Mapped[int] = mapped_column(Integer, default=12)
     max_context_observations: Mapped[int] = mapped_column(Integer, default=8)
     max_runtime_seconds: Mapped[int] = mapped_column(Integer, default=300)
+    agent_checkpoint_interval: Mapped[int] = mapped_column(Integer, default=30)
+    context_revision: Mapped[int] = mapped_column(Integer, default=0)
+    infrastructure_retry_count: Mapped[int] = mapped_column(Integer, default=0)
     agent_step_count: Mapped[int] = mapped_column(Integer, default=0)
     tool_call_count: Mapped[int] = mapped_column(Integer, default=0)
     event_sequence: Mapped[int] = mapped_column(Integer, default=0)
@@ -101,6 +104,17 @@ class RunExecutionLease(UUIDTimestampMixin, Base):
         default=lambda: datetime.now(UTC),
         onupdate=lambda: datetime.now(UTC),
     )
+
+
+class RunUserInput(UUIDTimestampMixin, Base):
+    __tablename__ = "run_user_inputs"
+    run_id: Mapped[str] = mapped_column(ForeignKey("solve_runs.id"), nullable=False, index=True)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    input_type: Mapped[str] = mapped_column(String(40), default="SUPPLEMENT")
+    status: Mapped[str] = mapped_column(String(20), default="QUEUED", index=True)
+    revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    consumed_by_attempt_id: Mapped[str | None] = mapped_column(ForeignKey("run_attempts.id"))
 
 
 class RunEvent(UUIDTimestampMixin, Base):

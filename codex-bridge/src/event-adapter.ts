@@ -45,7 +45,7 @@ export function threadEventsToBridgeEvents(event: ThreadEvent): BridgeEvent[] {
   if (event.type === "turn.completed") {
     return [
       {
-        type: "agent.message",
+        type: "agent.turn_completed",
         payload: { message: "Codex \u5206\u6790\u56de\u5408\u5df2\u5b8c\u6210，准备自动继续", usage: event.usage },
       },
     ];
@@ -103,12 +103,15 @@ function itemEventToBridgeEvents(
         error_code: "CODEX_DIRECT_TOOL_FORBIDDEN",
         error: "Codex SDK direct command execution is forbidden; use ctfctl/Tool Gateway.",
       };
-      if (kind === "item.started") return [{ type: "tool.failed", status: "FAILED_ENGINE", payload }];
+      // A bad tool choice is corrective feedback, not an engine failure.  The
+      // backend keeps the Run executable and returns the allowed ctfctl route
+      // on the next turn.
+      if (kind === "item.started") return [{ type: "agent.action_rejected", payload }];
       return [];
     }
     case "mcp_tool_call": {
       if (item.server !== "ctfctl" && item.server !== "backend-tool-gateway") {
-        return kind === "item.started" ? [{ type: "tool.failed", status: "FAILED_ENGINE", payload: { tool_call_id: item.id, tool: `${item.server}.${item.tool}`, error_code: "CODEX_DIRECT_TOOL_FORBIDDEN", error: "Only ctfctl/Backend Tool Gateway MCP tools are allowed." } }] : [];
+        return kind === "item.started" ? [{ type: "agent.action_rejected", payload: { tool_call_id: item.id, tool: `${item.server}.${item.tool}`, error_code: "CODEX_DIRECT_TOOL_FORBIDDEN", error: "Only ctfctl/Backend Tool Gateway MCP tools are allowed." } }] : [];
       }
       const payload = {
         tool_call_id: item.id,
@@ -124,7 +127,7 @@ function itemEventToBridgeEvents(
       return [{ type: item.status === "completed" ? "tool.completed" : "tool.failed", payload }];
     }
     case "web_search": {
-      return kind === "item.started" ? [{ type: "tool.failed", status: "FAILED_ENGINE", payload: { tool_call_id: item.id, tool: "web_search", error_code: "CODEX_DIRECT_TOOL_FORBIDDEN", error: "Use ctfctl/Tool Gateway instead." } }] : [];
+      return kind === "item.started" ? [{ type: "agent.action_rejected", payload: { tool_call_id: item.id, tool: "web_search", error_code: "CODEX_DIRECT_TOOL_FORBIDDEN", error: "Use ctfctl/Tool Gateway instead." } }] : [];
     }
     case "file_change":
       return kind === "item.completed"

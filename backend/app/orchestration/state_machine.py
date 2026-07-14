@@ -23,6 +23,10 @@ class RunStatus(StrEnum):
     CANCELLED = "CANCELLED"
     POLICY_BLOCKED = "POLICY_BLOCKED"
     PAUSED_RATE_LIMIT = "PAUSED_RATE_LIMIT"
+    RETRYING = "RETRYING"
+    PAUSED_CHECKPOINT = "PAUSED_CHECKPOINT"
+    PAUSED_RECOVERY = "PAUSED_RECOVERY"
+    WAITING_CONFIGURATION = "WAITING_CONFIGURATION"
 
 
 TERMINAL = {status for status in RunStatus if status.name.startswith(("COMPLETED", "FAILED"))} | {
@@ -39,6 +43,9 @@ RESTARTABLE = {
     RunStatus.COMPLETED_UNSOLVED,
     RunStatus.CANCELLED,
     RunStatus.PAUSED_RATE_LIMIT,
+    RunStatus.PAUSED_CHECKPOINT,
+    RunStatus.PAUSED_RECOVERY,
+    RunStatus.WAITING_CONFIGURATION,
 }
 TIMEOUT_SOURCES = {
     RunStatus.CREATED,
@@ -50,6 +57,7 @@ TIMEOUT_SOURCES = {
     RunStatus.WAITING_USER,
     RunStatus.VERIFYING_FLAG,
     RunStatus.REPORTING,
+    RunStatus.RETRYING,
 }
 ALLOWED: dict[RunStatus, set[RunStatus]] = {
     RunStatus.CREATED: {
@@ -109,12 +117,24 @@ ALLOWED: dict[RunStatus, set[RunStatus]] = {
         RunStatus.CANCELLED,
     },
     RunStatus.PAUSED_RATE_LIMIT: {RunStatus.PLANNING, RunStatus.WAITING_USER, RunStatus.CANCELLED},
+    RunStatus.PAUSED_CHECKPOINT: {RunStatus.PLANNING, RunStatus.CANCELLED},
+    RunStatus.PAUSED_RECOVERY: {RunStatus.PLANNING, RunStatus.CANCELLED},
+    RunStatus.WAITING_CONFIGURATION: {RunStatus.PLANNING, RunStatus.CANCELLED},
+    RunStatus.RETRYING: {RunStatus.PLANNING, RunStatus.WAITING_CONFIGURATION, RunStatus.CANCELLED},
 }
 
 for status in TIMEOUT_SOURCES:
     if status not in TERMINAL:
         ALLOWED.setdefault(status, set()).add(RunStatus.TIMEOUT)
     ALLOWED.setdefault(status, set()).add(RunStatus.PAUSED_RATE_LIMIT)
+    ALLOWED.setdefault(status, set()).update(
+        {
+            RunStatus.RETRYING,
+            RunStatus.PAUSED_CHECKPOINT,
+            RunStatus.PAUSED_RECOVERY,
+            RunStatus.WAITING_CONFIGURATION,
+        }
+    )
 
 
 def transition(run: object, target: RunStatus) -> None:
@@ -144,4 +164,10 @@ def restart(run: object) -> RunStatus:
     run.status = RunStatus.WAITING_USER.value
     run.current_phase = RunStatus.WAITING_USER.value
     run.finished_at = None
+    # Limits apply to a recovery attempt, not to every historical turn retained
+    # on the Run.  Without this reset, a no-progress run that exhausted its
+    # budget can never execute a tool after a configuration repair.
+    run.agent_step_count = 0
+    run.tool_call_count = 0
+    run.infrastructure_retry_count = 0
     return current

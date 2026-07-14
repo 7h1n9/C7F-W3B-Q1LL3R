@@ -1,0 +1,11 @@
+{
+  "redaction": "IDs保留用于回归定位；令牌、绝对路径和完整响应正文已移除。",
+  "runs": [
+    {"id": "d56d333b-4052-406f-9012-f3bc33b9992a", "engine": "codex_sdk", "failure": "CODEX_BRIDGE_UNAVAILABLE: ReadTimeout on resume"},
+    {"id": "663400c0-8e2c-46b8-a12d-f5ae635a863c", "engine": "codex_sdk", "failure": "CODEX_DIRECT_TOOL_FORBIDDEN was promoted to FAILED_ENGINE"},
+    {"id": "3f2be0b7-596c-4505-8ccb-6e0e5e3117e4", "engine": "codex_sdk", "failure": "ctfctl unavailable followed by bridge timeout"},
+    {"id": "3db4142c-2d7a-4f28-b614-62039cebd33b", "engine": "openai_compatible", "failure": "empty Skill action loop"},
+    {"id": "36ee29fc-dde2-492b-8122-05476cd96cd8", "engine": "openai_compatible", "failure": "duplicate file read/no-progress terminalization"},
+    {"id": "deda4421-23ae-49e2-a197-c91b7217a476", "engine": "openai_compatible", "failure": "premature unsolved completion"}
+  ]
+}

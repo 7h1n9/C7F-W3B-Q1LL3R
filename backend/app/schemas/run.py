@@ -33,6 +33,9 @@ class RunRead(BaseModel):
     max_tool_calls: int
     max_context_observations: int
     max_runtime_seconds: int
+    agent_checkpoint_interval: int = 30
+    context_revision: int = 0
+    infrastructure_retry_count: int = 0
     agent_step_count: int
     tool_call_count: int
     last_error_code: str | None

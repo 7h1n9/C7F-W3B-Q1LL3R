@@ -16,3 +16,4 @@ services:
       retries: 20
 volumes:
   mysql_data:
+  

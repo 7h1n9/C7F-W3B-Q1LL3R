@@ -4,6 +4,7 @@ from app.api.v1 import (
     challenges,
     codex_bridge,
     conversations,
+    ctfctl,
     events,
     health,
     learned_skills,
@@ -19,6 +20,7 @@ router = APIRouter(prefix="/api/v1")
 router.include_router(health.router)
 router.include_router(challenges.router)
 router.include_router(codex_bridge.router)
+router.include_router(ctfctl.router)
 router.include_router(skills.router)
 router.include_router(conversations.router)
 router.include_router(runs.router)

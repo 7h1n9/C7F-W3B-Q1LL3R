@@ -26,21 +26,23 @@ async def lifespan(_: FastAPI):
         # attempts, delete leases, fail in-flight runs, or start recovery work.
         yield
         return
-    # The service intentionally does not resume autonomous work after a restart.
     async with SessionLocal() as session:
         await builtin_skill_sync_service.sync(session)
         await run_attempt_service.reconcile_startup(session)
         runs = list((await session.scalars(select(SolveRun))).all())
         for run in runs:
-            if RunStatus(run.status) not in TERMINAL and run.status != RunStatus.CREATED:
-                transition(run, RunStatus.FAILED_ENGINE)
+            if RunStatus(run.status) not in TERMINAL and run.status not in {
+                RunStatus.CREATED,
+                RunStatus.PAUSED_RECOVERY,
+            }:
+                transition(run, RunStatus.PAUSED_RECOVERY)
                 run.last_error_code, run.last_error_message = (
                     "INTERRUPTED_RESTART",
-                    "Run was interrupted by a service restart.",
+                    "服务重启后任务已保留为可恢复状态。",
                 )
                 await session.commit()
                 await event_service.append(
-                    session, run.id, "run.failed", {"code": "INTERRUPTED_RESTART"}
+                    session, run.id, "run.recovery_paused", {"code": "INTERRUPTED_RESTART"}
                 )
     yield
 

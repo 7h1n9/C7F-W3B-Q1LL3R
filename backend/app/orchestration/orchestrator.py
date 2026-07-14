@@ -23,7 +23,15 @@ from app.engines import (
 )
 from app.models.challenge import Challenge
 from app.models.model_config import ModelConfig
-from app.models.run import AgentTurn, Artifact, FlagCandidate, Observation, SolveRun, ToolCall
+from app.models.run import (
+    AgentTurn,
+    Artifact,
+    FlagCandidate,
+    Observation,
+    RunUserInput,
+    SolveRun,
+    ToolCall,
+)
 from app.models.skill import RunSkillSnapshot, Skill
 from app.orchestration.state_machine import TERMINAL, RunStatus, transition
 from app.schemas.agent import ActionHypothesis, FinishAction, SkillAction, ToolAction
@@ -87,14 +95,23 @@ class SolveOrchestrator:
         specialists = list((await session.scalars(select(Skill).where(Skill.id.in_(active), Skill.skill_kind == "SPECIALIST"))).all()) if active else []
         return not specialists and any(item.get("confidence", 0) >= 80 and item.get("supporting_fact_ids") for item in (state.skill_recommendations_json or []))
 
-    async def build_engine(self, run: SolveRun, session) -> object:
+    async def build_engine(self, run: SolveRun, session, attempt=None, lease=None) -> object:
         if self.engine_factory:
             return self.engine_factory(run)
         if run.engine_type == "codex_sdk":
+            challenge = await session.get(Challenge, run.challenge_id)
             return CodexSdkEngine(
                 get_settings().codex_bridge_url,
                 run.workspace_path,
                 thread_id=run.codex_thread_id,
+                scope={
+                    "run_id": run.id,
+                    "challenge_id": run.challenge_id,
+                    "workspace_root": run.workspace_path,
+                    "allowed_hosts": list(challenge.allowed_hosts or []) if challenge else [],
+                    "attempt_id": attempt.id if attempt else None,
+                    "lease_token": lease.lease_token if lease else None,
+                },
             )
         if run.engine_type == "openai_compatible":
             config = (
@@ -123,6 +140,19 @@ class SolveOrchestrator:
         await session.commit()
         await solver_state_service.sync_from_run(session, run)
         await event_service.append(session, run.id, "run.status_changed", {"status": run.status})
+
+    async def _consume_queued_inputs(self, session, run: SolveRun, attempt=None) -> str | None:
+        queued = list((await session.scalars(select(RunUserInput).where(RunUserInput.run_id == run.id, RunUserInput.status == "QUEUED").order_by(RunUserInput.revision))).all())
+        if not queued:
+            return None
+        from datetime import UTC, datetime
+        now = datetime.now(UTC)
+        for item in queued:
+            item.status, item.consumed_at, item.consumed_by_attempt_id = "CONSUMED", now, (attempt.id if attempt else None)
+        await session.commit()
+        await event_service.append(session, run.id, "user.input_consumed", {"revisions": [item.revision for item in queued], "attempt_id": attempt.id if attempt else None})
+        await event_service.append(session, run.id, "run.guidance_updated", {"context_revision": run.context_revision})
+        return "\n\n".join(f"用户补充信息 v{item.revision}: {item.content}" for item in queued)
 
     async def _stop_if_no_progress(
         self,
@@ -493,7 +523,7 @@ class SolveOrchestrator:
                             {"code": "RUNNER_UNAVAILABLE", "message": str(error)[:1000]},
                         )
                         return
-                engine = await self.build_engine(run, session)
+                engine = await self.build_engine(run, session, attempt, lease)
                 self.active_engines[run_id] = engine
                 if run.engine_type == "openai_compatible":
                     await self._run_openai(session, run, engine, user_message, attempt, lease)
@@ -553,7 +583,13 @@ class SolveOrchestrator:
             await self._transition(session, run, RunStatus.PREPARING)
             await event_service.append(session, run.id, "run.started", {})
             await self._transition(session, run, RunStatus.ANALYZING)
-        elif run.status in {RunStatus.WAITING_USER, RunStatus.PAUSED_RATE_LIMIT}:
+        elif run.status in {
+            RunStatus.WAITING_USER,
+            RunStatus.PAUSED_RATE_LIMIT,
+            RunStatus.PAUSED_CHECKPOINT,
+            RunStatus.PAUSED_RECOVERY,
+            RunStatus.WAITING_CONFIGURATION,
+        }:
             await self._transition(session, run, RunStatus.PLANNING)
         else:
             raise DomainError("RUN_INVALID_STATE", "Run cannot be started from its current state.")
@@ -573,9 +609,12 @@ class SolveOrchestrator:
             if RunStatus(run.status) in {RunStatus.ANALYZING, RunStatus.EVALUATING}:
                 await self._transition(session, run, RunStatus.PLANNING)
             messages = await context_builder.build(session, run, challenge)
+            queued_input = await self._consume_queued_inputs(session, run, attempt)
             decision_required = await self._skill_decision_required(session, run)
             if decision_required:
                 messages.append({"role": "system", "content": "SKILL_DECISION_REQUIRED: before any tool action, return SkillAction with operation activate, inspect, or decline and provide a reason."})
+            if queued_input:
+                messages.append({"role": "user", "content": queued_input})
             if user_message:
                 messages.append({"role": "user", "content": f"User supplied: {user_message}"})
                 user_message = None
@@ -628,6 +667,21 @@ class SolveOrchestrator:
             )
             run.agent_step_count += 1
             await session.commit()
+            interval = max(1, int(run.agent_checkpoint_interval or 30))
+            if run.agent_step_count % interval == 0:
+                await self._transition(session, run, RunStatus.PAUSED_CHECKPOINT)
+                await event_service.append(
+                    session,
+                    run.id,
+                    "run.checkpoint_reached",
+                    {
+                        "step": run.agent_step_count,
+                        "interval": interval,
+                        "phase": run.current_phase,
+                        "remaining_steps": max(0, run.max_agent_steps - run.agent_step_count),
+                    },
+                )
+                return
             await self._correct_phase(session, run, getattr(action, "phase", None))
             hypothesis_payload = getattr(action, "hypothesis", None)
             if isinstance(hypothesis_payload, ActionHypothesis):
@@ -1102,23 +1156,24 @@ class SolveOrchestrator:
         attempt=None,
         lease=None,
     ) -> None:
+        queued_input = await self._consume_queued_inputs(session, run, attempt)
+        user_message = "\n\n".join(item for item in (user_message, queued_input) if item) or None
         if run.status == RunStatus.CREATED:
             await self._transition(session, run, RunStatus.PREPARING)
             await event_service.append(session, run.id, "run.started", {})
             iterator = engine.start(run.id)
         elif user_message:
-            if run.status == RunStatus.WAITING_USER:
+            if run.status in {RunStatus.WAITING_USER, RunStatus.PAUSED_CHECKPOINT, RunStatus.PAUSED_RECOVERY, RunStatus.WAITING_CONFIGURATION, RunStatus.PAUSED_RATE_LIMIT}:
                 await self._transition(session, run, RunStatus.PLANNING)
             iterator = engine.continue_run(run.id, user_message)
         else:
-            if run.status == RunStatus.WAITING_USER:
+            if run.status in {RunStatus.WAITING_USER, RunStatus.PAUSED_CHECKPOINT, RunStatus.PAUSED_RECOVERY, RunStatus.WAITING_CONFIGURATION, RunStatus.PAUSED_RATE_LIMIT}:
                 await self._transition(session, run, RunStatus.PLANNING)
             iterator = engine.resume(run.id)
         auto_turns = 0
         max_auto_turns = max(1, run.max_agent_steps)
         auto_started = monotonic()
         no_progress_turns = 0
-        no_progress_threshold = 2
         while True:
             await run_attempt_service.heartbeat(session, attempt, lease)
             auto_turns += 1
@@ -1132,6 +1187,11 @@ class SolveOrchestrator:
                     await self._transition(session, run, RunStatus(item.status))
                 await event_service.append(session, run.id, item.event_type, item.payload)
             await codex_materializer.sync(session, run)
+            interval = max(1, int(run.agent_checkpoint_interval or 30))
+            if run.agent_step_count and run.agent_step_count % interval == 0:
+                await self._transition(session, run, RunStatus.PAUSED_CHECKPOINT)
+                await event_service.append(session, run.id, "run.checkpoint_reached", {"step": run.agent_step_count, "interval": interval, "phase": run.current_phase, "remaining_steps": max(0, run.max_agent_steps - run.agent_step_count)})
+                return
             after_progress = await self._codex_progress_snapshot(session, run.id)
             if after_progress == before_progress:
                 no_progress_turns += 1
@@ -1155,19 +1215,18 @@ class SolveOrchestrator:
                     },
                 )
                 return
-            if no_progress_turns >= no_progress_threshold:
-                await self._transition(session, run, RunStatus.WAITING_USER)
+            if no_progress_turns >= 8:
                 await event_service.append(
                     session,
                     run.id,
-                    "agent.message",
+                    "agent.no_progress_diagnostic",
                     {
-                        "message": "Codex 连续两轮没有产生新的事件、证据或状态变化，已暂停等待人工确认。",
-                        "requires_user_confirmation": True,
+                        "message": "Codex 连续多轮未产生结构化进展，已记录内部诊断并继续尝试不同维度。",
                         "reason": "CODEX_NO_PROGRESS",
+                        "no_progress_turns": no_progress_turns,
                     },
                 )
-                return
+                no_progress_turns = 0
             if monotonic() - auto_started >= run.max_runtime_seconds:
                 await self._transition(session, run, RunStatus.WAITING_USER)
                 await event_service.append(
@@ -1181,7 +1240,8 @@ class SolveOrchestrator:
                     },
                 )
                 return
-            iterator = engine.resume(run.id)
+            queued_input = await self._consume_queued_inputs(session, run, attempt)
+            iterator = engine.continue_run(run.id, queued_input) if queued_input else engine.resume(run.id)
 
     async def _codex_progress_snapshot(
         self, session, run_id: str

@@ -3,7 +3,7 @@ import socket
 import uuid
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -28,7 +28,7 @@ class RunAttemptService:
     lease_ttl_seconds = 90
     owner_instance_id = f"{socket.gethostname()}:{os.getpid()}"
 
-    async def _purge_expired_lease(self, session: AsyncSession, run_id: str) -> None:
+    async def reclaim_expired_lease(self, session: AsyncSession, run_id: str) -> None:
         now = utc_now()
         leases = list(
             (
@@ -51,7 +51,7 @@ class RunAttemptService:
             await session.commit()
 
     async def begin(self, session: AsyncSession, run: SolveRun) -> tuple[RunAttempt, RunExecutionLease]:
-        await self._purge_expired_lease(session, run.id)
+        await self.reclaim_expired_lease(session, run.id)
         existing = await session.scalar(
             select(RunExecutionLease).where(RunExecutionLease.run_id == run.id)
         )
@@ -147,7 +147,22 @@ class RunAttemptService:
         now = utc_now()
         aborted_attempts = 0
         closed_attempts = 0
-        leases_deleted = await session.execute(delete(RunExecutionLease))
+        leases_deleted = 0
+        leases = list((await session.scalars(select(RunExecutionLease))).all())
+        for lease in leases:
+            run = await session.get(SolveRun, lease.run_id)
+            expired = (ensure_aware(lease.expires_at) or now) <= now
+            stale_owner = lease.owner_instance_id != self.owner_instance_id
+            if (run and RunStatus(run.status) in TERMINAL) or expired or stale_owner:
+                if expired or stale_owner:
+                    attempt = await session.get(RunAttempt, lease.attempt_id)
+                    if attempt and attempt.status == "RUNNING":
+                        attempt.status = "ABORTED"
+                        attempt.error_code = "PROCESS_INTERRUPTED"
+                        attempt.finished_at = now
+                        aborted_attempts += 1
+                await session.delete(lease)
+                leases_deleted += 1
         attempts = list((await session.scalars(select(RunAttempt).where(RunAttempt.status == "RUNNING"))).all())
         for attempt in attempts:
             run = await session.get(SolveRun, attempt.run_id)
@@ -156,14 +171,14 @@ class RunAttemptService:
                 attempt.error_code = run.last_error_code
                 attempt.finished_at = ensure_aware(run.finished_at) or now
                 closed_attempts += 1
-            else:
+            elif not any(lease.attempt_id == attempt.id for lease in leases):
                 attempt.status = "ABORTED"
                 attempt.error_code = "PROCESS_INTERRUPTED"
                 attempt.finished_at = now
                 aborted_attempts += 1
         await session.commit()
         return {
-            "leases_deleted": leases_deleted.rowcount or 0,
+            "leases_deleted": leases_deleted,
             "attempts_aborted": aborted_attempts,
             "attempts_closed": closed_attempts,
         }
