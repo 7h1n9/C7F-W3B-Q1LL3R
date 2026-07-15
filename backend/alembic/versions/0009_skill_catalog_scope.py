@@ -1,7 +1,8 @@
 """Add Skill catalog scope for separating Web CTF specialists from general skills."""
 
-from alembic import op
 import sqlalchemy as sa
+
+from alembic import op
 
 revision = "0009_skill_catalog_scope"
 down_revision = "0008_provider_agent_turns"

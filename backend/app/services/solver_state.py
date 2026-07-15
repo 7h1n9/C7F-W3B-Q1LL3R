@@ -41,6 +41,14 @@ class SolverStateService:
             current_phase=_phase_for(challenge_type),
             active_skill_ids_json=sorted(set(active_skill_ids)),
             last_progress_at=datetime.now(UTC),
+            run_plan_json={
+                "current_goal": "Understand the authorized challenge and find a verified flag",
+                "current_phase": _phase_for(challenge_type),
+                "attack_surface": [], "confirmed_capabilities": [], "open_questions": [],
+                "hypothesis_queue": [], "current_experiment": None, "next_actions": [],
+                "exit_conditions": ["verified flag", "explicit unrecoverable blocker"],
+            },
+            capability_ledger_json={},
         )
         session.add(state)
         await session.commit()
@@ -193,6 +201,47 @@ class SolverStateService:
             state.no_progress_count += 1
         await session.commit()
         return state.no_progress_count
+
+    async def set_run_plan(self, session: AsyncSession, run_id: str, plan: dict) -> None:
+        state = await self.load(session, run_id)
+        if not state:
+            return
+        state.run_plan_json = dict(plan)
+        await session.commit()
+
+    async def record_decision_card(self, session: AsyncSession, run_id: str, card: dict) -> None:
+        state = await self.load(session, run_id)
+        if not state:
+            return
+        state.last_decision_card_json = dict(card)
+        await session.commit()
+
+    async def record_experiment(self, session: AsyncSession, run_id: str, experiment: dict) -> None:
+        state = await self.load(session, run_id)
+        if not state:
+            return
+        state.last_experiment_json = dict(experiment)
+        await session.commit()
+
+    async def record_file_read(self, session: AsyncSession, run_id: str, *, path: str, start_line: int, end_line: int, content_sha256: str) -> None:
+        state = await self.load(session, run_id)
+        if not state:
+            return
+        state.read_files_json = sorted(set([*(state.read_files_json or []), path]))
+        ranges = [item for item in (state.read_ranges_json or []) if not (item.get("path") == path and item.get("start_line") == start_line and item.get("end_line") == end_line)]
+        state.read_ranges_json = [*ranges, {"path": path, "start_line": start_line, "end_line": end_line}]
+        state.content_hashes_json = {**(state.content_hashes_json or {}), path: content_sha256}
+        await session.commit()
+
+    async def record_capability(self, session: AsyncSession, run_id: str, capability: str, *, evidence: dict | None = None) -> None:
+        state = await self.load(session, run_id)
+        if not state or not capability:
+            return
+        ledger = dict(state.capability_ledger_json or {})
+        if capability not in ledger:
+            ledger[capability] = {"confirmed": True, "evidence": evidence or {}, "confirmed_at": datetime.now(UTC).isoformat()}
+            state.capability_ledger_json = ledger
+            await session.commit()
 
 
 solver_state_service = SolverStateService()

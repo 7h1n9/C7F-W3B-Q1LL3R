@@ -22,6 +22,7 @@ class Settings(BaseSettings):
     allowed_service_cidrs: str = "127.0.0.0/8,192.168.56.0/24,192.168.236.0/24"
     environment: str = "development"
     codex_diagnostic_mode: bool = False
+    historical_lesson_mode: str = "strategy_only"
 
     def require_safe_production_secrets(self) -> None:
         if self.environment.lower() not in {"dev", "development", "test", "testing"} and (

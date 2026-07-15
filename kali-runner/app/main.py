@@ -12,7 +12,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 from app.config import settings
 from app.models import JobRequest
 from app.service import job_service
-from app.workspace.paths import DOWNLOAD_DIRS, initialize_workspace, safe_child, workspace_for
+from app.workspace.paths import DOWNLOAD_DIRS, UPLOAD_DIRS, initialize_workspace, safe_child, workspace_for
 from app.executors.session_store import session_store
 
 
@@ -36,14 +36,17 @@ async def capability_registry() -> dict:
     tools = [
         "http_request", "http_session_request", "http_extract", "whatweb_fingerprint", "js_asset_analyze", "source_map_analyze",
         "file_type", "strings_extract", "archive_list", "content_discovery", "jwt_inspect", "file_read",
-        "file_search", "python_run", "pcap_metadata", "pcap_protocols", "pcap_query", "pcap_tcp_stream",
+        "file_search", "python_run", "script_run", "sandbox_exec", "pcap_metadata", "pcap_protocols", "pcap_query", "pcap_tcp_stream",
         "pcap_http_objects", "pcap_dns_summary", "pcap_credentials", "sqlmap_detect", "nmap_service_probe",
         "nikto_scan", "binwalk_scan", "exiftool_metadata",
     ]
     placeholder_tools = {"pcap_tcp_stream", "pcap_http_objects", "pcap_dns_summary", "pcap_credentials", "sqlmap_detect", "nmap_service_probe", "nikto_scan", "binwalk_scan", "exiftool_metadata"}
+    interpreter_installed = {"python_run": bool(shutil.which("python")), "script_run": any(bool(shutil.which(name)) for name in ("python", "node", "bash")), "sandbox_exec": any(bool(shutil.which(name)) for name in ("file", "strings", "grep", "sed", "awk", "jq", "xxd", "base64", "openssl", "unzip", "tar", "7z", "binwalk", "exiftool"))}
     return {
-        "tools": [{"name": name, "implemented": name not in placeholder_tools, "installed": True, "enabled": name not in placeholder_tools, "available": name not in placeholder_tools, "version": "policy-wrapper", "self_test_ok": name not in placeholder_tools, "last_self_check": None} for name in tools],
+        "tools": [{"name": name, "implemented": name not in placeholder_tools, "installed": interpreter_installed.get(name, True), "enabled": name not in placeholder_tools and interpreter_installed.get(name, True), "available": name not in placeholder_tools and interpreter_installed.get(name, True), "version": "policy-wrapper", "self_test_ok": name not in placeholder_tools and interpreter_installed.get(name, True), "last_self_check": None} for name in tools],
         "binaries": {name: bool(shutil.which(name)) for name in ("tshark", "capinfos", "ffuf", "feroxbuster", "sqlmap", "nmap", "nikto", "binwalk", "exiftool")},
+        "interpreters": {name: bool(shutil.which(name)) for name in ("python", "node", "bash")},
+        "network_enforcement": {"mode": "runner_policy", "os_level": False, "target_allowlist": False},
     }
 
 
@@ -83,6 +86,9 @@ async def create_workspace(run_id: str, _: None = Depends(require_token)) -> dic
 async def upload_file(run_id: str, relative_path: str, request: Request, x_content_sha256: str | None = Header(default=None), _: None = Depends(require_token)) -> dict:
     workspace = initialize_workspace(run_id)
     path = safe_child(workspace, relative_path)
+    normalized = relative_path.replace("\\", "/")
+    if normalized.split("/", 1)[0] not in UPLOAD_DIRS and normalized not in UPLOAD_DIRS:
+        raise HTTPException(403, detail="file upload is outside the Run Workspace input/output areas")
     content_length = request.headers.get("content-length")
     if content_length and int(content_length) > settings.max_upload_bytes:
         raise HTTPException(413, detail="file exceeds upload limit")

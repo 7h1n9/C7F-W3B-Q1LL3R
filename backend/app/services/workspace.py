@@ -25,6 +25,11 @@ def create_workspace(
         "evidence",
         "outputs",
         "final",
+        "notes",
+        "scratch",
+        "payloads",
+        "extracted",
+        "generated",
     ):
         (workspace / child).mkdir(parents=True, exist_ok=True)
     manifest = []

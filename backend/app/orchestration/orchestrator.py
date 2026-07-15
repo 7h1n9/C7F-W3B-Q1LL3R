@@ -319,6 +319,12 @@ class SolveOrchestrator:
                 },
             )
             return False
+        if skill.skill_kind == "SPECIALIST" and action.operation == "activate":
+            state = await solver_state_service.load(session, run.id)
+            if not action.supporting_evidence and not (state and state.confirmed_facts_json):
+                await event_service.append(session, run.id, "skill.activation_rejected", {"skill_id": skill.id, "skill_name": skill.name, "error_code": "SKILL_EVIDENCE_REQUIRED", "reason": "Specialist skills require structured evidence before activation."})
+                await solver_state_service.record_rejected_path(session, run.id, {"source": "skill", "code": "SKILL_EVIDENCE_REQUIRED", "skill_id": skill.id})
+                return False
         if skill.ctf_phases:
             current_phase = str(run.current_phase or "").upper()
             allowed_phases = [str(item).upper() for item in skill.ctf_phases]
@@ -710,6 +716,18 @@ class SolveOrchestrator:
                     "expected_use": getattr(action, "expected_use", None),
                 },
             )
+            decision_card = getattr(action, "decision_card", None)
+            if decision_card is not None:
+                decision_card = decision_card.model_dump()
+            else:
+                decision_card = {
+                    "known_facts": "结构化 SolverState 与最新 ToolModelView",
+                    "core_question": str(getattr(action, "objective", "Continue the authorized investigation")),
+                    "discriminates": [str(getattr(action, "success_condition", "")), str(getattr(action, "failure_pivot", ""))],
+                    "success_signal": str(getattr(action, "expected_evidence", "")),
+                    "failure_pivot": str(getattr(action, "failure_pivot", "")),
+                }
+            await solver_state_service.record_decision_card(session, run.id, decision_card)
             hypothesis_item = None
             if isinstance(action, SkillAction):
                 handled = await self._handle_skill_action(session, run, challenge, action)
@@ -902,7 +920,7 @@ class SolveOrchestrator:
                         session,
                         run.id,
                         "agent.action_rejected",
-                        {"tool": action.tool_name, "code": error.code},
+                        {"tool": action.tool_name, "code": error.code, "error": error.message, "details": error.details, "retryable": error.code in {"CODEX_DIRECT_TOOL_FORBIDDEN", "TOOL_INVALID_ARGUMENT", "FILE_NOT_FOUND", "SCRIPT_NOT_SYNCED", "SKILL_NOT_FOUND", "RUN_TOOL_NOT_ALLOWED", "TOOL_NOT_INSTALLED"}},
                     )
                     await solver_state_service.record_rejected_path(
                         session,
@@ -964,6 +982,22 @@ class SolveOrchestrator:
                         .order_by(Artifact.created_at.desc())
                     )
                 progress = {"made_progress": False, "no_progress_count": 0, "recommended_skills": []}
+                await solver_state_service.record_experiment(
+                    session,
+                    run.id,
+                    {
+                        "question": action.objective,
+                        "hypothesis": hypothesis,
+                        "positive_signal": action.success_condition,
+                        "negative_signal": action.failure_pivot,
+                        "tool": action.tool_name,
+                        "arguments": action.arguments,
+                        "result_classification": "COMPLETED" if result.get("status") == "COMPLETED" else "ERROR",
+                        "new_facts": (result.get("structured_result") or {}).get("extracted_facts", {}) if isinstance(result.get("structured_result"), dict) else {},
+                        "capability_change": [],
+                        "next_decision": action.failure_pivot if result.get("status") != "COMPLETED" else action.success_condition,
+                    },
+                )
                 if call and observation and artifact:
                     progress = await progress_evaluator.evaluate(
                         session,
@@ -993,6 +1027,17 @@ class SolveOrchestrator:
                         evidence={"tool_name": action.tool_name, "status": result.get("status")},
                     )
                 if progress["made_progress"]:
+                    capability_by_tool = {
+                        "http_request": "can_read_public_page",
+                        "http_session_request": "can_reuse_session",
+                        "file_read": "can_read_file",
+                        "script_run": "can_run_script",
+                        "python_run": "can_run_script",
+                        "jwt_inspect": "can_forge_token",
+                    }
+                    capability = capability_by_tool.get(action.tool_name)
+                    if capability:
+                        await solver_state_service.record_capability(session, run.id, capability, evidence={"tool": action.tool_name})
                     for recommendation in progress["recommended_skills"]:
                         await event_service.append(
                             session,
@@ -1067,7 +1112,12 @@ class SolveOrchestrator:
                         else 1
                     )
                     last_runner_failure = failure
-                    if consecutive_runner_failures >= 2:
+                    recoverable_codes = {"CODEX_DIRECT_TOOL_FORBIDDEN", "TOOL_INVALID_ARGUMENT", "FILE_NOT_FOUND", "SCRIPT_NOT_SYNCED", "SKILL_NOT_FOUND", "RUN_TOOL_NOT_ALLOWED", "TOOL_NOT_INSTALLED", "SCRIPT_TIMEOUT", "TOOL_NOT_INSTALLED"}
+                    if str(result.get("error_code") or "") in recoverable_codes:
+                        await event_service.append(session, run.id, "tool.rejected", {"tool": action.tool_name, "code": result.get("error_code"), "error": failure[1], "retryable": True})
+                        consecutive_runner_failures = 0
+                        last_runner_failure = None
+                    elif consecutive_runner_failures >= 2:
                         run.last_error_code = "RUNNER_UNAVAILABLE"
                         run.last_error_message = failure[1][:4000]
                         await self._transition(session, run, RunStatus.FAILED_RUNNER)
@@ -1103,6 +1153,22 @@ class SolveOrchestrator:
                 {"type": "finish", "result": "waiting_user"},
             )
             return True
+        if action.result == "unsolved" and run.engine_type == "openai_compatible":
+            tool_count = await session.scalar(select(func.count()).select_from(ToolCall).where(ToolCall.run_id == run.id))
+            observation_count = await session.scalar(select(func.count()).select_from(Observation).where(Observation.run_id == run.id))
+            state = await solver_state_service.load(session, run.id)
+            directions = {str(item.get("source") or item.get("tool") or "") for item in ((state.confirmed_facts_json if state else []) + (state.rejected_paths_json if state else []))}
+            blockers = {"TARGET_UNREACHABLE", "ATTACHMENT_MISSING", "RUNNER_UNAVAILABLE", "PROVIDER_CONFIGURATION_INVALID", "AUTHORIZATION_BOUNDARY_UNCLEAR"}
+            if not tool_count or not observation_count or (len(directions) < 2 and str(run.last_error_code or "") not in blockers):
+                missing = []
+                if not tool_count: missing.append("at least one tool call")
+                if not observation_count: missing.append("at least one valid observation")
+                if len(directions) < 2: missing.append("two independently tested directions or an explicit blocker")
+                message = "FINISH_PREMATURE: " + ", ".join(missing)
+                await event_service.append(session, run.id, "agent.action_rejected", {"type": "finish", "code": "FINISH_PREMATURE", "message": message, "missing": missing})
+                await solver_state_service.record_rejected_path(session, run.id, {"source": "finish_gate", "code": "FINISH_PREMATURE", "missing": missing})
+                await self._transition(session, run, RunStatus.PLANNING)
+                return False
         solved = False
         if action.flag_candidate:
             await self._transition(session, run, RunStatus.VERIFYING_FLAG)

@@ -338,6 +338,25 @@ export function WorkspacePage() {
             </Card>
           </Col>
         </Row>
+        <Row gutter={[12, 12]} style={{ marginTop: 12 }}>
+          <Col xs={24} md={12}>
+            <Card size="small" title="当前决策卡" bordered={false}>
+              <Typography.Paragraph>{String(solverState.data?.last_decision_card_json?.core_question ?? "暂无")}</Typography.Paragraph>
+              <div className="field-help">成功信号：{String(solverState.data?.last_decision_card_json?.success_signal ?? "—")}</div>
+              <div className="field-help">失败转向：{String(solverState.data?.last_decision_card_json?.failure_pivot ?? "—")}</div>
+            </Card>
+          </Col>
+          <Col xs={24} md={12}>
+            <Card size="small" title="RunPlan / 能力账本" bordered={false}>
+              <div>目标：{String(solverState.data?.run_plan_json?.current_goal ?? "—")}</div>
+              <Space wrap style={{ marginTop: 8 }}>
+                {Object.keys(solverState.data?.capability_ledger_json ?? {}).length
+                  ? Object.keys(solverState.data?.capability_ledger_json ?? {}).map((item) => <Tag color="cyan" key={item}>{item}</Tag>)
+                  : <span>暂无已确认能力</span>}
+              </Space>
+            </Card>
+          </Col>
+        </Row>
       </Card>
 
       <Card className="panel-card" title="异常诊断" style={{ marginTop: 18 }}>

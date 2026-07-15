@@ -4,8 +4,9 @@ from fastapi import HTTPException
 
 from app.config import settings
 
-WORKSPACE_DIRS = ("source", "attachments", "requests", "responses", "scripts", "evidence", "outputs", "final", ".jobs")
+WORKSPACE_DIRS = ("source", "attachments", "requests", "responses", "scripts", "evidence", "outputs", "final", "notes", "scratch", "payloads", "extracted", "generated", ".jobs")
 DOWNLOAD_DIRS = {"responses", "outputs", "evidence", "final", "requests"}
+UPLOAD_DIRS = {"challenge.json", "AGENTS.md", "source", "attachments", "requests", "responses", "scripts", "evidence", "outputs", "final", "notes", "scratch", "payloads", "extracted", "generated"}
 
 
 def workspace_for(run_id: str) -> Path:

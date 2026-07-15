@@ -1,7 +1,8 @@
 """Add recovery controls, checkpoints, and queued runtime user inputs."""
 
-from alembic import op
 import sqlalchemy as sa
+
+from alembic import op
 
 revision = "0014_solver_recovery_controls"
 down_revision = "0013_run_execution_leases"

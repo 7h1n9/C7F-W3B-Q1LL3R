@@ -1,0 +1,14 @@
+name: script_run
+display_name: Run Workspace Script
+category: workspace
+description: Run a synchronized Python, Node, or Bash script from scripts/ or scratch/scripts/.
+risk_level: medium
+enabled: true
+parameters:
+  path: {type: string, required: true}
+  interpreter: {type: string, required: true}
+  args: {type: array, required: false}
+  network_mode: {type: string, required: false}
+  timeout_seconds: {type: integer, required: false}
+limits: {timeout_seconds: 60, max_output_bytes: 1048576}
+permissions: {workspace_only: true, shell_forbidden: true, target_network_allowlist: true}

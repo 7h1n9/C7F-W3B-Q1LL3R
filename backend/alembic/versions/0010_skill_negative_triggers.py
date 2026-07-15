@@ -1,7 +1,8 @@
 """Store negative Skill triggers used by the structured SkillRouter."""
 
-from alembic import op
 import sqlalchemy as sa
+
+from alembic import op
 
 revision = "0010_skill_neg_triggers"
 down_revision = "0009_skill_catalog_scope"

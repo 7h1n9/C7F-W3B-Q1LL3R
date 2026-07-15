@@ -1,6 +1,13 @@
 param(
     [switch]$SkipDocker,
-    [switch]$UseMockCodex
+    [switch]$UseMockCodex,
+    [switch]$Restart,
+    [switch]$Install,
+    [int]$BackendPort = 8000,
+    [int]$RunnerPort = 8091,
+    [int]$BridgePort = 8090,
+    [int]$FrontendPort = 5173,
+    [string]$DatabaseUrl = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -27,6 +34,77 @@ function Test-PortListening {
     param([Parameter(Mandatory = $true)][int]$Port)
 
     return [bool](Get-NetTCPConnection -State Listen -LocalPort $Port -ErrorAction SilentlyContinue | Select-Object -First 1)
+}
+
+function Get-ListeningProcessInfo {
+    param([Parameter(Mandatory = $true)][int]$Port)
+
+    $connections = @(Get-NetTCPConnection -State Listen -LocalPort $Port -ErrorAction SilentlyContinue)
+    foreach ($connection in $connections) {
+        $process = Get-CimInstance Win32_Process -Filter "ProcessId=$($connection.OwningProcess)" -ErrorAction SilentlyContinue
+        [pscustomobject]@{
+            ProcessId = $connection.OwningProcess
+            Name = if ($process) { $process.Name } else { "unknown" }
+            CommandLine = if ($process) { [string]$process.CommandLine } else { "" }
+        }
+    }
+}
+
+function Stop-ProjectService {
+    param(
+        [Parameter(Mandatory = $true)][string]$Name,
+        [Parameter(Mandatory = $true)][int]$Port,
+        [Parameter(Mandatory = $true)][string]$ProcessPattern
+    )
+
+    $listeners = @(Get-ListeningProcessInfo -Port $Port)
+    if ($listeners.Count -eq 0) { return }
+    $foreign = @($listeners | Where-Object { $_.CommandLine -notmatch $ProcessPattern })
+    if ($foreign.Count -gt 0) {
+        $details = ($foreign | ForEach-Object { "$($_.ProcessId): $($_.CommandLine)" }) -join "; "
+        throw "$Name port $Port is occupied by an unrelated process: $details"
+    }
+    $allProcesses = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue)
+    $processIds = [System.Collections.Generic.HashSet[int]]::new()
+    foreach ($listener in $listeners) { [void]$processIds.Add([int]$listener.ProcessId) }
+    foreach ($process in $allProcesses) {
+        if ([string]$process.CommandLine -match $ProcessPattern) {
+            [void]$processIds.Add([int]$process.ProcessId)
+        }
+    }
+
+    # Include project descendants and the npm/cmd wrappers that own a
+    # watch-mode process. This prevents tsx/vite watchers from surviving a
+    # restart after their HTTP child is terminated.
+    $changed = $true
+    while ($changed) {
+        $changed = $false
+        foreach ($process in $allProcesses) {
+            if ($processIds.Contains([int]$process.ParentProcessId) -and $processIds.Add([int]$process.ProcessId)) {
+                $changed = $true
+            }
+        }
+        foreach ($process in $allProcesses) {
+            if ($processIds.Contains([int]$process.ProcessId)) {
+                $parent = $allProcesses | Where-Object { $_.ProcessId -eq $process.ParentProcessId } | Select-Object -First 1
+                if ($parent -and [string]$parent.CommandLine -match "npm.*run dev|tsx watch|cmd\.exe.*tsx") {
+                    if ($processIds.Add([int]$parent.ProcessId)) { $changed = $true }
+                }
+            }
+        }
+    }
+
+    foreach ($processId in @($processIds)) {
+        Write-Host "[$Name] stopping project process $processId on port $Port..."
+        Stop-Process -Id $processId -Force -ErrorAction SilentlyContinue
+    }
+    $deadline = (Get-Date).AddSeconds(20)
+    while ((Get-Date) -lt $deadline -and (Test-PortListening -Port $Port)) {
+        Start-Sleep -Milliseconds 500
+    }
+    if (Test-PortListening -Port $Port) {
+        throw "$Name port $Port did not become free after stopping the project process."
+    }
 }
 
 function Wait-PortListening {
@@ -111,12 +189,28 @@ function Start-BackgroundService {
         [Parameter(Mandatory = $true)][string]$WorkingDirectory,
         [Parameter(Mandatory = $true)][string]$Command,
         [Parameter(Mandatory = $true)][string[]]$Arguments,
-        [Parameter(Mandatory = $true)][string]$HealthyUri
+        [Parameter(Mandatory = $true)][string]$HealthyUri,
+        [Parameter(Mandatory = $true)][string]$ProcessPattern
     )
 
     if (Test-PortListening -Port $Port) {
-        Write-Host "[$Name] already listening on port $Port, skipping start."
-        return
+        $listeners = @(Get-ListeningProcessInfo -Port $Port)
+        $foreign = @($listeners | Where-Object { $_.CommandLine -notmatch $ProcessPattern })
+        if ($foreign.Count -gt 0) {
+            $details = ($foreign | ForEach-Object { "$($_.ProcessId): $($_.CommandLine)" }) -join "; "
+            throw "$Name port $Port is occupied by an unrelated process: $details"
+        }
+        if ($Restart) {
+            Stop-ProjectService -Name $Name -Port $Port -ProcessPattern $ProcessPattern
+        } else {
+            try {
+                Wait-HttpOk -Uri $HealthyUri -Name $Name -TimeoutSeconds 10 | Out-Null
+                Write-Host "[$Name] already healthy on port $Port, reusing it."
+                return
+            } catch {
+                throw "$Name is listening on port $Port but is not healthy. Re-run with -Restart after checking ownership."
+            }
+        }
     }
 
     $stdout = Join-Path $logsRoot "$Name.out.log"
@@ -132,17 +226,16 @@ function Start-BackgroundService {
 }
 
 $runnerToken = "development-runner-token"
-$frontendApiBase = "http://127.0.0.1:8000/api/v1"
-$bridgePort = "8090"
-$backendRunnerUrl = "http://127.0.0.1:8091"
-$backendBridgeUrl = "http://127.0.0.1:8090"
+$frontendApiBase = "http://127.0.0.1:$BackendPort/api/v1"
+$backendRunnerUrl = "http://127.0.0.1:$RunnerPort"
+$backendBridgeUrl = "http://127.0.0.1:$BridgePort"
 $backendCorsOrigins = "http://localhost:5173,http://127.0.0.1:5173"
 $backendEncryptionKey = "development-only-change-me"
 $ctfctlAccessKey = "development-ctfctl-access-key"
 $backendAllowedCidrs = "127.0.0.0/8,192.168.56.0/24,192.168.236.0/24"
 $sqliteFallbackUrl = "sqlite+aiosqlite:///./local-dev.db"
 $mysqlUrl = "mysql+asyncmy://ctf_agent:ctf_agent@127.0.0.1:3307/ctf_agent"
-$databaseUrl = $sqliteFallbackUrl
+$databaseUrl = if ($DatabaseUrl) { $DatabaseUrl } else { $sqliteFallbackUrl }
 
 $dockerUsed = $false
 if (-not $SkipDocker) {
@@ -199,9 +292,9 @@ Set-EnvValue -Name "RUNNER_JOB_TIMEOUT_SECONDS" -Value "30"
 Set-EnvValue -Name "RUNNER_API_TOKEN" -Value $runnerToken
 Set-EnvValue -Name "RUNNER_ENVIRONMENT" -Value "development"
 
-Set-EnvValue -Name "CODEX_BRIDGE_PORT" -Value $bridgePort
+Set-EnvValue -Name "CODEX_BRIDGE_PORT" -Value "$BridgePort"
 Set-EnvValue -Name "CODEX_MOCK_MODE" -Value ($(if ($UseMockCodex) { "true" } else { "false" }))
-Set-EnvValue -Name "CTFCTL_BACKEND_URL" -Value "http://127.0.0.1:8000"
+Set-EnvValue -Name "CTFCTL_BACKEND_URL" -Value "http://127.0.0.1:$BackendPort"
 Set-EnvValue -Name "CTFCTL_ACCESS_KEY" -Value $ctfctlAccessKey
 Set-EnvValue -Name "VITE_API_BASE_URL" -Value $frontendApiBase
 
@@ -219,9 +312,13 @@ if (-not $SkipDocker -and $dockerUsed) {
     Write-Host "[docker] mysql is ready on localhost:3307."
 }
 
-Write-Host "[install] preparing backend and runner dependencies..."
-Invoke-CommandInDirectory -Name "backend deps" -WorkingDirectory $backendDir -Command $pythonExe -Arguments @("-m", "pip", "install", "-e", ".[dev]")
-Invoke-CommandInDirectory -Name "runner deps" -WorkingDirectory $runnerDir -Command $pythonExe -Arguments @("-m", "pip", "install", "-e", ".[dev]")
+if ($Install -or -not (Test-Path (Join-Path $backendDir "ctf_web_agent_backend.egg-info"))) {
+    Write-Host "[install] preparing backend and runner dependencies..."
+    Invoke-CommandInDirectory -Name "backend deps" -WorkingDirectory $backendDir -Command $pythonExe -Arguments @("-m", "pip", "install", "-e", ".[dev]")
+}
+if ($Install -or -not (Test-Path (Join-Path $runnerDir "ctf_web_agent_runner.egg-info"))) {
+    Invoke-CommandInDirectory -Name "runner deps" -WorkingDirectory $runnerDir -Command $pythonExe -Arguments @("-m", "pip", "install", "-e", ".[dev]")
+}
 
 if (-not (Test-Path (Join-Path $frontendDir "node_modules"))) {
     Invoke-CommandInDirectory -Name "frontend deps" -WorkingDirectory $frontendDir -Command $npmExe -Arguments @("install")
@@ -234,16 +331,16 @@ if (-not (Test-Path (Join-Path $bridgeDir "node_modules"))) {
 Write-Host "[migrate] applying backend migrations..."
 Invoke-CommandInDirectory -Name "backend migrate" -WorkingDirectory $backendDir -Command $pythonExe -Arguments @("-m", "alembic", "upgrade", "head")
 
-Start-BackgroundService -Name "runner" -Port 8091 -WorkingDirectory $runnerDir -Command $pythonExe -Arguments @("-m", "uvicorn", "app.main:app", "--port", "8091") -HealthyUri "http://127.0.0.1:8091/health"
-Start-BackgroundService -Name "backend" -Port 8000 -WorkingDirectory $backendDir -Command $pythonExe -Arguments @("-m", "uvicorn", "app.main:app", "--reload", "--port", "8000") -HealthyUri "http://127.0.0.1:8000/api/v1/health"
-Start-BackgroundService -Name "bridge" -Port 8090 -WorkingDirectory $bridgeDir -Command $npmExe -Arguments @("run", "dev", "--", "--host", "127.0.0.1") -HealthyUri "http://127.0.0.1:8090/health"
-Start-BackgroundService -Name "frontend" -Port 5173 -WorkingDirectory $frontendDir -Command $npmExe -Arguments @("run", "dev", "--", "--host", "127.0.0.1") -HealthyUri "http://127.0.0.1:5173"
+Start-BackgroundService -Name "runner" -Port $RunnerPort -WorkingDirectory $runnerDir -Command $pythonExe -Arguments @("-m", "uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", "$RunnerPort") -HealthyUri "http://127.0.0.1:$RunnerPort/health" -ProcessPattern "app\.main:app.*--port\s+$RunnerPort"
+Start-BackgroundService -Name "backend" -Port $BackendPort -WorkingDirectory $backendDir -Command $pythonExe -Arguments @("-m", "uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", "$BackendPort") -HealthyUri "http://127.0.0.1:$BackendPort/api/v1/health" -ProcessPattern "app\.main:app.*--port\s+$BackendPort"
+Start-BackgroundService -Name "bridge" -Port $BridgePort -WorkingDirectory $bridgeDir -Command $npmExe -Arguments @("run", "dev") -HealthyUri "http://127.0.0.1:$BridgePort/health" -ProcessPattern "codex-bridge.*(dist[\\/]server\.js|src[\\/]server\.ts)"
+Start-BackgroundService -Name "frontend" -Port $FrontendPort -WorkingDirectory $frontendDir -Command $npmExe -Arguments @("run", "dev", "--", "--host", "127.0.0.1", "--port", "$FrontendPort") -HealthyUri "http://127.0.0.1:$FrontendPort" -ProcessPattern "frontend[\\/]node_modules.*vite"
 
 Write-Host ""
 Write-Host "[state]"
 Write-Host "  docker mysql : $([bool]$dockerUsed)"
-Write-Host "  backend      : http://127.0.0.1:8000/api/v1/health"
-Write-Host "  runner       : http://127.0.0.1:8091/health"
-Write-Host "  bridge       : http://127.0.0.1:8090/health"
-Write-Host "  frontend     : http://127.0.0.1:5173"
+Write-Host "  backend      : http://127.0.0.1:$BackendPort/api/v1/health"
+Write-Host "  runner       : http://127.0.0.1:$RunnerPort/health"
+Write-Host "  bridge       : http://127.0.0.1:$BridgePort/health"
+Write-Host "  frontend     : http://127.0.0.1:$FrontendPort"
 Write-Host "  logs         : $logsRoot"

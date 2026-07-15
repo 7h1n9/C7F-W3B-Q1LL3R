@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.challenge import Challenge
 from app.models.run import Artifact, FlagCandidate, Hypothesis, Observation, SolveRun, ToolCall
 from app.models.skill import RunSkillSnapshot, Skill
-from app.services.run_diagnostics import run_diagnostics_service
+from app.services.challenge_lessons import challenge_lesson_service
 from app.services.skill_selection import specialist_skill_catalog
 from app.services.solver_state import solver_state_service
 from app.services.tool_permissions import effective_tools_for
@@ -173,25 +173,7 @@ class ContextBuilder:
         ]
         last_call = calls[0] if calls else None
         last_observation = observations[0] if observations else None
-        recent_runs = list(
-            (
-                await session.scalars(
-                    select(SolveRun)
-                    .where(SolveRun.challenge_id == challenge.id, SolveRun.id != run.id)
-                    .order_by(SolveRun.created_at.desc())
-                    .limit(5)
-                )
-            ).all()
-        )
-        lessons = {"known_failure_modes": [], "verified_paths": [], "avoid_repeated_behaviors": []}
-        for recent_run in recent_runs:
-            diag = await run_diagnostics_service.analyze(session, recent_run)
-            lessons["known_failure_modes"].extend(diag["diagnostic_tags"])
-            if recent_run.status == "COMPLETED_SOLVED":
-                lessons["verified_paths"].append(f"{recent_run.engine_type} completed a verified run")
-            lessons["avoid_repeated_behaviors"].extend(item["code"] for item in diag["anomalies"])
-        for key in lessons:
-            lessons[key] = sorted(set(lessons[key]))[:12]
+        lessons = await challenge_lesson_service.for_context(session, challenge.id, exclude_run_id=run.id)
         latest_tool_view = (last_observation.facts_json or {}).get("tool_model_view") if last_observation else None
         started_at = run.started_at
         if started_at and started_at.tzinfo is None:
@@ -214,6 +196,8 @@ class ContextBuilder:
                     and skills[snapshot.skill_id].skill_kind == "METHODOLOGY"
                 ],
             },
+            "RunPlan": (state.run_plan_json if state else {}),
+            "Capability Ledger": (state.capability_ledger_json if state else {}),
             "Solver State": {
                 "current_phase": state.current_phase if state else run.current_phase,
                 "confirmed_facts": state.confirmed_facts_json if state else [],
@@ -231,6 +215,8 @@ class ContextBuilder:
                 if last_call
                 else None,
                 "last_result_classification": last_observation.facts_json if last_observation else None,
+                "read_files": state.read_files_json if state else [],
+                "read_ranges": state.read_ranges_json if state else [],
             },
             "Challenge Facts": {
                 "id": challenge.id,
@@ -282,7 +268,7 @@ class ContextBuilder:
             ],
         }
         serialized = json.dumps(context, ensure_ascii=False)
-        budget = 48_000
+        budget = 40_000
         if len(serialized) > budget:
             # Preserve current state, latest evidence and schemas; discard oldest
             # history before asking the provider for another action.

@@ -23,3 +23,12 @@ Output contract:
 - Tool actions should include the current phase, a concrete objective, the active hypothesis, the expected evidence, the success condition, and the failure pivot.
 - Skill actions should include the current phase, the skill identity, a concrete objective, the reason for the request, supporting evidence, and the expected use of the skill.
 - Finish actions should include the result, a concise summary, and a flag candidate only when one is actually verified or strongly supported.
+## CTF 方法论 2.0
+
+每一轮只推进一个可验证问题：理解题目 -> 建立基线 -> 绘制攻击面 -> 选择最小区分实验 -> 执行工具 -> 分类结果 -> 更新能力 -> 串联已验证能力 -> 搜索并独立验证 Flag。
+
+在每个 AgentAction 中提供简洁的 `decision_card`：已知事实、唯一核心问题、要区分的两种可能、成功信号、失败转向。只保存可审计摘要，不输出隐藏思维链。
+
+工具选择优先级：已有 ToolModelView/结构化事实，其次专用轻量工具、工作区读取、离线脚本、目标受限脚本、内容发现，最后才是高成本扫描器。已有正文、已确认路由、SSTI/JWT/SQL 能力不得重复验证；重复动作必须说明新的区分问题。
+
+每次实验的结果分类为 `POSITIVE`、`NEGATIVE`、`INCONCLUSIVE`、`BLOCKED` 或 `ERROR`；`COMPLETED` 只表示工具进程结束，不表示实验为阳性。

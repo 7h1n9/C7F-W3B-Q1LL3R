@@ -67,7 +67,7 @@ class RunnerClient:
             if isinstance(item, dict) and item.get("path")
         }
 
-    async def sync_workspace(self, run_id: str, local_root: Path) -> None:
+    async def sync_workspace(self, run_id: str, local_root: Path) -> dict:
         await self.initialize_workspace(run_id)
         remote = await self.workspace_manifest(run_id)
         candidates: list[tuple[str, Path]] = []
@@ -75,16 +75,19 @@ class RunnerClient:
             path = local_root / relative
             if path.is_file():
                 candidates.append((relative, path))
-        for directory in ("source", "attachments", "scripts", "notes", "final"):
+        for directory in ("source", "attachments", "scripts", "notes", "scratch", "payloads", "generated", "extracted", "requests", "responses", "outputs", "evidence", "final"):
             root = local_root / directory
             if root.is_dir():
                 for path in root.rglob("*"):
                     if path.is_file() and not path.is_symlink():
                         candidates.append((path.relative_to(local_root).as_posix(), path))
+        uploaded: list[str] = []
         for relative, path in candidates:
             checksum = hashlib.sha256(path.read_bytes()).hexdigest()
             if remote.get(relative, {}).get("sha256") != checksum:
                 await self.upload_file(run_id, relative, path)
+                uploaded.append(relative)
+        return {"uploaded": uploaded, "remote_files": len(remote), "candidate_files": len(candidates)}
 
     async def create_job(
         self, run_id: str, allowed_hosts: list[str], tool: str, arguments: dict

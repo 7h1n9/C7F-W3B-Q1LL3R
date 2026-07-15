@@ -368,6 +368,13 @@ async def get_solver_state(run_id: str, session: AsyncSession = Depends(get_sess
         "action_fingerprints_json": state.action_fingerprints_json,
         "active_skill_ids_json": state.active_skill_ids_json,
         "skill_recommendations_json": state.skill_recommendations_json or [],
+        "run_plan_json": state.run_plan_json or {},
+        "capability_ledger_json": state.capability_ledger_json or {},
+        "read_files_json": state.read_files_json or [],
+        "read_ranges_json": state.read_ranges_json or [],
+        "content_hashes_json": state.content_hashes_json or {},
+        "last_decision_card_json": state.last_decision_card_json or {},
+        "last_experiment_json": state.last_experiment_json or {},
         "no_progress_count": state.no_progress_count,
         "last_progress_at": state.last_progress_at.replace(tzinfo=UTC).astimezone(UTC).isoformat() if state.last_progress_at and state.last_progress_at.tzinfo is None else (state.last_progress_at.astimezone(UTC).isoformat() if state.last_progress_at else None),
         "created_at": state.created_at.replace(tzinfo=UTC).astimezone(UTC).isoformat() if state.created_at.tzinfo is None else state.created_at.astimezone(UTC).isoformat(),
@@ -521,6 +528,9 @@ async def list_tool_calls(run_id: str, session: AsyncSession = Depends(get_sessi
                 "arguments": item.arguments_json,
                 "status": item.status,
                 "runner_job_id": item.runner_job_id,
+                "logical_tool_call_id": item.logical_tool_call_id,
+                "parent_tool_call_id": item.parent_tool_call_id,
+                "execution_layer": item.execution_layer,
                 "created_at": item.created_at.isoformat(),
             }
             for item in items

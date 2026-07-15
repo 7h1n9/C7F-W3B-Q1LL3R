@@ -135,6 +135,9 @@ class ToolCall(UUIDTimestampMixin, Base):
     runner_job_id: Mapped[str | None] = mapped_column(String(255))
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    logical_tool_call_id: Mapped[str | None] = mapped_column(String(120), index=True)
+    parent_tool_call_id: Mapped[str | None] = mapped_column(String(120))
+    execution_layer: Mapped[str] = mapped_column(String(40), default="gateway")
 
 
 class Artifact(UUIDTimestampMixin, Base):

@@ -1,7 +1,8 @@
 """Add quarantined learned Skill candidate tables."""
 
-from alembic import op
 import sqlalchemy as sa
+
+from alembic import op
 
 revision = "0011_learned_skill_candidates"
 down_revision = "0010_skill_neg_triggers"

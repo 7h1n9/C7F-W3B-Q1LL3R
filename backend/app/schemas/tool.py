@@ -30,3 +30,5 @@ class ToolExecutionResult(BaseModel):
     artifacts: list[ToolArtifactRef] = Field(default_factory=list)
     error_code: str | None = None
     error_message: str | None = None
+    retryable: bool = False
+    error_details: dict = Field(default_factory=dict)

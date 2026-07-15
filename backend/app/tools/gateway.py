@@ -1,5 +1,7 @@
+import contextlib
 import hashlib
 import json
+import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -8,33 +10,40 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import DomainError
 from app.models.challenge import Challenge
-from app.models.run import Artifact, Observation, SolveRun, ToolCall
+from app.models.run import Artifact, Observation, RunExecutionLease, SolveRun, ToolCall
 from app.orchestration.state_machine import RunStatus
 from app.schemas.tool import ToolArtifactRef, ToolExecutionResult, ToolModelView
 from app.services.events import event_service
 from app.services.flags import flag_service
 from app.services.runner_client import runner_client
+from app.services.solver_state import solver_state_service
 from app.services.tool_permissions import effective_tools_for
+from app.services.workspace_sync import workspace_sync_service
 from app.tools.policy import enforce_tool_policy
 from app.tools.registry import load_tool_definitions
 
 
 class ToolGateway:
     async def invoke(
-        self, session: AsyncSession, run: SolveRun, challenge: Challenge, name: str, arguments: dict
+        self, session: AsyncSession, run: SolveRun, challenge: Challenge, name: str, arguments: dict,
+        *, logical_tool_call_id: str | None = None, parent_tool_call_id: str | None = None,
+        execution_layer: str = "gateway",
     ) -> dict:
         definition = load_tool_definitions().get(name)
         if not definition or not definition.enabled:
             raise DomainError(
                 "TOOL_NOT_AVAILABLE", "Requested tool is not enabled.", {"tool": name}, 404
             )
-        if run.status != RunStatus.EXECUTING:
+        if RunStatus(run.status) not in {RunStatus.ANALYZING, RunStatus.PLANNING, RunStatus.EXECUTING, RunStatus.EVALUATING, RunStatus.RETRYING}:
             raise DomainError(
                 "RUN_TOOL_NOT_ALLOWED",
-                "Tools can only execute while the run is in EXECUTING state.",
+                "Tools require a non-terminal active solver state.",
                 {"current_state": run.status},
                 409,
             )
+        lease = await session.scalar(select(RunExecutionLease).where(RunExecutionLease.run_id == run.id))
+        if not lease:
+            raise DomainError("RUN_TOOL_NOT_ALLOWED", "An active attempt lease is required for tool execution.", {"run_id": run.id}, 409)
         if name not in await effective_tools_for(session, run, challenge):
             raise DomainError(
                 "TOOL_NOT_ALLOWED_FOR_CHALLENGE",
@@ -60,31 +69,44 @@ class ToolGateway:
             arguments_json=arguments,
             status="REQUESTED",
             started_at=datetime.now(UTC),
+            logical_tool_call_id=logical_tool_call_id or str(uuid.uuid4()),
+            parent_tool_call_id=parent_tool_call_id,
+            execution_layer=execution_layer,
         )
         session.add(call)
         await session.commit()
         await session.refresh(call)
         await event_service.append(
-            session, run.id, "tool.requested", {"tool_call_id": call.id, "tool": name}
+            session, run.id, "tool.requested", {"tool_call_id": call.id, "logical_tool_call_id": call.logical_tool_call_id, "tool": name, "execution_layer": call.execution_layer}
         )
         call.status = "STARTED"
         await session.commit()
         await event_service.append(
-            session, run.id, "tool.started", {"tool_call_id": call.id, "tool": name}
+            session, run.id, "tool.started", {"tool_call_id": call.id, "logical_tool_call_id": call.logical_tool_call_id, "tool": name, "execution_layer": call.execution_layer}
         )
         try:
             # ctfctl can create a bounded scripts/*.py file during a turn.
             # The remote Runner has its own per-run workspace, so synchronize
             # that file immediately before python_run instead of treating a
             # missing remote copy as a request for arbitrary shell access.
-            if name == "python_run":
+            if name in {"python_run", "script_run", "sandbox_exec"}:
                 await runner_client.sync_workspace(run.id, Path(run.workspace_path))
             job_id = await runner_client.create_job(
                 run.id, challenge.allowed_hosts, name, arguments
             )
             result = await runner_client.wait_job(job_id)
+            with contextlib.suppress(Exception):
+                await workspace_sync_service.sync_from_runner(run.id, Path(run.workspace_path))
+            if result.get("status") != "COMPLETED" and not result.get("error_code"):
+                error_text = str(result.get("error") or result.get("summary") or "").lower()
+                if "not found" in error_text or "does not exist" in error_text:
+                    result["error_code"] = "FILE_NOT_FOUND"
+                elif "not installed" in error_text:
+                    result["error_code"] = "TOOL_NOT_INSTALLED"
+                elif "script" in error_text and "sync" in error_text:
+                    result["error_code"] = "SCRIPT_NOT_SYNCED"
             if (
-                name == "file_read"
+                name in {"file_read", "python_run", "script_run"}
                 and result.get("status") != "COMPLETED"
                 and "not found" in str(result.get("error") or result.get("summary") or "").lower()
             ):
@@ -96,7 +118,7 @@ class ToolGateway:
                     run.id, challenge.allowed_hosts, name, arguments
                 )
                 result = await runner_client.wait_job(retry_job_id)
-                if result.get("status") != "COMPLETED":
+                if result.get("status") != "COMPLETED" and name == "file_read":
                     result["error_code"] = "FILE_NOT_FOUND"
         except Exception as error:
             result = {"status": "FAILED", "summary": "Runner request failed", "error": str(error)}
@@ -188,9 +210,20 @@ class ToolGateway:
             )
         observation.facts_json["flag_candidate_count"] = len(candidates)
         await session.commit()
+        if name == "file_read":
+            structured = result.get("structured_result") if isinstance(result.get("structured_result"), dict) else result
+            if structured.get("path") and structured.get("content_sha256"):
+                await solver_state_service.record_file_read(
+                    session,
+                    run.id,
+                    path=str(structured.get("path")),
+                    start_line=int(structured.get("start_line") or arguments.get("start_line") or 1),
+                    end_line=int(structured.get("end_line") or arguments.get("end_line") or 1),
+                    content_sha256=str(structured.get("content_sha256")),
+                )
         event_type = "tool.completed" if unified.status == "COMPLETED" else "tool.failed"
         await event_service.append(
-            session, run.id, event_type, {"tool_call_id": call.id, "result": unified.model_dump()}
+            session, run.id, event_type, {"tool_call_id": call.id, "logical_tool_call_id": call.logical_tool_call_id, "tool": name, "execution_layer": call.execution_layer, "result": unified.model_dump()}
         )
         return unified.model_dump()
 
@@ -235,6 +268,8 @@ class ToolGateway:
                     suggested_next_dimensions=list(view.get("suggested_next_dimensions") or []),
                 ),
                 artifacts=[],
+                error_code="FILE_RANGE_ALREADY_READ",
+                error_message="The same file range was already returned to the model; Runner was not called.",
             )
         return None
 
@@ -254,10 +289,12 @@ class ToolGateway:
             status = "FAILED"
         structured = result.get("structured_result") if isinstance(result.get("structured_result"), dict) else result
         facts = dict(structured.get("extracted_facts") or result.get("extracted_facts") or {})
-        for key in ("status_code", "final_url", "redirect_history", "content_type", "selected_headers", "cookie_names", "body_length", "html_title", "html_comments", "forms", "form_actions", "parameter_names", "links", "script_urls", "json_keys", "suspected_credentials", "suspected_flags", "path", "start_line", "end_line", "content_sha256"):
+        for key in ("status_code", "final_url", "redirect_history", "content_type", "selected_headers", "cookie_names", "body_length", "html_title", "html_comments", "forms", "form_actions", "parameter_names", "links", "script_urls", "json_keys", "suspected_credentials", "suspected_flags", "path", "start_line", "end_line", "content_sha256", "matching_paths", "match_snippets", "line_numbers", "generated_files", "stdout_excerpt", "stderr_excerpt", "network_targets", "runtime_ms"):
             if key in structured and key not in facts:
                 facts[key] = structured[key]
         excerpt = structured.get("body_excerpt") or structured.get("content_excerpt") or structured.get("content") or structured.get("output")
+        if excerpt is None and structured.get("match_snippets") is not None:
+            excerpt = json.dumps(structured.get("match_snippets"), ensure_ascii=False)
         warnings = []
         if structured.get("truncated"):
             warnings.append("结果正文已截断，完整内容保存在 Artifact")
@@ -280,6 +317,14 @@ class ToolGateway:
             artifacts=[ToolArtifactRef(artifact_id=artifact.id, relative_path=artifact.file_path, sha256=artifact.sha256, size=artifact.size, mime_type=artifact.mime_type or "text/plain")] if artifact else [],
             error_code=str(result.get("error_code") or "RUNNER_ERROR") if status != "COMPLETED" else None,
             error_message=str(result.get("error") or result.get("error_message")) if status != "COMPLETED" else None,
+            retryable=status in {"FAILED", "TIMEOUT"},
+            error_details={
+                "reason": str(result.get("error") or result.get("error_message") or result.get("summary") or ""),
+                "available_tools": sorted(load_tool_definitions()),
+                "readable_workspace": ["challenge.json", "AGENTS.md", "source/**", "attachments/**", "requests/**", "responses/**", "outputs/**", "evidence/**", "scripts/**", "notes/**", "final/**", "scratch/**"],
+                "recommended_action": "Fix the bounded arguments or choose a different minimal experiment; the run may continue.",
+                "auto_retry": status in {"TIMEOUT"},
+            } if status != "COMPLETED" else {},
         )
 
     @staticmethod
@@ -305,6 +350,9 @@ class ToolGateway:
                 "path": structured.get("path"),
                 "size": structured.get("size"),
                 "truncated": structured.get("truncated", False),
+                "matching_paths": structured.get("matching_paths", []),
+                "match_snippets": structured.get("match_snippets", []),
+                "line_numbers": structured.get("line_numbers", []),
             }
         return {
             **base,

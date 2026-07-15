@@ -11,6 +11,13 @@ class SolverStateRead(BaseModel):
     action_fingerprints_json: dict
     active_skill_ids_json: list[str]
     skill_recommendations_json: list[dict]
+    run_plan_json: dict = {}
+    capability_ledger_json: dict = {}
+    read_files_json: list[str] = []
+    read_ranges_json: list[dict] = []
+    content_hashes_json: dict = {}
+    last_decision_card_json: dict = {}
+    last_experiment_json: dict = {}
     no_progress_count: int
     last_progress_at: str | None
     created_at: str

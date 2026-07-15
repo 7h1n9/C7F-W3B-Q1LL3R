@@ -1,0 +1,13 @@
+name: sandbox_exec
+display_name: Run Allowlisted Offline Tool
+category: workspace
+description: Execute one allowlisted offline executable with an argument vector; no shell.
+risk_level: medium
+enabled: true
+parameters:
+  executable: {type: string, required: true}
+  args: {type: array, required: false}
+  cwd: {type: string, required: false}
+  network_mode: {type: string, required: false}
+limits: {timeout_seconds: 30, max_output_bytes: 1048576}
+permissions: {workspace_only: true, shell_forbidden: true, network_wrapper_only: true}

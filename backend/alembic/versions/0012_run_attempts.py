@@ -1,6 +1,7 @@
 """Track independent execution attempts for a Run."""
-from alembic import op
 import sqlalchemy as sa
+
+from alembic import op
 
 revision = "0012_run_attempts"
 down_revision = "0011_learned_skill_candidates"

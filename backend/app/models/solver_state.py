@@ -18,6 +18,13 @@ class SolverState(UUIDTimestampMixin, Base):
     action_fingerprints_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
     active_skill_ids_json: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
     skill_recommendations_json: Mapped[list[dict]] = mapped_column(JSON, nullable=False, default=list)
+    run_plan_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    capability_ledger_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    read_files_json: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
+    read_ranges_json: Mapped[list[dict]] = mapped_column(JSON, nullable=False, default=list)
+    content_hashes_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    last_decision_card_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    last_experiment_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
     no_progress_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     last_progress_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     updated_at: Mapped[datetime] = mapped_column(

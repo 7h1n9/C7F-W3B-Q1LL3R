@@ -103,13 +103,15 @@ def allowed_tools_for(challenge_type: str) -> set[str]:
             "http_request", "http_session_request", "http_extract", "whatweb_fingerprint",
             "js_asset_analyze", "source_map_analyze", "file_type", "strings_extract", "archive_list",
             "content_discovery", "jwt_inspect", "sqlmap_detect", "nmap_service_probe", "nikto_scan",
-            "binwalk_scan", "exiftool_metadata", "file_read", "file_search", "python_run",
+            "binwalk_scan", "exiftool_metadata", "file_read", "file_search", "python_run", "script_run", "sandbox_exec",
         }
         if challenge_type == "WEB_TARGET"
         else {
             "file_read",
             "file_search",
             "python_run",
+            "script_run",
+            "sandbox_exec",
             "pcap_metadata",
             "pcap_protocols",
             "pcap_query",

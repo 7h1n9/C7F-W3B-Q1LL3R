@@ -44,6 +44,12 @@ async def file_search(request: JobRequest) -> dict:
         if not path.is_file() or len(results) >= maximum:
             continue
         relative = str(path.relative_to(workspace))
-        if needle in path.name.lower() or needle in path.read_text(encoding="utf-8", errors="ignore").lower()[:settings.max_output_bytes]:
-            results.append(relative)
-    return {"matches": results, "summary": f"Found {len(results)} matching files"}
+        content = path.read_text(encoding="utf-8", errors="ignore")[:settings.max_output_bytes]
+        if needle in path.name.lower():
+            results.append({"path": relative, "line": 1, "snippet": path.name})
+        else:
+            for number, line in enumerate(content.splitlines(), 1):
+                if needle in line.lower():
+                    results.append({"path": relative, "line": number, "snippet": line[:1000]})
+                    break
+    return {"matching_paths": [item["path"] for item in results], "match_snippets": results, "line_numbers": [{"path": item["path"], "line": item["line"]} for item in results], "matches": results, "summary": f"Found {len(results)} matching files"}

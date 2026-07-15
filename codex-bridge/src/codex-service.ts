@@ -131,7 +131,7 @@ export class CodexService {
   }
 }
 
-type CtfctlScope = { run_id: string; challenge_id: string; workspace_root: string; allowed_hosts: string[] };
+type CtfctlScope = { run_id: string; challenge_id: string; workspace_root: string; allowed_hosts: string[]; attempt_id: string; lease_token: string; thread_id?: string; model_turn_id?: string };
 
 function normalizeScope(input: ThreadRequest): CtfctlScope {
   const raw = input.scope ?? {};
@@ -142,6 +142,10 @@ function normalizeScope(input: ThreadRequest): CtfctlScope {
     allowed_hosts: Array.isArray(raw.allowed_hosts)
       ? raw.allowed_hosts.filter((item): item is string => typeof item === "string")
       : [],
+    attempt_id: typeof raw.attempt_id === "string" ? raw.attempt_id : "",
+    lease_token: typeof raw.lease_token === "string" ? raw.lease_token : "",
+    thread_id: typeof raw.thread_id === "string" ? raw.thread_id : undefined,
+    model_turn_id: typeof raw.model_turn_id === "string" ? raw.model_turn_id : undefined,
   };
 }
 

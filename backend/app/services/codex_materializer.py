@@ -99,6 +99,9 @@ class CodexMaterializer:
                 runner_job_id=marker,
                 started_at=event.created_at,
                 finished_at=event.created_at if event.event_type != "tool.started" else None,
+                logical_tool_call_id=str(payload.get("logical_tool_call_id") or marker),
+                parent_tool_call_id=str(payload.get("parent_tool_call_id")) if payload.get("parent_tool_call_id") else None,
+                execution_layer="codex_mcp",
             )
             session.add(tool_call)
             await session.flush()
@@ -251,7 +254,7 @@ class CodexMaterializer:
             payload = event.payload_json or {}
             if event.event_type == "agent.turn_completed":
                 seen_steps.add(str(event.sequence))
-            tool_ref = payload.get("tool_call_id")
+            tool_ref = payload.get("logical_tool_call_id") or payload.get("tool_call_id")
             if event.event_type.startswith("tool.") and isinstance(tool_ref, str) and tool_ref:
                 seen_tools.add(tool_ref)
         run.agent_step_count = len(seen_steps)

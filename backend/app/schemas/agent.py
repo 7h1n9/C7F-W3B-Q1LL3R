@@ -11,6 +11,14 @@ class ActionHypothesis(BaseModel):
     supporting_fact_ids: list[str] = Field(default_factory=list)
 
 
+class DecisionCard(BaseModel):
+    known_facts: str = ""
+    core_question: str = ""
+    discriminates: list[str] = Field(default_factory=list, max_length=2)
+    success_signal: str = ""
+    failure_pivot: str = ""
+
+
 class ToolAction(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
@@ -27,6 +35,7 @@ class ToolAction(BaseModel):
     failure_pivot: str = "Record the failure and choose a different bounded dimension"
     retry_reason: str | None = None
     activate_skill: str | None = None
+    decision_card: DecisionCard | None = None
 
 
 class SkillAction(BaseModel):
@@ -41,6 +50,7 @@ class SkillAction(BaseModel):
     skill_name: str | None = Field(default=None, max_length=200)
     supporting_evidence: list[str] = Field(default_factory=list)
     expected_use: str = Field(min_length=1, max_length=2000)
+    decision_card: DecisionCard | None = None
 
 
 class FinishAction(BaseModel):
@@ -56,6 +66,7 @@ class FinishAction(BaseModel):
     expected_evidence: str | None = None
     success_condition: str | None = None
     failure_pivot: str | None = None
+    decision_card: DecisionCard | None = None
 
 
 AgentAction = Annotated[ToolAction | SkillAction | FinishAction, Field(discriminator="type")]
