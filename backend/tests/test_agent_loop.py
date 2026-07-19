@@ -9,7 +9,12 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
-from app.api.v1.runs import target_is_local_to_backend
+from app.api.v1.runs import (
+    remote_local_target_blocked,
+    runner_is_remote,
+    target_is_local_to_backend,
+)
+from app.core.config import get_settings
 from app.engines.openai_compatible import OpenAICompatibleEngine
 from app.models.base import Base
 from app.models.challenge import Challenge
@@ -63,6 +68,16 @@ def test_service_settings_allow_only_local_endpoints() -> None:
 def test_local_target_is_detected_for_remote_runner() -> None:
     challenge = type("Challenge", (), {"target_url": "http://localhost:18001"})()
     assert target_is_local_to_backend(challenge)
+
+
+def test_remote_local_target_override_is_configurable(monkeypatch: pytest.MonkeyPatch) -> None:
+    settings = get_settings()
+    monkeypatch.setattr(settings, "runner_url", "http://192.168.236.128:8091")
+    monkeypatch.setattr(settings, "allow_remote_local_targets", True)
+    challenge = type("Challenge", (), {"target_url": "http://localhost:18001"})()
+    assert target_is_local_to_backend(challenge)
+    assert runner_is_remote()
+    assert not remote_local_target_blocked(challenge, "codex_sdk")
 
 
 @pytest.mark.asyncio

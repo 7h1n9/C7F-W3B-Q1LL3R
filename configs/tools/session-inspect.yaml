@@ -1,0 +1,9 @@
+name: session_inspect
+display_name: Session Inspect
+category: web
+description: Inspect a Run-isolated HTTP session and return cookie names plus opaque secret references.
+risk_level: low
+enabled: true
+parameters: {session_name: {type: string, required: false}}
+limits: {max_output_bytes: 65536}
+permissions: {target_allowlist_required: false}

@@ -18,22 +18,22 @@ app.post<{ Params: { thread_id: string }; Body: { prompt: string } }>("/threads/
   if (!service.hasThread(request.params.thread_id)) {
     return reply.code(404).send({ code: "THREAD_NOT_FOUND", message: "Thread not found", details: {} });
   }
-  let wrote = false;
+  let hijacked = false;
   try {
     reply.hijack();
+    hijacked = true;
     reply.raw.setHeader("Content-Type", "application/x-ndjson; charset=utf-8");
     for await (const event of service.stream(request.params.thread_id, request.body.prompt)) {
-      wrote = true;
       reply.raw.write(`${JSON.stringify(event)}\n`);
     }
     reply.raw.end();
   } catch (error) {
     const response = bridgeError(error);
-    if (wrote) {
+    if (hijacked) {
       reply.raw.write(`${JSON.stringify({ type: "run.failed", status: "FAILED_ENGINE", payload: { code: response.body.code, message: response.body.message } })}\n`);
       reply.raw.end();
     } else {
-      reply.code(response.status).send(response.body);
+      return reply.code(response.status).send(response.body);
     }
   }
 });
@@ -41,22 +41,22 @@ app.post<{ Params: { thread_id: string }; Body: { prompt: string } }>("/threads/
   if (!service.hasThread(request.params.thread_id)) {
     return reply.code(404).send({ code: "THREAD_NOT_FOUND", message: "Thread not found", details: {} });
   }
-  let wrote = false;
+  let hijacked = false;
   try {
     reply.hijack();
+    hijacked = true;
     reply.raw.setHeader("Content-Type", "application/x-ndjson; charset=utf-8");
     for await (const event of service.streamResume(request.params.thread_id, request.body.prompt)) {
-      wrote = true;
       reply.raw.write(`${JSON.stringify(event)}\n`);
     }
     reply.raw.end();
   } catch (error) {
     const response = bridgeError(error);
-    if (wrote) {
+    if (hijacked) {
       reply.raw.write(`${JSON.stringify({ type: "run.failed", status: "FAILED_ENGINE", payload: { code: response.body.code, message: response.body.message } })}\n`);
       reply.raw.end();
     } else {
-      reply.code(response.status).send(response.body);
+      return reply.code(response.status).send(response.body);
     }
   }
 });

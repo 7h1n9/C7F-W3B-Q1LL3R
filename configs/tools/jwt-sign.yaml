@@ -1,0 +1,12 @@
+name: jwt_sign
+display_name: JWT Sign
+category: web
+description: Sign claims using a Run-local secret reference in an authorized challenge.
+risk_level: high
+enabled: true
+parameters:
+  secret_ref: {type: string, required: true}
+  header: {type: object, required: false}
+  claims: {type: object, required: true}
+limits: {max_output_bytes: 65536}
+permissions: {target_allowlist_required: false}

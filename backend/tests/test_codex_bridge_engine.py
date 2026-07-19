@@ -1,6 +1,7 @@
 import httpx
 import pytest
 
+from app.engines.base import EngineEvent
 from app.engines.codex_bridge import CodexSdkEngine
 
 
@@ -172,3 +173,29 @@ async def test_codex_engine_reuses_persisted_thread_for_continuation(
     ]
     assert [item.event_type for item in events] == ["agent.message"]
     assert calls == ["http://bridge.test/threads/persisted-thread/run"]
+
+
+@pytest.mark.asyncio
+async def test_resume_recreated_thread_does_not_replay_analyzing_transition(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request = httpx.Request("POST", "http://bridge.test/threads/persisted-thread/resume")
+    response = httpx.Response(404, request=request)
+
+    async def missing_thread_stream(self, url: str, payload: dict):
+        raise httpx.HTTPStatusError("thread missing", request=request, response=response)
+        yield  # pragma: no cover
+
+    async def recreated_thread(self, run_id: str, prompt: str | None = None):
+        yield EngineEvent("agent.message", {"message": "recreated"}, "ANALYZING")
+        yield EngineEvent("agent.turn_completed", {"message": "done"})
+
+    engine = CodexSdkEngine(
+        "http://bridge.test", "/workspace", thread_id="persisted-thread"
+    )
+    monkeypatch.setattr(CodexSdkEngine, "_stream_events", missing_thread_stream)
+    monkeypatch.setattr(engine, "start", recreated_thread.__get__(engine, CodexSdkEngine))
+
+    events = [item async for item in engine.resume("run-1")]
+    assert [item.event_type for item in events] == ["agent.message", "agent.turn_completed"]
+    assert events[0].status is None

@@ -1,0 +1,11 @@
+name: jwt_clone_claims
+display_name: JWT Clone Claims
+category: web
+description: Clone claims from a Run-local JWT reference without exposing the token value.
+risk_level: medium
+enabled: true
+parameters:
+  token_ref: {type: string, required: true}
+  claims: {type: object, required: true}
+limits: {max_output_bytes: 65536}
+permissions: {}

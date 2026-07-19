@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.run import Hypothesis, SolveRun
 from app.models.skill import RunSkillSnapshot, Skill
 from app.models.solver_state import SolverState
+from app.services.attack_chain import build_attack_chain, reduce_capability
 
 
 def _phase_for(challenge_type: str) -> str:
@@ -32,9 +33,14 @@ class SolverStateService:
         run: SolveRun,
         challenge_type: str,
         active_skill_ids: list[str],
+        challenge_name: str = "",
+        challenge_description: str = "",
     ) -> SolverState:
         state = await self.load(session, run.id)
         if state:
+            if not state.attack_chain_plan_json:
+                state.attack_chain_plan_json = build_attack_chain(challenge_name, challenge_description)
+                await session.commit()
             return state
         state = SolverState(
             run_id=run.id,
@@ -49,6 +55,8 @@ class SolverStateService:
                 "exit_conditions": ["verified flag", "explicit unrecoverable blocker"],
             },
             capability_ledger_json={},
+            attack_chain_plan_json=build_attack_chain(challenge_name, challenge_description),
+            experiment_dimensions_json=[],
         )
         session.add(state)
         await session.commit()
@@ -202,6 +210,23 @@ class SolverStateService:
         await session.commit()
         return state.no_progress_count
 
+    async def record_control_rejection(self, session: AsyncSession, run_id: str, entry: dict) -> None:
+        """Persist a tool/control failure without treating it as vulnerability evidence."""
+        state = await self.load(session, run_id)
+        if not state:
+            return
+        state.last_result_classification = "CONTROL_REJECTION"
+        state.rejected_paths_json = _unique_json_list(
+            state.rejected_paths_json or [], {**entry, "classification": "CONTROL_REJECTION"}
+        )
+        await session.commit()
+
+    async def record_result_classification(self, session: AsyncSession, run_id: str, classification: str) -> None:
+        state = await self.load(session, run_id)
+        if state:
+            state.last_result_classification = classification
+            await session.commit()
+
     async def set_run_plan(self, session: AsyncSession, run_id: str, plan: dict) -> None:
         state = await self.load(session, run_id)
         if not state:
@@ -221,6 +246,15 @@ class SolverStateService:
         if not state:
             return
         state.last_experiment_json = dict(experiment)
+        dimensions = set(state.experiment_dimensions_json or [])
+        if experiment.get("tool"):
+            dimensions.add(f"tool:{experiment['tool']}")
+        if experiment.get("arguments", {}).get("method"):
+            dimensions.add(f"method:{experiment['arguments']['method']}")
+        if experiment.get("arguments", {}).get("url"):
+            dimensions.add(f"path:{str(experiment['arguments']['url']).split('?', 1)[0]}")
+        state.experiment_dimensions_json = sorted(dimensions)
+        state.last_result_classification = str(experiment.get("result_classification") or "UNKNOWN")
         await session.commit()
 
     async def record_file_read(self, session: AsyncSession, run_id: str, *, path: str, start_line: int, end_line: int, content_sha256: str) -> None:
@@ -237,10 +271,33 @@ class SolverStateService:
         state = await self.load(session, run_id)
         if not state or not capability:
             return
-        ledger = dict(state.capability_ledger_json or {})
-        if capability not in ledger:
-            ledger[capability] = {"confirmed": True, "evidence": evidence or {}, "confirmed_at": datetime.now(UTC).isoformat()}
-            state.capability_ledger_json = ledger
+        ledger, plan, _current_node = reduce_capability(
+            state.capability_ledger_json or {}, state.attack_chain_plan_json or {}, capability, evidence
+        )
+        state.capability_ledger_json = ledger
+        state.attack_chain_plan_json = plan
+        state.no_progress_count = 0
+        state.last_progress_at = datetime.now(UTC)
+        await session.commit()
+
+    async def record_finish_rejection(self, session: AsyncSession, run_id: str, missing: list[str]) -> int:
+        state = await self.load(session, run_id)
+        if not state:
+            return 0
+        state.finish_rejection_count += 1
+        state.force_plan_action = 1 if state.finish_rejection_count >= 2 else state.force_plan_action
+        state.last_result_classification = "CONTROL_REJECTION"
+        state.rejected_paths_json = _unique_json_list(
+            state.rejected_paths_json or [],
+            {"source": "finish_gate", "code": "FINISH_PREMATURE", "missing_requirements": missing, "classification": "CONTROL_REJECTION"},
+        )
+        await session.commit()
+        return state.finish_rejection_count
+
+    async def require_plan_action(self, session: AsyncSession, run_id: str, required: bool = True) -> None:
+        state = await self.load(session, run_id)
+        if state:
+            state.force_plan_action = 1 if required else 0
             await session.commit()
 
 

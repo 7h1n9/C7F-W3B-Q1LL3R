@@ -234,7 +234,14 @@ class CodexSdkEngine(SolveEngine):
                 "Resume the authorized CTF analysis from the existing workspace. "
                 "Read CONTEXT.md, TODO.md, prior evidence and artifacts before taking the next step.",
             ):
-                yield event
+                # A recreated Bridge thread reports its bootstrap state as
+                # ANALYZING. The orchestrator has already moved a resumed Run
+                # to PLANNING, so forwarding that stale state causes an illegal
+                # PLANNING -> ANALYZING transition.
+                if event.event_type == "agent.message" and event.status == "ANALYZING":
+                    yield EngineEvent(event.event_type, event.payload)
+                else:
+                    yield event
             return
         try:
             async for event in self._stream_events(
@@ -253,4 +260,11 @@ class CodexSdkEngine(SolveEngine):
                 "Resume the authorized CTF analysis from the existing workspace. "
                 "Read CONTEXT.md, TODO.md, prior evidence and artifacts before taking the next step.",
             ):
-                yield event
+                # A recreated Bridge thread reports its bootstrap state as
+                # ANALYZING. The orchestrator has already moved a resumed Run
+                # to PLANNING, so forwarding that stale state causes an illegal
+                # PLANNING -> ANALYZING transition.
+                if event.event_type == "agent.message" and event.status == "ANALYZING":
+                    yield EngineEvent(event.event_type, event.payload)
+                else:
+                    yield event

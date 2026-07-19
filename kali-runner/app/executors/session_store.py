@@ -1,5 +1,6 @@
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+import secrets
 
 import httpx
 
@@ -16,6 +17,7 @@ class SessionStore:
     def __init__(self, ttl_seconds: int = 1800) -> None:
         self.ttl = timedelta(seconds=max(60, ttl_seconds))
         self._items: dict[tuple[str, str], SessionEntry] = {}
+        self._secrets: dict[tuple[str, str], str] = {}
 
     def _get(self, run_id: str, session_name: str, create: bool = True) -> SessionEntry | None:
         key = (run_id, session_name)
@@ -50,6 +52,30 @@ class SessionStore:
     def clear_run(self, run_id: str) -> None:
         for key in [key for key in self._items if key[0] == run_id]:
             self._items.pop(key, None)
+        for key in [key for key in self._secrets if key[0] == run_id]:
+            self._secrets.pop(key, None)
+
+    def put_secret(self, run_id: str, value: str, purpose: str = "opaque") -> str:
+        return_ref = f"sec_{secrets.token_urlsafe(18)}"
+        self._secrets[(run_id, return_ref)] = value
+        return return_ref
+
+    def get_secret(self, run_id: str, ref: str) -> str:
+        value = self._secrets.get((run_id, ref))
+        if value is None:
+            raise KeyError("secret reference not found")
+        return value
+
+    def list_secret_refs(self, run_id: str) -> list[dict]:
+        return [{"secret_ref": ref, "value_present": bool(value)} for (owner, ref), value in self._secrets.items() if owner == run_id]
+
+    def cookie_secret_ref(self, run_id: str, session_name: str, cookie_name: str) -> str | None:
+        item = self._get(run_id, session_name, create=False)
+        value = item.cookies.get(cookie_name) if item else None
+        return self.put_secret(run_id, value, "cookie") if value else None
+
+    def set_cookie_ref(self, run_id: str, session_name: str, cookie_name: str, ref: str) -> None:
+        self.cookies(run_id, session_name).set(cookie_name, self.get_secret(run_id, ref))
 
 
 session_store = SessionStore()

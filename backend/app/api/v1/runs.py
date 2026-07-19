@@ -65,6 +65,16 @@ def runner_is_remote() -> bool:
     return runner_host not in LOCAL_TARGET_HOSTS
 
 
+def remote_local_target_blocked(challenge: object, engine_type: str) -> bool:
+    return (
+        engine_type != "mock"
+        and getattr(challenge, "challenge_type", "WEB_TARGET") == "WEB_TARGET"
+        and target_is_local_to_backend(challenge)
+        and runner_is_remote()
+        and not get_settings().allow_remote_local_targets
+    )
+
+
 def read(item: SolveRun) -> RunRead:
     def iso(value: datetime | None) -> str | None:
         if value is None:
@@ -151,12 +161,7 @@ async def create_run(
     challenge_id: str, payload: RunCreate, session: AsyncSession = Depends(get_session)
 ) -> dict:
     challenge = await require_challenge(challenge_id, session)
-    if (
-        payload.engine_type != "mock"
-        and challenge.challenge_type == "WEB_TARGET"
-        and target_is_local_to_backend(challenge)
-        and runner_is_remote()
-    ):
+    if remote_local_target_blocked(challenge, payload.engine_type):
         raise DomainError(
             "TARGET_NOT_REACHABLE_FROM_RUNNER",
             "Remote Kali Runner cannot reach the Windows localhost target. Use the Windows LAN IP or configure a local Runner.",
@@ -269,6 +274,8 @@ async def create_run(
         item,
         challenge.challenge_type,
         [snapshot.skill_id for snapshot in snapshots],
+        challenge.name,
+        challenge.description,
     )
     await session.commit()
     await session.refresh(item)
@@ -448,15 +455,46 @@ async def restart_run(
     active_lease = await session.scalar(select(RunExecutionLease).where(RunExecutionLease.run_id == run.id))
     if active_lease:
         raise DomainError("RUN_ALREADY_EXECUTING", "Run already has an active execution lease.", status_code=409)
+    restart_mode = str((payload or {}).get("mode", "resume")).lower()
+    if restart_mode not in {"resume", "fresh"}:
+        raise DomainError("RESTART_MODE_INVALID", "Restart mode must be resume or fresh.", status_code=422)
     previous_status = run.status
     previous_error = {
         "code": run.last_error_code,
         "message": run.last_error_message,
     }
+    challenge = await session.get(Challenge, run.challenge_id)
+    if not challenge:
+        raise DomainError("CHALLENGE_NOT_FOUND", "Challenge not found.", status_code=404)
+    attachments = list(
+        (
+            await session.scalars(
+                select(ChallengeAttachment).where(
+                    ChallengeAttachment.challenge_id == challenge.id
+                )
+            )
+        ).all()
+    )
+    # A preserved Run workspace may contain an older target/allowlist after the
+    # challenge was edited. Refresh only generated run metadata; evidence and
+    # agent-created files remain intact.
+    run.workspace_path = str(create_workspace(run.id, challenge, attachments))
     restart_state(run)
     run.last_error_code = None
     run.last_error_message = None
     await session.commit()
+    if restart_mode == "fresh":
+        state = await solver_state_service.load(session, run.id)
+        if state:
+            state.no_progress_count = 0
+            state.finish_rejection_count = 0
+            state.force_plan_action = 0
+            state.last_decision_card_json = {}
+            state.last_experiment_json = {}
+            state.experiment_dimensions_json = []
+            await session.commit()
+        with contextlib.suppress(Exception):
+            await runner_client.clear_sessions(run.id)
     await solver_state_service.sync_from_run(session, run)
     await event_service.append(
         session,
@@ -467,6 +505,7 @@ async def restart_run(
             "previous_error": previous_error,
             "preserved_workspace": True,
             "preserved_evidence": True,
+            "restart_mode": restart_mode,
             "codex_thread_id_reused": bool(run.codex_thread_id),
         },
     )

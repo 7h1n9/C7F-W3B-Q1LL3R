@@ -22,6 +22,19 @@ from app.services.workspace_sync import workspace_sync_service
 from app.tools.policy import enforce_tool_policy
 from app.tools.registry import load_tool_definitions
 
+_SECRET_KEYS = {"token", "password", "passwd", "secret", "api_key", "authorization", "cookie", "set-cookie"}
+
+
+def _redact_arguments(value):
+    if isinstance(value, dict):
+        return {
+            str(key): "<redacted>" if str(key).lower() in _SECRET_KEYS else _redact_arguments(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_redact_arguments(item) for item in value]
+    return value
+
 
 class ToolGateway:
     async def invoke(
@@ -44,7 +57,8 @@ class ToolGateway:
         lease = await session.scalar(select(RunExecutionLease).where(RunExecutionLease.run_id == run.id))
         if not lease:
             raise DomainError("RUN_TOOL_NOT_ALLOWED", "An active attempt lease is required for tool execution.", {"run_id": run.id}, 409)
-        if name not in await effective_tools_for(session, run, challenge):
+        permitted_tools = await effective_tools_for(session, run, challenge)
+        if name not in permitted_tools:
             raise DomainError(
                 "TOOL_NOT_ALLOWED_FOR_CHALLENGE",
                 "This tool is not allowed by the current role or challenge limits.",
@@ -66,7 +80,7 @@ class ToolGateway:
         call = ToolCall(
             run_id=run.id,
             tool_name=name,
-            arguments_json=arguments,
+            arguments_json=_redact_arguments(arguments),
             status="REQUESTED",
             started_at=datetime.now(UTC),
             logical_tool_call_id=logical_tool_call_id or str(uuid.uuid4()),
@@ -188,7 +202,7 @@ class ToolGateway:
                 "size": artifact.size,
                 "sha256": artifact.sha256,
             }
-        unified = self._unified_result(result, artifact)
+        unified = self._unified_result(result, artifact, permitted_tools)
         facts = self._facts(name, result, relative.replace("\\", "/"))
         facts["tool_model_view"] = unified.model_view.model_dump()
         observation = Observation(
@@ -283,7 +297,9 @@ class ToolGateway:
         value = re.sub(r"(?i)(authorization|cookie|set-cookie|token|api[_-]?key|password)(\s*[:=]\s*)([^;\s,]+)", r"\1\2<redacted>", value)
         return value
 
-    def _unified_result(self, result: dict, artifact: Artifact | None) -> ToolExecutionResult:
+    def _unified_result(
+        self, result: dict, artifact: Artifact | None, permitted_tools: set[str]
+    ) -> ToolExecutionResult:
         status = str(result.get("status") or "FAILED")
         if status not in {"COMPLETED", "FAILED", "TIMEOUT", "CANCELLED"}:
             status = "FAILED"
@@ -320,7 +336,7 @@ class ToolGateway:
             retryable=status in {"FAILED", "TIMEOUT"},
             error_details={
                 "reason": str(result.get("error") or result.get("error_message") or result.get("summary") or ""),
-                "available_tools": sorted(load_tool_definitions()),
+                "available_tools": sorted(permitted_tools),
                 "readable_workspace": ["challenge.json", "AGENTS.md", "source/**", "attachments/**", "requests/**", "responses/**", "outputs/**", "evidence/**", "scripts/**", "notes/**", "final/**", "scratch/**"],
                 "recommended_action": "Fix the bounded arguments or choose a different minimal experiment; the run may continue.",
                 "auto_retry": status in {"TIMEOUT"},

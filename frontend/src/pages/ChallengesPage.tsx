@@ -132,9 +132,10 @@ export function ChallengesPage() {
     setRunChallenge(challenge);
     runForm.setFieldsValue({
       engine_type: "mock",
-      max_agent_steps: 12,
-      max_tool_calls: 12,
-      max_runtime_seconds: 300,
+      max_agent_steps: 120,
+      max_tool_calls: 120,
+      max_runtime_seconds: 900,
+      max_total_runtime_seconds: 3600,
       max_context_observations: 8,
     });
   };
@@ -263,9 +264,10 @@ export function ChallengesPage() {
         <Form form={runForm} layout="vertical" onFinish={(values) => createRun.mutate(values)}>
           <Form.Item name="engine_type" label="解题引擎" rules={[{ required: true }]}><Select options={[{ value: "mock", label: "Mock" }, { value: "openai_compatible", label: "OpenAI Compatible" }, { value: "codex_sdk", label: "Codex SDK" }]} /></Form.Item>
           <Form.Item noStyle shouldUpdate={(previous, current) => previous.engine_type !== current.engine_type}>{() => runForm.getFieldValue("engine_type") === "openai_compatible" ? <Form.Item name="model_config_id" label="模型配置" rules={[{ required: true, message: "请选择已启用的模型配置" }]}><Select options={(modelConfigs.data ?? []).filter((item) => item.enabled).map((item) => ({ value: item.id, label: item.name }))} /></Form.Item> : null}</Form.Item>
-          <Form.Item name="max_agent_steps" label="最大 Agent 步数"><InputNumber min={1} max={100} style={{ width: "100%" }} /></Form.Item>
-          <Form.Item name="max_tool_calls" label="最大工具调用次数"><InputNumber min={0} max={100} style={{ width: "100%" }} /></Form.Item>
-          <Form.Item name="max_runtime_seconds" label="最大运行时长（秒）"><InputNumber min={10} max={3600} style={{ width: "100%" }} /></Form.Item>
+          <Form.Item name="max_agent_steps" label="Run 累计最大 Agent 步数"><InputNumber min={1} max={300} style={{ width: "100%" }} /></Form.Item>
+          <Form.Item name="max_tool_calls" label="Run 累计最大逻辑工具调用"><InputNumber min={0} max={300} style={{ width: "100%" }} /></Form.Item>
+          <Form.Item name="max_runtime_seconds" label="单 Attempt 最大运行时长（秒）"><InputNumber min={10} max={3600} style={{ width: "100%" }} /></Form.Item>
+          <Form.Item name="max_total_runtime_seconds" label="Run 累计最大运行时长（秒）"><InputNumber min={10} max={14400} style={{ width: "100%" }} /></Form.Item>
           <Form.Item name="max_context_observations" hidden><InputNumber /></Form.Item>
         </Form>
       </Modal>

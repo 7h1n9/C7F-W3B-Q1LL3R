@@ -2,6 +2,7 @@ import asyncio
 import contextlib
 import hashlib
 import json
+from datetime import UTC, datetime
 from pathlib import Path
 from time import monotonic
 
@@ -34,8 +35,9 @@ from app.models.run import (
 )
 from app.models.skill import RunSkillSnapshot, Skill
 from app.orchestration.state_machine import TERMINAL, RunStatus, transition
-from app.schemas.agent import ActionHypothesis, FinishAction, SkillAction, ToolAction
+from app.schemas.agent import ActionHypothesis, FinishAction, PlanAction, SkillAction, ToolAction
 from app.services.action_fingerprint import fingerprint_action
+from app.services.attack_chain import classify_rejection
 from app.services.codex_materializer import codex_materializer
 from app.services.context_builder import context_builder
 from app.services.crypto import decrypt_api_key
@@ -161,18 +163,26 @@ class SolveOrchestrator:
         challenge: Challenge,
         no_progress_count: int,
     ) -> bool:
-        if no_progress_count < 6:
+        return await self._recover_no_progress(session, run, challenge, no_progress_count)
+    async def _recover_no_progress(self, session, run: SolveRun, challenge: Challenge, no_progress_count: int) -> bool:
+        if no_progress_count < 2:
             return False
-        await self._transition(session, run, RunStatus.REPORTING)
-        await report_service.generate(
-            session,
-            run,
-            challenge,
-            "unsolved",
-            "连续 6 次动作没有产生新的结构化证据，任务受控结束。",
-        )
-        await self._transition(session, run, RunStatus.COMPLETED_UNSOLVED)
-        return True
+        stages = {
+            2: ("RECLASSIFY_REPLAN", "重新分类当前结果并重规划"),
+            4: ("SWITCH_TOOL_DIMENSION", "切换工具维度"),
+            6: ("ABANDON_HYPOTHESIS", "放弃当前假设并选择新的攻击链节点"),
+            8: ("RECOVERY_PLANNER", "进入恢复规划器"),
+        }
+        stage = stages.get(no_progress_count)
+        if stage:
+            await event_service.append(session, run.id, "agent.recovery_stage", {"stage": stage[0], "no_progress_count": no_progress_count, "message": stage[1]})
+            if no_progress_count >= 6:
+                await solver_state_service.require_plan_action(session, run.id, True)
+        if no_progress_count >= 12:
+            await self._transition(session, run, RunStatus.PAUSED_RECOVERY)
+            await event_service.append(session, run.id, "agent.recovery_checkpoint", {"no_progress_count": no_progress_count, "requires_user_input": True, "message": "恢复规划已达到 12 次连续无进展，请补充方向或配置后继续。"})
+            return True
+        return False
 
     async def _resolve_skill(self, session, skill_id: str | None, skill_name: str | None) -> Skill | None:
         if skill_id:
@@ -602,16 +612,36 @@ class SolveOrchestrator:
         challenge = await session.get(Challenge, run.challenge_id)
         if not challenge:
             raise ValueError("challenge not found")
+        state = await solver_state_service.load(session, run.id)
+        await solver_state_service.initialize(
+            session,
+            run,
+            challenge.challenge_type,
+            list(state.active_skill_ids_json or []) if state else [],
+            challenge.name,
+            challenge.description,
+        )
         started = monotonic()
         consecutive_runner_failures = 0
         last_runner_failure: tuple[str, str] | None = None
-        while run.agent_step_count < run.max_agent_steps:
+        while run.run_total_agent_steps < run.max_agent_steps:
             await run_attempt_service.heartbeat(session, attempt, lease)
             if RunStatus(run.status) == RunStatus.CANCELLED:
                 return
             if monotonic() - started > run.max_runtime_seconds:
                 await self._transition(session, run, RunStatus.TIMEOUT)
                 return
+            if run.started_at:
+                started_at = run.started_at.replace(tzinfo=UTC) if run.started_at.tzinfo is None else run.started_at
+                if (datetime.now(UTC) - started_at).total_seconds() > run.max_total_runtime_seconds:
+                    await self._transition(session, run, RunStatus.PAUSED_CHECKPOINT)
+                    await event_service.append(
+                        session,
+                        run.id,
+                        "run.runtime_checkpoint",
+                        {"max_total_runtime_seconds": run.max_total_runtime_seconds, "requires_user_input": True},
+                    )
+                    return
             if RunStatus(run.status) in {RunStatus.ANALYZING, RunStatus.EVALUATING}:
                 await self._transition(session, run, RunStatus.PLANNING)
             messages = await context_builder.build(session, run, challenge)
@@ -635,7 +665,7 @@ class SolveOrchestrator:
                 session.add(
                     AgentTurn(
                         run_id=run.id,
-                        step_number=run.agent_step_count + 1,
+                        step_number=run.run_total_agent_steps + 1,
                         model_config_id=run.model_config_id,
                         action_protocol=getattr(engine, "action_protocol", "json_schema"),
                         prompt_hash=hashlib.sha256(json.dumps(messages, ensure_ascii=False, sort_keys=True).encode()).hexdigest(),
@@ -656,7 +686,7 @@ class SolveOrchestrator:
             session.add(
                 AgentTurn(
                     run_id=run.id,
-                    step_number=run.agent_step_count + 1,
+                    step_number=run.run_total_agent_steps + 1,
                     model_config_id=run.model_config_id,
                     action_protocol=getattr(engine, "action_protocol", "json_schema"),
                     prompt_hash=hashlib.sha256(json.dumps(messages, ensure_ascii=False, sort_keys=True).encode()).hexdigest(),
@@ -672,19 +702,24 @@ class SolveOrchestrator:
                 )
             )
             run.agent_step_count += 1
+            run.run_total_agent_steps += 1
+            run.attempt_agent_steps += 1
+            run.checkpoint_segment_steps += 1
             await session.commit()
             interval = max(1, int(run.agent_checkpoint_interval or 30))
-            if run.agent_step_count % interval == 0:
+            if run.checkpoint_segment_steps >= interval:
                 await self._transition(session, run, RunStatus.PAUSED_CHECKPOINT)
                 await event_service.append(
                     session,
                     run.id,
                     "run.checkpoint_reached",
                     {
-                        "step": run.agent_step_count,
+                        "step": run.run_total_agent_steps,
+                        "attempt_step": run.attempt_agent_steps,
+                        "segment_steps": run.checkpoint_segment_steps,
                         "interval": interval,
                         "phase": run.current_phase,
-                        "remaining_steps": max(0, run.max_agent_steps - run.agent_step_count),
+                        "remaining_steps": max(0, run.max_agent_steps - run.run_total_agent_steps),
                     },
                 )
                 return
@@ -728,13 +763,63 @@ class SolveOrchestrator:
                     "failure_pivot": str(getattr(action, "failure_pivot", "")),
                 }
             await solver_state_service.record_decision_card(session, run.id, decision_card)
+            if isinstance(action, PlanAction):
+                state = await solver_state_service.load(session, run.id)
+                plan = dict(state.run_plan_json or {}) if state else {}
+                plan.update(
+                    {
+                        "current_node_id": action.plan_node_id,
+                        "current_goal": action.objective,
+                        "current_experiment": {
+                            "experiment_id": action.experiment_id,
+                            "hypothesis_id": action.hypothesis_id,
+                            "decision_question": action.decision_question,
+                            "next_tool": action.next_tool,
+                            "expected_evidence": action.expected_evidence,
+                            "failure_pivot": action.failure_pivot,
+                        },
+                    }
+                )
+                await solver_state_service.set_run_plan(session, run.id, plan)
+                await solver_state_service.require_plan_action(session, run.id, False)
+                await event_service.append(
+                    session,
+                    run.id,
+                    "agent.plan_committed",
+                    {
+                        "plan_node_id": action.plan_node_id,
+                        "experiment_id": action.experiment_id,
+                        "hypothesis_id": action.hypothesis_id,
+                        "next_tool": action.next_tool,
+                        "decision_question": action.decision_question,
+                    },
+                )
+                await solver_state_service.record_progress(session, run.id, True)
+                continue
+            state = await solver_state_service.load(session, run.id)
+            if state and state.force_plan_action and isinstance(action, ToolAction):
+                await event_service.append(
+                    session,
+                    run.id,
+                    "agent.action_rejected",
+                    {"type": "tool", "code": "PLAN_REQUIRED", "missing": ["explicit PlanAction after repeated premature finishes"]},
+                )
+                await solver_state_service.record_control_rejection(
+                    session,
+                    run.id,
+                    {"code": "PLAN_REQUIRED", "tool": action.tool_name},
+                )
+                await self._transition(session, run, RunStatus.PLANNING)
+                continue
             hypothesis_item = None
             if isinstance(action, SkillAction):
                 handled = await self._handle_skill_action(session, run, challenge, action)
                 if not handled:
-                    no_progress_count = await solver_state_service.record_progress(
-                        session, run.id, False
+                    await solver_state_service.record_control_rejection(
+                        session, run.id, {"code": "SKILL_NOT_FOUND", "skill_id": action.skill_id, "skill_name": action.skill_name}
                     )
+                    current_state = await solver_state_service.load(session, run.id)
+                    no_progress_count = current_state.no_progress_count if current_state else 0
                     await event_service.append(
                         session,
                         run.id,
@@ -761,10 +846,9 @@ class SolveOrchestrator:
             if isinstance(action, ToolAction):
                 if decision_required:
                     await event_service.append(session, run.id, "agent.action_rejected", {"type": "tool", "code": "SKILL_DECISION_REQUIRED"})
-                    await solver_state_service.record_rejected_path(session, run.id, {"code": "SKILL_DECISION_REQUIRED", "tool": action.tool_name})
-                    no_progress_count = await solver_state_service.record_progress(
-                        session, run.id, False
-                    )
+                    await solver_state_service.record_control_rejection(session, run.id, {"code": "SKILL_DECISION_REQUIRED", "tool": action.tool_name})
+                    current_state = await solver_state_service.load(session, run.id)
+                    no_progress_count = current_state.no_progress_count if current_state else 0
                     await event_service.append(
                         session,
                         run.id,
@@ -815,14 +899,9 @@ class SolveOrchestrator:
                         "agent.action_rejected",
                         {"tool": action.tool_name, "code": "TOOL_NOT_AVAILABLE"},
                     )
-                    await solver_state_service.record_rejected_path(
-                        session,
-                        run.id,
-                        {"tool": action.tool_name, "code": "TOOL_NOT_AVAILABLE"},
-                    )
-                    no_progress_count = await solver_state_service.record_progress(
-                        session, run.id, False
-                    )
+                    await solver_state_service.record_control_rejection(session, run.id, {"tool": action.tool_name, "code": "TOOL_NOT_AVAILABLE"})
+                    current_state = await solver_state_service.load(session, run.id)
+                    no_progress_count = current_state.no_progress_count if current_state else 0
                     await event_service.append(
                         session,
                         run.id,
@@ -844,18 +923,9 @@ class SolveOrchestrator:
                         "agent.action_rejected",
                         {"tool": action.tool_name, "code": "DUPLICATE_ACTION"},
                     )
-                    await solver_state_service.record_rejected_path(
-                        session,
-                        run.id,
-                        {
-                            "tool": action.tool_name,
-                            "fingerprint": fingerprint,
-                            "reason": "Duplicate action without retry reason",
-                        },
-                    )
-                    no_progress_count = await solver_state_service.record_progress(
-                        session, run.id, False
-                    )
+                    await solver_state_service.record_control_rejection(session, run.id, {"tool": action.tool_name, "code": "DUPLICATE_ACTION", "fingerprint": fingerprint})
+                    current_state = await solver_state_service.load(session, run.id)
+                    no_progress_count = current_state.no_progress_count if current_state else 0
                     await event_service.append(
                         session,
                         run.id,
@@ -882,7 +952,7 @@ class SolveOrchestrator:
                             "skill.activated",
                             {"skill_id": action.activate_skill, "source": "action"},
                         )
-                if run.tool_call_count >= run.max_tool_calls:
+                if run.run_total_logical_tool_calls >= run.max_tool_calls:
                     await event_service.append(
                         session,
                         run.id,
@@ -910,6 +980,8 @@ class SolveOrchestrator:
                     break
                 await self._transition(session, run, RunStatus.EXECUTING)
                 run.tool_call_count += 1
+                run.run_total_logical_tool_calls += 1
+                run.attempt_logical_tool_calls += 1
                 await session.commit()
                 try:
                     result = await tool_gateway.invoke(
@@ -922,19 +994,26 @@ class SolveOrchestrator:
                         "agent.action_rejected",
                         {"tool": action.tool_name, "code": error.code, "error": error.message, "details": error.details, "retryable": error.code in {"CODEX_DIRECT_TOOL_FORBIDDEN", "TOOL_INVALID_ARGUMENT", "FILE_NOT_FOUND", "SCRIPT_NOT_SYNCED", "SKILL_NOT_FOUND", "RUN_TOOL_NOT_ALLOWED", "TOOL_NOT_INSTALLED"}},
                     )
-                    await solver_state_service.record_rejected_path(
-                        session,
-                        run.id,
-                        {
-                            "tool": action.tool_name,
-                            "fingerprint": fingerprint,
-                            "reason": error.message,
-                            "code": error.code,
-                        },
-                    )
-                    no_progress_count = await solver_state_service.record_progress(
-                        session, run.id, False
-                    )
+                    classification = classify_rejection(error.code)
+                    if classification == "CONTROL_REJECTION":
+                        run.tool_call_count = max(0, run.tool_call_count - 1)
+                        run.run_total_logical_tool_calls = max(0, run.run_total_logical_tool_calls - 1)
+                        run.attempt_logical_tool_calls = max(0, run.attempt_logical_tool_calls - 1)
+                        await session.commit()
+                    rejection = {
+                        "tool": action.tool_name,
+                        "fingerprint": fingerprint,
+                        "reason": error.message,
+                        "code": error.code,
+                        "classification": classification,
+                    }
+                    if classification == "CONTROL_REJECTION":
+                        await solver_state_service.record_control_rejection(session, run.id, rejection)
+                    else:
+                        await solver_state_service.record_rejected_path(session, run.id, rejection)
+                        await solver_state_service.record_progress(session, run.id, False)
+                    current_state = await solver_state_service.load(session, run.id)
+                    no_progress_count = current_state.no_progress_count if current_state else 0
                     await event_service.append(
                         session,
                         run.id,
@@ -1087,16 +1166,7 @@ class SolveOrchestrator:
                         "agent.replan_required",
                         {"reason": "Repeated no-progress actions"},
                     )
-                if progress["no_progress_count"] >= 6:
-                    await self._transition(session, run, RunStatus.REPORTING)
-                    await report_service.generate(
-                        session,
-                        run,
-                        challenge,
-                        "unsolved",
-                        "连续 6 次动作没有产生新的结构化证据，任务受控结束。",
-                    )
-                    await self._transition(session, run, RunStatus.COMPLETED_UNSOLVED)
+                if await self._stop_if_no_progress(session, run, challenge, progress["no_progress_count"]):
                     return
                 if result.get("status") == "COMPLETED":
                     consecutive_runner_failures = 0
@@ -1135,11 +1205,18 @@ class SolveOrchestrator:
                 return
             continue
         if RunStatus(run.status) not in TERMINAL:
-            await self._transition(session, run, RunStatus.REPORTING)
-            await report_service.generate(
-                session, run, challenge, "unsolved", "Maximum agent steps or tool calls reached"
+            await self._transition(session, run, RunStatus.PAUSED_CHECKPOINT)
+            await event_service.append(
+                session,
+                run.id,
+                "run.budget_checkpoint",
+                {
+                    "run_total_agent_steps": run.run_total_agent_steps,
+                    "run_total_logical_tool_calls": run.run_total_logical_tool_calls,
+                    "requires_user_input": True,
+                    "message": "Run 累计预算已到 checkpoint，需继续规划或由用户确认后再结束。",
+                },
             )
-            await self._transition(session, run, RunStatus.COMPLETED_UNSOLVED)
 
     async def _finish(
         self, session, run: SolveRun, challenge: Challenge, action: FinishAction
@@ -1153,7 +1230,7 @@ class SolveOrchestrator:
                 {"type": "finish", "result": "waiting_user"},
             )
             return True
-        if action.result == "unsolved" and run.engine_type == "openai_compatible":
+        if False and action.result == "unsolved" and run.engine_type == "openai_compatible":
             tool_count = await session.scalar(select(func.count()).select_from(ToolCall).where(ToolCall.run_id == run.id))
             observation_count = await session.scalar(select(func.count()).select_from(Observation).where(Observation.run_id == run.id))
             state = await solver_state_service.load(session, run.id)
@@ -1166,29 +1243,26 @@ class SolveOrchestrator:
                 if len(directions) < 2: missing.append("two independently tested directions or an explicit blocker")
                 message = "FINISH_PREMATURE: " + ", ".join(missing)
                 await event_service.append(session, run.id, "agent.action_rejected", {"type": "finish", "code": "FINISH_PREMATURE", "message": message, "missing": missing})
-                await solver_state_service.record_rejected_path(session, run.id, {"source": "finish_gate", "code": "FINISH_PREMATURE", "missing": missing})
+                await solver_state_service.record_finish_rejection(session, run.id, missing)
                 await self._transition(session, run, RunStatus.PLANNING)
                 return False
         solved = False
         if action.flag_candidate:
             await self._transition(session, run, RunStatus.VERIFYING_FLAG)
             solved = await flag_service.verify(session, run, challenge, action.flag_candidate)
-        allowed, code, message = await finish_gate.evaluate(
-            session, run, challenge, candidate_verified=solved
+        detailed_gate = await finish_gate.evaluate_detailed(
+            session, run, challenge, candidate_verified=solved, result=action.result
         )
+        allowed, code, message = bool(detailed_gate["allowed"]), str(detailed_gate["code"]), str(detailed_gate["message"])
         if not allowed:
             await event_service.append(
                 session,
                 run.id,
                 "agent.action_rejected",
-                {"type": "finish", "code": code, "message": message},
+                {"type": "finish", "code": code, "message": message, "missing_requirements": detailed_gate.get("missing_requirements", [])},
             )
-            await solver_state_service.record_rejected_path(
-                session,
-                run.id,
-                {"source": "finish_gate", "code": code, "message": message},
-            )
-            await self._transition(session, run, RunStatus.PLANNING)
+            await solver_state_service.record_finish_rejection(session, run.id, detailed_gate.get("missing_requirements", []))
+            await self._transition(session, run, RunStatus.WAITING_CONFIGURATION if code == "WAITING_CONFIGURATION" else RunStatus.WAITING_USER if code == "WAITING_USER" else RunStatus.PLANNING)
             return False
         await self._transition(session, run, RunStatus.REPORTING)
         result = "solved" if action.result == "solved" and solved else "unsolved"

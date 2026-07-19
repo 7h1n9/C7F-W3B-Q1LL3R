@@ -8,7 +8,7 @@ from app.models.skill import Skill
 from app.services.runner_client import runner_client
 
 router = APIRouter(prefix="/readiness", tags=["readiness"])
-EXPECTED_REVISION = "0015_solver_workspace_and_logical_tools"
+EXPECTED_REVISION = "0016_multi_chain_solver_controls"
 
 
 @router.get("/range-test")

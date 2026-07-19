@@ -20,12 +20,26 @@ async def stream_events(
         for event in await event_service.history(session, run_id, after):
             yield f"id: {event.sequence}\nevent: {event.event_type}\ndata: {json.dumps(event_service.serialize(event))}\n\n"
         subscription = event_bus.subscribe(run_id)
-        while not await request.is_disconnected():
-            try:
-                event = await asyncio.wait_for(anext(subscription), timeout=15)
+        pending_event: asyncio.Task | None = asyncio.create_task(anext(subscription))
+        try:
+            while not await request.is_disconnected():
+                try:
+                    # Shield the pending read so a heartbeat timeout does not
+                    # cancel the async generator behind the subscription.
+                    event = await asyncio.wait_for(asyncio.shield(pending_event), timeout=15)
+                except TimeoutError:
+                    yield ": heartbeat\n\n"
+                    continue
+                except StopAsyncIteration:
+                    break
                 yield f"id: {event['sequence']}\nevent: {event['event_type']}\ndata: {json.dumps(event)}\n\n"
-            except TimeoutError:
-                yield ": heartbeat\n\n"
+                pending_event = asyncio.create_task(anext(subscription))
+        finally:
+            if pending_event is not None and not pending_event.done():
+                pending_event.cancel()
+            if pending_event is not None:
+                await asyncio.gather(pending_event, return_exceptions=True)
+            await subscription.aclose()
 
     return StreamingResponse(
         event_stream(),

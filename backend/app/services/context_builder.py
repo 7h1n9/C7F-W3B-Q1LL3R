@@ -49,6 +49,13 @@ class ContextBuilder:
             if item.enabled and item.name in permitted
         ]
 
+    @staticmethod
+    def _role_snapshot(run: SolveRun, permitted: set[str]) -> dict:
+        """Keep model-visible role tools aligned with live Runner capability."""
+        snapshot = dict(run.role_snapshot_json or {})
+        snapshot["tools"] = sorted(permitted)
+        return snapshot
+
     async def build(self, session: AsyncSession, run: SolveRun, challenge: Challenge) -> list[dict]:
         state = await solver_state_service.load(session, run.id)
         limit = run.max_context_observations
@@ -123,6 +130,7 @@ class ContextBuilder:
         )
         permitted = await effective_tools_for(session, run, challenge)
         tool_schema = self._tool_schema(load_tool_definitions(), permitted)
+        role_snapshot = self._role_snapshot(run, permitted)
         active_skill_ids = set((state.active_skill_ids_json if state else []) or [])
         raw_recommendations = (state.skill_recommendations_json if state else []) or []
         best_recommendations: dict[str, dict] = {}
@@ -179,7 +187,7 @@ class ContextBuilder:
         if started_at and started_at.tzinfo is None:
             started_at = started_at.replace(tzinfo=UTC)
         context = {
-            "Role Snapshot": run.role_snapshot_json or {},
+            "Role Snapshot": role_snapshot,
             "Challenge-Type Methodology Skill": {
                 "challenge_type": challenge.challenge_type,
                 "current_phase": (state.current_phase if state else run.current_phase),
@@ -197,6 +205,7 @@ class ContextBuilder:
                 ],
             },
             "RunPlan": (state.run_plan_json if state else {}),
+            "AttackChainPlan": (state.attack_chain_plan_json if state else {}),
             "Capability Ledger": (state.capability_ledger_json if state else {}),
             "Solver State": {
                 "current_phase": state.current_phase if state else run.current_phase,
@@ -206,6 +215,9 @@ class ContextBuilder:
                 "previous_action_fingerprints": dict(list((state.action_fingerprints_json if state else {}).items())[-5:]),
                 "active_skill_ids": sorted(active_skill_ids),
                 "no_progress_count": state.no_progress_count if state else 0,
+                "last_result_classification": state.last_result_classification if state else None,
+                "finish_rejection_count": state.finish_rejection_count if state else 0,
+                "force_plan_action": bool(state.force_plan_action) if state else False,
                 "last_progress_at": state.last_progress_at.isoformat() if state and state.last_progress_at else None,
                 "last_action": {
                     "tool_name": last_call.tool_name,
@@ -214,7 +226,7 @@ class ContextBuilder:
                 }
                 if last_call
                 else None,
-                "last_result_classification": last_observation.facts_json if last_observation else None,
+                "last_tool_result": last_observation.facts_json if last_observation else None,
                 "read_files": state.read_files_json if state else [],
                 "read_ranges": state.read_ranges_json if state else [],
             },
@@ -250,8 +262,13 @@ class ContextBuilder:
             "Skill Recommendations": skill_recommendations,
             "Challenge Lesson": lessons,
             "Remaining Budget": {
-                "agent_steps": max(run.max_agent_steps - run.agent_step_count, 0),
-                "tool_calls": max(run.max_tool_calls - run.tool_call_count, 0),
+                "agent_steps": max(run.max_agent_steps - (run.run_total_agent_steps or run.agent_step_count), 0),
+                "tool_calls": max(run.max_tool_calls - (run.run_total_logical_tool_calls or run.tool_call_count), 0),
+                "run_total_agent_steps": run.run_total_agent_steps or run.agent_step_count,
+                "attempt_agent_steps": run.attempt_agent_steps,
+                "attempt_logical_tool_calls": run.attempt_logical_tool_calls,
+                "checkpoint_segment_steps": run.checkpoint_segment_steps,
+                "current_attempt_number": run.current_attempt_number,
                 "runtime_seconds": max(
                     run.max_runtime_seconds
                     - (
@@ -268,7 +285,7 @@ class ContextBuilder:
             ],
         }
         serialized = json.dumps(context, ensure_ascii=False)
-        budget = 40_000
+        budget = 30_000
         if len(serialized) > budget:
             # Preserve current state, latest evidence and schemas; discard oldest
             # history before asking the provider for another action.
@@ -311,8 +328,10 @@ class ContextBuilder:
                 "role": "system",
                 "content": (
                     f"{CORE_PROMPT}\n\n"
-                    f"Role snapshot:\n{json.dumps(run.role_snapshot_json or {}, ensure_ascii=False)}\n\n"
-                    "Return exactly one JSON action and keep the response grounded in the ordered context."
+                    f"Role snapshot:\n{json.dumps(role_snapshot, ensure_ascii=False)}\n\n"
+                    "Return exactly one JSON action and keep the response grounded in the ordered context. "
+                    "Use PlanAction before ToolAction when selecting or changing an attack-chain node; "
+                    "a PlanAction does not consume a tool budget. Never treat schema, skill, duplicate, or policy rejection as vulnerability-negative evidence."
                 ),
             },
             {"role": "user", "content": json.dumps(context, ensure_ascii=False)},

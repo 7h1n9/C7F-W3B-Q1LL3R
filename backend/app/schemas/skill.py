@@ -3,7 +3,7 @@ import re
 from pydantic import BaseModel, Field, field_validator
 
 KNOWN_TOOLS = {
-    "http_request", "http_session_request", "http_extract", "whatweb_fingerprint", "js_asset_analyze", "source_map_analyze", "file_type", "strings_extract", "archive_list", "content_discovery", "sqlmap_detect", "jwt_inspect", "nmap_service_probe", "nikto_scan", "binwalk_scan", "exiftool_metadata",
+    "http_request", "http_session_request", "http_extract", "session_inspect", "session_list_secret_refs", "jwt_clone_claims", "jwt_sign", "http_session_set_cookie_ref", "whatweb_fingerprint", "js_asset_analyze", "source_map_analyze", "file_type", "strings_extract", "archive_list", "content_discovery", "sqlmap_detect", "jwt_inspect", "nmap_service_probe", "nikto_scan", "binwalk_scan", "exiftool_metadata",
     "file_read",
     "file_search",
     "python_run",

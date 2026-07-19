@@ -21,33 +21,8 @@ function debug(event: string, detail: Record<string, unknown> = {}) {
   }
 }
 
-const tools = [
-  ["workspace_list", "List files in the current run workspace only."],
-  ["workspace_tree", "Show the allowed workspace tree and manifest."],
-  ["workspace_stat", "Stat one readable workspace path."],
-  ["workspace_read", "Read a bounded line range from a current-workspace relative path."],
-  ["workspace_search", "Search text in the current run workspace only."],
-  ["workspace_write_file", "Create a generated workspace file and sync it to Runner."],
-  ["workspace_patch_file", "Apply one exact text or line-range patch to a generated file."],
-  ["workspace_mkdir", "Create a generated workspace directory."],
-  ["workspace_copy", "Copy readable workspace material into a generated area."],
-  ["workspace_move_generated", "Move generated material into a final draft."],
-  ["workspace_delete_generated", "Delete only agent-generated material."],
-  ["workspace_extract_archive", "Safely extract an attachment/archive into extracted/."],
-  ["workspace_write_note", "Write a note/script/final file under the current run workspace."],
-  ["http_request", "Send one allowlisted HTTP request."],
-  ["http_session_request", "Send one request using the bounded HTTP session."],
-  ["http_extract", "Extract structured facts from an HTTP response artifact."],
-  ["content_discovery", "Run bounded content discovery against the target."],
-  ["python_run", "Run a legacy Python script through the Runner."],
-  ["script_run", "Run a synced Python, Node, or Bash script."],
-  ["sandbox_exec", "Run one allowlisted offline executable with argv only."],
-  ["jwt_inspect", "Inspect a JWT without network access."],
-  ["file_type", "Identify a workspace file type."],
-  ["strings_extract", "Extract printable strings from a workspace file."],
-] as const;
-
 const compatibilityTools = new Set(["invoke_tool", "list_tools"]);
+let advertisedTools = new Set<string>();
 
 function schemaFor(name: string) {
   if (name.startsWith("workspace_")) return { type: "object", additionalProperties: true };
@@ -58,13 +33,18 @@ function schemaFor(name: string) {
   return { type: "object", additionalProperties: true };
 }
 
-function toolDefinitions() {
-  return tools.map(([name, description]) => ({
+async function toolDefinitions() {
+  const catalog = await backend("list_tools", {});
+  const candidateRows: unknown = catalog?.tools;
+  const rows: unknown[] = Array.isArray(candidateRows) ? candidateRows : [];
+  const definitions = rows
+    .filter((item: unknown): item is Record<string, unknown> => Boolean(item) && typeof item === "object" && typeof (item as Record<string, unknown>).name === "string")
+    .map((item: Record<string, unknown>) => ({
     // MCP tool names are scoped by the server name (`ctfctl`) by the Codex
     // client. Returning a second `ctfctl.` prefix makes calls appear as
     // A second server namespace would make workspace calls fail before dispatch.
-    name,
-    description,
+    name: String(item.name),
+    description: String(item.description ?? "Run-scoped CTF tool."),
     // Codex uses MCP safety annotations to decide whether a tool call can run
     // under approval_policy=never. These operations remain server-enforced by
     // the run scope and Tool Gateway; the hint avoids an implicit client-side
@@ -74,16 +54,22 @@ function toolDefinitions() {
       destructiveHint: false,
       openWorldHint: false,
     },
-    inputSchema: name === "workspace_read" ? { type: "object", properties: { path: { type: "string" }, start_line: { type: "integer" }, end_line: { type: "integer" }, max_chars: { type: "integer" } }, required: ["path"], additionalProperties: false }
-      : name === "workspace_search" ? { type: "object", properties: { query: { type: "string" }, max_results: { type: "integer" } }, required: ["query"], additionalProperties: false }
-      : name === "workspace_write_note" ? { type: "object", properties: { path: { type: "string" }, content: { type: "string" } }, required: ["path", "content"], additionalProperties: false }
-      : schemaFor(name),
+    inputSchema: item.parameters && typeof item.parameters === "object" && Object.keys(item.parameters as object).length
+      ? item.parameters
+      : schemaFor(String(item.name)),
   }));
+  advertisedTools = new Set(definitions.map((item) => item.name));
+  return definitions;
 }
 
 async function backend(method: string, params: Record<string, unknown>) {
-  const directTools = new Set(["http_request", "http_session_request", "http_extract", "content_discovery", "python_run", "script_run", "jwt_inspect", "file_type", "strings_extract", "sandbox_exec"]);
-  const endpoint = directTools.has(method) ? `tool/${method}` : method;
+  const dedicatedMethods = new Set([
+    "workspace_list", "workspace_tree", "workspace_stat", "workspace_read", "workspace_search",
+    "workspace_write_file", "workspace_write_note", "workspace_patch_file", "workspace_mkdir",
+    "workspace_copy", "workspace_move_generated", "workspace_delete_generated",
+    "workspace_extract_archive", "list_tools", "invoke_tool",
+  ]);
+  const endpoint = dedicatedMethods.has(method) ? method : `tool/${method}`;
   const response = await fetch(`${backendUrl}/api/v1/internal/ctfctl/${endpoint}`, {
     method: "POST",
     headers: { "content-type": "application/json", "x-ctfctl-access-key": accessKey },
@@ -96,7 +82,7 @@ async function backend(method: string, params: Record<string, unknown>) {
 
 async function dispatch(name: string, args: Record<string, unknown>) {
   const shortName = name.replace(/^ctfctl\./, "");
-  if (!tools.some(([tool]) => tool === shortName) && !compatibilityTools.has(shortName)) throw new Error("Unknown ctfctl tool");
+  if (!advertisedTools.has(shortName) && !compatibilityTools.has(shortName)) throw new Error("Unknown or unavailable ctfctl tool");
   return backend(shortName, args);
 }
 
@@ -110,7 +96,7 @@ for await (const line of input) {
     if (request.method === "notifications/initialized") continue;
     let result: unknown;
     if (request.method === "initialize") result = { protocolVersion: "2024-11-05", capabilities: { tools: {} }, serverInfo: { name: "ctfctl", version: "1.0.0" } };
-    else if (request.method === "tools/list") result = { tools: toolDefinitions() };
+    else if (request.method === "tools/list") result = { tools: await toolDefinitions() };
     else if (request.method === "tools/call") {
       const params = request.params ?? {};
       const value = await dispatch(String(params.name ?? ""), (params.arguments ?? {}) as Record<string, unknown>);

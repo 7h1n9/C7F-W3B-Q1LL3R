@@ -201,6 +201,7 @@ class ProgressEvaluator:
                     "reason": novelty.reason or str(result.get("error") or result.get("summary") or "unknown"),
                     "facts": facts,
                     "evidence_fingerprint": novelty.evidence_fingerprint,
+                    "classification": "NEGATIVE" if result.get("status") == "COMPLETED" else "BLOCKED",
                 },
             )
 

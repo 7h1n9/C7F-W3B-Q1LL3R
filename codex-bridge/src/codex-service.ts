@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, symlinkSync } from "node:fs";
+import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -18,11 +19,18 @@ export class CodexService {
   private readonly scopes = new Map<string, CtfctlScope>();
 
   health(): Record<string, unknown> {
+    let ctfctlMcpReady = true;
+    try {
+      resolveCtfctlMcpLaunch();
+    } catch {
+      ctfctlMcpReady = false;
+    }
     return {
       status: "ok",
       mock_mode: this.mock,
       executable: !this.mock,
       codex_sdk_loaded: true,
+      ctfctl_mcp_ready: ctfctlMcpReady,
       version: bridgeVersion(),
       active_threads: this.threads.size(),
     };
@@ -95,7 +103,7 @@ export class CodexService {
 
   private createRealThread(input: ThreadRequest): SdkThread {
     const scope = normalizeScope(input);
-    const mcpProgram = resolve(fileURLToPath(new URL("./ctfctl-mcp.js", import.meta.url)));
+    const mcpLaunch = resolveCtfctlMcpLaunch();
     // SDK 0.144.1 exposes MCP registration through Codex.config, which it
     // serializes into native CLI configuration. The scope is supplied as
     // subprocess environment, never through model-visible prompt text.
@@ -103,8 +111,8 @@ export class CodexService {
       config: {
         mcp_servers: {
           ctfctl: {
-            command: process.execPath,
-            args: [mcpProgram],
+            command: mcpLaunch.command,
+            args: mcpLaunch.args,
             env: {
               CTFCTL_SCOPE: JSON.stringify(scope),
               CTFCTL_BACKEND_URL: process.env.CTFCTL_BACKEND_URL ?? "http://127.0.0.1:8000",
@@ -129,6 +137,30 @@ export class CodexService {
       approvalPolicy: "never",
     }) as unknown as SdkThread;
   }
+}
+
+export function resolveCtfctlMcpLaunch(): { command: string; args: string[] } {
+  const compiledProgram = resolve(
+    fileURLToPath(new URL("./ctfctl-mcp.js", import.meta.url)),
+  );
+  if (existsSync(compiledProgram)) {
+    return { command: process.execPath, args: [compiledProgram] };
+  }
+
+  // `npm run dev` executes this file directly from src/ through tsx. In that
+  // mode the sibling JavaScript file does not exist, so launch the TypeScript
+  // MCP entrypoint through the installed tsx CLI instead of silently creating
+  // a Codex thread with no usable ctfctl server.
+  const sourceProgram = resolve(
+    fileURLToPath(new URL("./ctfctl-mcp.ts", import.meta.url)),
+  );
+  if (existsSync(sourceProgram)) {
+    const require = createRequire(import.meta.url);
+    const tsxCli = require.resolve("tsx/cli");
+    return { command: process.execPath, args: [tsxCli, sourceProgram] };
+  }
+
+  throw new Error("CTFCTL_MCP_ENTRYPOINT_NOT_FOUND");
 }
 
 type CtfctlScope = { run_id: string; challenge_id: string; workspace_root: string; allowed_hosts: string[]; attempt_id: string; lease_token: string; thread_id?: string; model_turn_id?: string };

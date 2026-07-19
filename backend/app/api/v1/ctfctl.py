@@ -377,7 +377,7 @@ async def list_tools(payload: Request, x_ctfctl_access_key: str | None = Header(
     allowed = await effective_tools_for(session, run, challenge)
     workspace_tools = {
         "workspace_list", "workspace_tree", "workspace_stat", "workspace_read", "workspace_search",
-        "workspace_write_file", "workspace_patch_file", "workspace_mkdir", "workspace_copy",
+        "workspace_write_file", "workspace_write_note", "workspace_patch_file", "workspace_mkdir", "workspace_copy",
         "workspace_move_generated", "workspace_delete_generated", "workspace_extract_archive",
     }
     return {"data": {"tools": [{"name": name, "description": definitions[name].description, "parameters": definitions[name].parameters} for name in sorted(allowed | {"script_run", "sandbox_exec"}) if name in definitions and definitions[name].enabled] + [{"name": name, "description": "Run-scoped workspace operation.", "parameters": {}} for name in sorted(workspace_tools)]}}

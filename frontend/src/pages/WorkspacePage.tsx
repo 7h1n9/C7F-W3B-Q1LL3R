@@ -473,8 +473,10 @@ export function WorkspacePage() {
                     {
                       key: "steps",
                       label: "Agent 步数",
-                      children: `${run.data?.agent_step_count ?? 0} / ${run.data?.max_agent_steps ?? 0}`,
+                      children: `当前 Attempt ${run.data?.attempt_agent_steps ?? run.data?.agent_step_count ?? 0} / 30 · Run 累计 ${run.data?.run_total_agent_steps ?? run.data?.agent_step_count ?? 0} / ${run.data?.max_agent_steps ?? 0}`,
                     },
+                    { key: "attempt", label: "Checkpoint / Attempt", children: `${run.data?.checkpoint_segment_steps ?? 0} / ${run.data?.agent_checkpoint_interval ?? 30} · 第 ${run.data?.current_attempt_number ?? 0} 次 Attempt` },
+                    { key: "tools-budget", label: "有效逻辑工具调用", children: `${run.data?.attempt_logical_tool_calls ?? run.data?.tool_call_count ?? 0} / ${run.data?.max_tool_calls ?? 0}` },
                     { key: "error", label: "最近错误", children: run.data?.last_error_message ?? "—" },
                   ]}
                 />

@@ -1,9 +1,12 @@
+import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from app.core.exceptions import DomainError
 from app.services.challenge_lessons import ChallengeLessonService
+from app.services.workspace import create_workspace
 from app.services.workspace_policy import WorkspacePolicy, file_manifest
 from app.tools.registry import load_tool_definitions
 
@@ -36,3 +39,33 @@ def test_strategy_only_lesson_service_never_replays_by_default() -> None:
     service = ChallengeLessonService()
     assert service.mode == "strategy_only"
     assert "flag" not in str(service.extract)
+
+
+def test_workspace_refresh_updates_target_without_deleting_notes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        "app.services.workspace.get_settings",
+        lambda: SimpleNamespace(workspace_root=tmp_path),
+    )
+    challenge = SimpleNamespace(
+        id="challenge-1",
+        name="target",
+        challenge_type="WEB_TARGET",
+        target_url="http://old.test/",
+        allowed_hosts=["old.test"],
+        flag_pattern=r"flag\{[^}]+\}",
+        metadata_json={},
+    )
+    workspace = create_workspace("run-1", challenge)
+    note = workspace / "notes" / "evidence.md"
+    note.write_text("preserve me", encoding="utf-8")
+
+    challenge.target_url = "http://new.test/"
+    challenge.allowed_hosts = ["new.test"]
+    create_workspace("run-1", challenge)
+
+    manifest = json.loads((workspace / "challenge.json").read_text(encoding="utf-8"))
+    assert manifest["target_url"] == "http://new.test/"
+    assert manifest["allowed_hosts"] == ["new.test"]
+    assert note.read_text(encoding="utf-8") == "preserve me"

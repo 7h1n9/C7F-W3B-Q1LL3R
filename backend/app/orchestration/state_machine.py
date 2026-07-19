@@ -89,6 +89,9 @@ ALLOWED: dict[RunStatus, set[RunStatus]] = {
     },
     RunStatus.EXECUTING: {
         RunStatus.EVALUATING,
+        # A controlled stop (budget/no-progress ceiling) may finish directly
+        # after a rejected or failed tool action, before EVALUATING is entered.
+        RunStatus.REPORTING,
         RunStatus.FAILED_ENGINE,
         RunStatus.FAILED_TOOL,
         RunStatus.FAILED_RUNNER,
@@ -117,7 +120,11 @@ ALLOWED: dict[RunStatus, set[RunStatus]] = {
         RunStatus.CANCELLED,
     },
     RunStatus.PAUSED_RATE_LIMIT: {RunStatus.PLANNING, RunStatus.WAITING_USER, RunStatus.CANCELLED},
-    RunStatus.PAUSED_CHECKPOINT: {RunStatus.PLANNING, RunStatus.CANCELLED},
+    RunStatus.PAUSED_CHECKPOINT: {
+        RunStatus.PLANNING,
+        RunStatus.PAUSED_RECOVERY,
+        RunStatus.CANCELLED,
+    },
     RunStatus.PAUSED_RECOVERY: {RunStatus.PLANNING, RunStatus.CANCELLED},
     RunStatus.WAITING_CONFIGURATION: {RunStatus.PLANNING, RunStatus.CANCELLED},
     RunStatus.RETRYING: {RunStatus.PLANNING, RunStatus.WAITING_CONFIGURATION, RunStatus.CANCELLED},
@@ -164,10 +171,12 @@ def restart(run: object) -> RunStatus:
     run.status = RunStatus.WAITING_USER.value
     run.current_phase = RunStatus.WAITING_USER.value
     run.finished_at = None
-    # Limits apply to a recovery attempt, not to every historical turn retained
-    # on the Run.  Without this reset, a no-progress run that exhausted its
-    # budget can never execute a tool after a configuration repair.
+    # Restart creates a fresh Attempt but must never erase durable Run totals.
+    # Legacy counters mirror the current Attempt for compatibility.
     run.agent_step_count = 0
     run.tool_call_count = 0
+    run.attempt_agent_steps = 0
+    run.attempt_logical_tool_calls = 0
+    run.checkpoint_segment_steps = 0
     run.infrastructure_retry_count = 0
     return current

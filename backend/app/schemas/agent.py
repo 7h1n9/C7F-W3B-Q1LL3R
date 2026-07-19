@@ -38,6 +38,25 @@ class ToolAction(BaseModel):
     decision_card: DecisionCard | None = None
 
 
+class PlanAction(BaseModel):
+    """Planning is explicit and never consumes a tool-call budget."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    type: Literal["plan"]
+    phase: str = "PLANNING"
+    objective: str = Field(min_length=1, max_length=2000)
+    reason: str = Field(min_length=1, max_length=2000)
+    plan_node_id: str = Field(min_length=1, max_length=80)
+    hypothesis_id: str | None = None
+    experiment_id: str | None = None
+    decision_question: str = Field(min_length=1, max_length=2000)
+    next_tool: str | None = Field(default=None, max_length=100)
+    expected_evidence: str = Field(min_length=1, max_length=2000)
+    failure_pivot: str = Field(min_length=1, max_length=2000)
+    decision_card: DecisionCard | None = None
+
+
 class SkillAction(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
@@ -69,4 +88,4 @@ class FinishAction(BaseModel):
     decision_card: DecisionCard | None = None
 
 
-AgentAction = Annotated[ToolAction | SkillAction | FinishAction, Field(discriminator="type")]
+AgentAction = Annotated[PlanAction | ToolAction | SkillAction | FinishAction, Field(discriminator="type")]

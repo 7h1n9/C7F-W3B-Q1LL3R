@@ -11,6 +11,7 @@ from fastapi import HTTPException
 
 from app.config import settings
 from app.executors.http_executor import _extract_body
+from app.executors.session_store import session_store
 from app.models import JobRequest
 from app.workspace.paths import safe_child, workspace_for
 
@@ -116,7 +117,10 @@ async def content_discovery(request: JobRequest) -> dict:
 
 
 async def jwt_inspect(request: JobRequest) -> dict:
-    token = str(request.arguments.get("token", ""))
+    try:
+        token = session_store.get_secret(request.run_id, str(request.arguments["token_ref"])) if request.arguments.get("token_ref") else str(request.arguments.get("token", ""))
+    except KeyError:
+        return {"summary": "JWT secret reference not found", "status": "FAILED", "error_code": "SECRET_REF_NOT_FOUND"}
     parts = token.split(".")
     if len(parts) != 3:
         return {"summary": "Not a JWT-shaped value", "status": "FAILED", "error_code": "JWT_FORMAT_INVALID"}
@@ -126,7 +130,59 @@ async def jwt_inspect(request: JobRequest) -> dict:
         claims = json.loads(base64.urlsafe_b64decode(parts[1] + "=" * (-len(parts[1]) % 4)))
     except (ValueError, json.JSONDecodeError) as error:
         return {"summary": "JWT decode failed", "status": "FAILED", "error": str(error)}
-    return {"summary": "JWT header and claims decoded", "extracted_facts": {"header": header, "claims": claims, "algorithm": header.get("alg")}}
+    return {"summary": "JWT header and claims decoded", "extracted_facts": {"header": header, "claims": claims, "algorithm": header.get("alg"), "token_ref": session_store.put_secret(request.run_id, token, "jwt")}}
+
+
+async def session_inspect(request: JobRequest) -> dict:
+    session_name = str(request.arguments.get("session_name") or "default")
+    facts = session_store.inspect(request.run_id, session_name)
+    refs = {name: session_store.cookie_secret_ref(request.run_id, session_name, name) for name in facts.get("cookie_names", [])}
+    return {"summary": "HTTP session inspected", "extracted_facts": {**facts, "secret_refs": {key: value for key, value in refs.items() if value}}}
+
+
+async def session_list_secret_refs(request: JobRequest) -> dict:
+    return {"summary": "Secret references listed", "extracted_facts": {"secret_refs": session_store.list_secret_refs(request.run_id)}}
+
+
+async def jwt_clone_claims(request: JobRequest) -> dict:
+    import base64
+    try:
+        token = session_store.get_secret(request.run_id, str(request.arguments["token_ref"]))
+        parts = token.split(".")
+        claims = json.loads(base64.urlsafe_b64decode(parts[1] + "=" * (-len(parts[1]) % 4)))
+        claims.update(dict(request.arguments.get("claims") or {}))
+        encoded = base64.urlsafe_b64encode(json.dumps(claims, separators=(",", ":")).encode()).decode().rstrip("=")
+        clone = f"{parts[0]}.{encoded}.{parts[2]}"
+        return {"summary": "JWT claims cloned", "extracted_facts": {"token_ref": session_store.put_secret(request.run_id, clone, "jwt-clone"), "claim_keys": sorted(claims)}}
+    except (KeyError, ValueError, json.JSONDecodeError, IndexError):
+        return {"summary": "JWT claims clone failed", "status": "FAILED", "error_code": "JWT_CLONE_FAILED"}
+
+
+async def jwt_sign(request: JobRequest) -> dict:
+    import base64
+    import hashlib
+    import hmac
+    try:
+        secret = session_store.get_secret(request.run_id, str(request.arguments["secret_ref"]))
+        header = dict(request.arguments.get("header") or {"alg": "HS256", "typ": "JWT"})
+        claims = dict(request.arguments.get("claims") or {})
+        def encode(value: dict) -> str:
+            return base64.urlsafe_b64encode(json.dumps(value, separators=(",", ":")).encode()).decode().rstrip("=")
+        signing_input = f"{encode(header)}.{encode(claims)}"
+        signature = base64.urlsafe_b64encode(hmac.new(secret.encode(), signing_input.encode(), hashlib.sha256).digest()).decode().rstrip("=")
+        token_ref = session_store.put_secret(request.run_id, f"{signing_input}.{signature}", "jwt-signed")
+        return {"summary": "JWT signed", "extracted_facts": {"token_ref": token_ref, "algorithm": header.get("alg"), "claim_keys": sorted(claims)}}
+    except (KeyError, ValueError):
+        return {"summary": "JWT signing failed", "status": "FAILED", "error_code": "JWT_SIGN_FAILED"}
+
+
+async def http_session_set_cookie_ref(request: JobRequest) -> dict:
+    try:
+        session_name = str(request.arguments["session_name"])
+        session_store.set_cookie_ref(request.run_id, session_name, str(request.arguments["cookie_name"]), str(request.arguments["secret_ref"]))
+        return {"summary": "Session cookie updated from secret reference", "extracted_facts": session_store.inspect(request.run_id, session_name)}
+    except (KeyError, ValueError):
+        return {"summary": "Session cookie update failed", "status": "FAILED", "error_code": "SECRET_REF_NOT_FOUND"}
 
 
 async def pcap_placeholder(request: JobRequest) -> dict:

@@ -50,7 +50,7 @@ class BuiltinSkillSyncService:
     def _challenge_tools(challenge_types: list[str]) -> list[str]:
         if challenge_types == ["TRAFFIC_ANALYSIS"]:
             return ["file_read", "file_search", "python_run", "pcap_metadata", "pcap_protocols", "pcap_query", "pcap_tcp_stream", "pcap_http_objects", "pcap_dns_summary", "pcap_credentials"]
-        return ["http_request", "http_session_request", "http_extract", "whatweb_fingerprint", "js_asset_analyze", "source_map_analyze", "file_type", "strings_extract", "archive_list", "file_read", "file_search", "python_run", "content_discovery", "jwt_inspect"]
+        return ["http_request", "http_session_request", "http_extract", "session_inspect", "session_list_secret_refs", "jwt_clone_claims", "jwt_sign", "http_session_set_cookie_ref", "whatweb_fingerprint", "js_asset_analyze", "source_map_analyze", "file_type", "strings_extract", "archive_list", "file_read", "file_search", "python_run", "content_discovery", "jwt_inspect"]
 
     @staticmethod
     def _infer_kind(name: str, metadata: dict) -> str:

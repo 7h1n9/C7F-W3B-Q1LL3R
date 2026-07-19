@@ -79,11 +79,16 @@ class RunAttemptService:
             started_at=now,
             heartbeat_at=now,
             status="RUNNING",
-            initial_agent_steps=run.agent_step_count,
-            initial_tool_calls=run.tool_call_count,
+            initial_agent_steps=run.run_total_agent_steps,
+            initial_tool_calls=run.run_total_logical_tool_calls,
             initial_input_tokens=int(input_tokens or 0),
             initial_output_tokens=int(output_tokens or 0),
         )
+        run.current_attempt_number = attempt.attempt_number
+        run.attempt_agent_steps = 0
+        run.attempt_logical_tool_calls = 0
+        run.agent_step_count = 0
+        run.tool_call_count = 0
         session.add(attempt)
         await session.flush()
         lease = RunExecutionLease(
@@ -132,8 +137,11 @@ class RunAttemptService:
             attempt.finished_at = utc_now()
             attempt.status = str(run.status)
             attempt.error_code = run.last_error_code
-            attempt.agent_steps = max(0, run.agent_step_count - (attempt.initial_agent_steps or 0))
-            attempt.tool_calls = max(0, run.tool_call_count - (attempt.initial_tool_calls or 0))
+            attempt.attempt_agent_steps = run.attempt_agent_steps
+            attempt.attempt_logical_tool_calls = run.attempt_logical_tool_calls
+            # Legacy columns remain populated for old reports and fixtures.
+            attempt.agent_steps = attempt.attempt_agent_steps
+            attempt.tool_calls = attempt.attempt_logical_tool_calls
             attempt.input_tokens = max(0, sum(item.input_tokens or 0 for item in turns) - (attempt.initial_input_tokens or 0))
             attempt.output_tokens = max(0, sum(item.output_tokens or 0 for item in turns) - (attempt.initial_output_tokens or 0))
             attempt.heartbeat_at = utc_now()

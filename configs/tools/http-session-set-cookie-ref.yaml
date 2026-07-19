@@ -1,0 +1,12 @@
+name: http_session_set_cookie_ref
+display_name: Set Session Cookie Reference
+category: web
+description: Set one cookie from an opaque Run-local secret reference.
+risk_level: high
+enabled: true
+parameters:
+  session_name: {type: string, required: true}
+  cookie_name: {type: string, required: true}
+  secret_ref: {type: string, required: true}
+limits: {max_output_bytes: 65536}
+permissions: {target_allowlist_required: false}

@@ -35,7 +35,7 @@ async def health() -> dict:
 async def capability_registry() -> dict:
     tools = [
         "http_request", "http_session_request", "http_extract", "whatweb_fingerprint", "js_asset_analyze", "source_map_analyze",
-        "file_type", "strings_extract", "archive_list", "content_discovery", "jwt_inspect", "file_read",
+        "file_type", "strings_extract", "archive_list", "content_discovery", "jwt_inspect", "session_inspect", "session_list_secret_refs", "jwt_clone_claims", "jwt_sign", "http_session_set_cookie_ref", "file_read",
         "file_search", "python_run", "script_run", "sandbox_exec", "pcap_metadata", "pcap_protocols", "pcap_query", "pcap_tcp_stream",
         "pcap_http_objects", "pcap_dns_summary", "pcap_credentials", "sqlmap_detect", "nmap_service_probe",
         "nikto_scan", "binwalk_scan", "exiftool_metadata",

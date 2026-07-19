@@ -29,6 +29,10 @@ TYPE_ALIASES = {
     "tool_action": "tool",
     "TOOL_ACTION": "tool",
     "tool": "tool",
+    "PlanAction": "plan",
+    "plan_action": "plan",
+    "PLAN_ACTION": "plan",
+    "plan": "plan",
     "SkillAction": "skill",
     "skill_action": "skill",
     "SKILL_ACTION": "skill",
@@ -103,6 +107,9 @@ def normalize_action_payload(raw_action: dict[str, Any]) -> tuple[dict[str, Any]
         elif normalized.get("result") is not None or normalized.get("flag_candidate") is not None:
             action_type = "finish"
             trace.mark("infer-type:finish")
+        elif normalized.get("plan_node_id") or normalized.get("next_tool"):
+            action_type = "plan"
+            trace.mark("infer-type:plan")
     if isinstance(action_type, str):
         mapped = TYPE_ALIASES.get(action_type, TYPE_ALIASES.get(action_type.lower()))
         if mapped:
@@ -156,4 +163,3 @@ def validate_action(raw_action: dict[str, Any]) -> tuple[AgentAction, dict[str, 
         "normalization_quality": trace.normalization_quality,
         "normalized_payload_hash": json.dumps(normalized, ensure_ascii=False, sort_keys=True, default=str),
     }
-

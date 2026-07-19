@@ -21,6 +21,10 @@ class Settings(BaseSettings):
     encryption_key: str = "development-only-change-me"
     allowed_service_cidrs: str = "127.0.0.0/8,192.168.56.0/24,192.168.236.0/24"
     environment: str = "development"
+    # Local Kali/WebSocket setups may intentionally route localhost targets
+    # through a tunnel. Keep the production default blocked unless explicitly
+    # enabled in the environment.
+    allow_remote_local_targets: bool = False
     codex_diagnostic_mode: bool = False
     historical_lesson_mode: str = "strategy_only"
 
