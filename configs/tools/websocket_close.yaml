@@ -1,0 +1,6 @@
+name: websocket_close
+display_name: WebSocket Close
+category: web
+description: Close a scoped WebSocket connection.
+parameters:
+  connection_id: {type: string, required: true}

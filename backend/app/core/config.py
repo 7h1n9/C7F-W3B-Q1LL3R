@@ -11,7 +11,7 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_prefix="APP_", extra="ignore")
     database_url: str = "mysql+asyncmy://ctf_agent:ctf_agent@localhost:3306/ctf_agent"
     workspace_root: Path = Path("../data/workspaces")
-    runner_url: str = "http://127.0.0.1:8091"
+    runner_url: str = "http://192.168.236.128:8091"
     runner_api_token: str = "development-runner-token"
     codex_bridge_url: str = "http://127.0.0.1:8090"
     # Shared only with the local run-scoped ctfctl MCP subprocess. It is not

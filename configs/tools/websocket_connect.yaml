@@ -1,0 +1,6 @@
+name: websocket_connect
+display_name: WebSocket Connect
+category: web
+description: Connect to an allowlisted WebSocket endpoint.
+parameters:
+  url: {type: string, required: true}

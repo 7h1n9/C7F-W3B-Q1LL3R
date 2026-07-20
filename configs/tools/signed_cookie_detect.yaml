@@ -1,0 +1,6 @@
+name: signed_cookie_detect
+display_name: Signed Cookie Detect
+category: auth
+description: Detect the framework and signature shape of a scoped cookie handle.
+parameters:
+  session_name: {type: string, required: true}

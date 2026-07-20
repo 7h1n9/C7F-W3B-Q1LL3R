@@ -19,6 +19,7 @@ from app.services.runner_client import runner_client
 from app.services.solver_state import solver_state_service
 from app.services.tool_permissions import effective_tools_for
 from app.services.workspace_sync import workspace_sync_service
+from app.services.tool_argument_adapter import adapt_arguments
 from app.tools.policy import enforce_tool_policy
 from app.tools.registry import load_tool_definitions
 
@@ -65,7 +66,15 @@ class ToolGateway:
                 {"tool": name, "challenge_type": challenge.challenge_type},
                 422,
             )
-        arguments = definition.validate_arguments(arguments)
+        arguments = adapt_arguments(name, arguments)
+        try:
+            arguments = definition.validate_arguments(arguments)
+        except DomainError as error:
+            if error.code == "TOOL_INVALID_ARGUMENT":
+                details = dict(error.details or {})
+                details.update({"missing_fields": details.get("errors", []), "unknown_fields": [], "expected_schema": definition.parameters, "corrected_example": adapt_arguments(name, arguments), "available_operations": [name]})
+                raise DomainError(error.code, error.message, details, error.status_code) from error
+            raise
         enforce_tool_policy(name, arguments, challenge.allowed_hosts)
         if name == "file_read":
             cached = await self._cached_file_read(session, run, arguments)

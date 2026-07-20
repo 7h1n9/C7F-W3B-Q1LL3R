@@ -1,0 +1,6 @@
+name: flask_session_inspect
+display_name: Flask Session Inspect
+category: auth
+description: Inspect non-secret metadata of a Flask session handle.
+parameters:
+  session_name: {type: string, required: true}

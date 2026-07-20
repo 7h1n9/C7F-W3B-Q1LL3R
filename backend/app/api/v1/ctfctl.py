@@ -5,7 +5,8 @@ import hashlib
 import shutil
 import tarfile
 import zipfile
-from datetime import UTC, datetime
+import secrets
+from datetime import UTC, datetime, timedelta
 from pathlib import Path, PurePosixPath
 
 from fastapi import APIRouter, Depends, Header
@@ -107,6 +108,12 @@ class InvokeRequest(Request):
 class DirectToolRequest(Request):
     model_config = ConfigDict(extra="allow")
 
+class ToolTicketRequest(BaseModel):
+    run_id: str
+    thread_id: str | None = None
+    current_attempt_id: str
+    model_turn_id: str | None = None
+
 
 async def scoped_run(payload: Request, access_key: str | None, session: AsyncSession) -> tuple[SolveRun, Challenge, Path]:
     if not access_key or access_key != get_settings().ctfctl_internal_access_key:
@@ -135,6 +142,23 @@ async def scoped_run(payload: Request, access_key: str | None, session: AsyncSes
     ):
         raise DomainError("CTFCTL_LEASE_INVALID", "Thread execution lease is no longer active.", {"attempt_id": payload.scope.attempt_id}, 409)
     return run, challenge, root
+
+@router.post("/tool-ticket")
+async def tool_ticket(payload: ToolTicketRequest, x_ctfctl_access_key: str | None = Header(default=None), session: AsyncSession = Depends(get_session)) -> dict:
+    if not x_ctfctl_access_key or x_ctfctl_access_key != get_settings().ctfctl_internal_access_key:
+        raise DomainError("CTFCTL_UNAUTHORIZED", "Invalid ctfctl internal credential.", status_code=401)
+    run = await session.get(SolveRun, payload.run_id)
+    attempt = await session.get(RunAttempt, payload.current_attempt_id)
+    lease = await session.scalar(select(RunExecutionLease).where(RunExecutionLease.run_id == payload.run_id))
+    now = datetime.now(UTC)
+    if not run or not attempt or attempt.run_id != payload.run_id or attempt.status != "RUNNING" or not lease or lease.attempt_id != attempt.id:
+        raise DomainError("CTFCTL_LEASE_INVALID", "Run, attempt, or lease is not active.", status_code=409)
+    lease.lease_token = secrets.token_urlsafe(32)
+    lease.acquired_at = now
+    lease.heartbeat_at = now
+    lease.expires_at = now + timedelta(seconds=30)
+    await session.commit()
+    return {"data": {"run_id": run.id, "attempt_id": attempt.id, "ticket": lease.lease_token, "expires_at": lease.expires_at.isoformat(), "ttl_seconds": 30}}
 
 
 def policy_for(payload: Request, root: Path) -> WorkspacePolicy:

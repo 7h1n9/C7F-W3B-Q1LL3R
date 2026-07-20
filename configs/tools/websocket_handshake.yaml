@@ -1,0 +1,6 @@
+name: websocket_handshake
+display_name: WebSocket Handshake
+category: web
+description: Perform an allowlisted WebSocket handshake and return protocol metadata.
+parameters:
+  url: {type: string, required: true}

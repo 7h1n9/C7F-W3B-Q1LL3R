@@ -1,0 +1,7 @@
+name: websocket_send
+display_name: WebSocket Send
+category: web
+description: Send a text or JSON message on a scoped WebSocket connection.
+parameters:
+  connection_id: {type: string, required: true}
+  message: {type: object, required: true}

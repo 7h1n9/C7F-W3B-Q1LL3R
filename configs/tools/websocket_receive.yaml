@@ -1,0 +1,6 @@
+name: websocket_receive
+display_name: WebSocket Receive
+category: web
+description: Receive and normalize a WebSocket message.
+parameters:
+  connection_id: {type: string, required: true}

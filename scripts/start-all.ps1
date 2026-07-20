@@ -227,7 +227,7 @@ function Start-BackgroundService {
 
 $runnerToken = "development-runner-token"
 $frontendApiBase = "http://127.0.0.1:$BackendPort/api/v1"
-$backendRunnerUrl = "http://127.0.0.1:$RunnerPort"
+$backendRunnerUrl = "http://192.168.236.128:$RunnerPort"
 $backendBridgeUrl = "http://127.0.0.1:$BridgePort"
 $backendCorsOrigins = "http://localhost:5173,http://127.0.0.1:5173"
 $backendEncryptionKey = "development-only-change-me"

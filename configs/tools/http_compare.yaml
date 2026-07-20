@@ -1,0 +1,7 @@
+name: http_compare
+display_name: HTTP Differential
+category: web
+description: Compare a baseline and candidate request without exposing secrets.
+parameters:
+  baseline: {type: object, required: true}
+  candidate: {type: object, required: true}
