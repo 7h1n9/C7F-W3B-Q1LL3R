@@ -125,6 +125,7 @@ export class CodexService {
       },
     });
     return codex.startThread({
+      model: process.env.CODEX_MODEL ?? "gpt-5.6-luna",
       workingDirectory: codexWorkingDirectory(input.workspace_path),
       skipGitRepoCheck: true,
       sandboxMode: "workspace-write",

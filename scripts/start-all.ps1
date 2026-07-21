@@ -13,11 +13,23 @@ param(
 $ErrorActionPreference = "Stop"
 
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
+$venvDir = Join-Path $repoRoot ".venv3.11"
+$activateScript = Join-Path $venvDir "Scripts\Activate.ps1"
+$pythonExe = Join-Path $venvDir "Scripts\python.exe"
 $backendDir = Join-Path $repoRoot "backend"
 $frontendDir = Join-Path $repoRoot "frontend"
 $bridgeDir = Join-Path $repoRoot "codex-bridge"
 $runnerDir = Join-Path $repoRoot "kali-runner"
 $logsRoot = Join-Path $repoRoot "data\runtime-logs\start-all"
+
+if (-not (Test-Path -LiteralPath $activateScript)) {
+    throw "Python virtual environment activation script not found: $activateScript"
+}
+if (-not (Test-Path -LiteralPath $pythonExe)) {
+    throw "Python executable not found in virtual environment: $pythonExe"
+}
+
+. $activateScript
 
 New-Item -ItemType Directory -Force -Path $logsRoot | Out-Null
 
@@ -293,12 +305,12 @@ Set-EnvValue -Name "RUNNER_API_TOKEN" -Value $runnerToken
 Set-EnvValue -Name "RUNNER_ENVIRONMENT" -Value "development"
 
 Set-EnvValue -Name "CODEX_BRIDGE_PORT" -Value "$BridgePort"
+Set-EnvValue -Name "CODEX_MODEL" -Value "gpt-5.6-luna"
 Set-EnvValue -Name "CODEX_MOCK_MODE" -Value ($(if ($UseMockCodex) { "true" } else { "false" }))
 Set-EnvValue -Name "CTFCTL_BACKEND_URL" -Value "http://127.0.0.1:$BackendPort"
 Set-EnvValue -Name "CTFCTL_ACCESS_KEY" -Value $ctfctlAccessKey
 Set-EnvValue -Name "VITE_API_BASE_URL" -Value $frontendApiBase
 
-$pythonExe = Get-CommandPath -Name "python"
 $npmCmd = (Get-Command npm.cmd -ErrorAction SilentlyContinue)
 if ($npmCmd -and $npmCmd.Source) {
     $npmExe = $npmCmd.Source

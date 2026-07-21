@@ -10,7 +10,7 @@ import httpx
 from fastapi import HTTPException
 
 from app.config import settings
-from app.executors.http_executor import _extract_body
+from app.executors.http_executor import _extract_body, _request_kwargs
 from app.executors.session_store import session_store
 from app.models import JobRequest
 from app.workspace.paths import safe_child, workspace_for
@@ -27,7 +27,12 @@ async def http_extract(request: JobRequest) -> dict:
     url = str(args.get("url", ""))
     _target(request, url)
     async with httpx.AsyncClient(timeout=settings.job_timeout_seconds, trust_env=False) as client:
-        response = await client.request(str(args.get("method", "GET")).upper(), url, headers=args.get("headers", {}), params=args.get("query", {}), content=args.get("body"))
+        response = await client.request(
+            str(args.get("method", "GET")).upper(),
+            url,
+            headers=args.get("headers", {}),
+            **_request_kwargs(args),
+        )
     body = response.content[: settings.http_excerpt_bytes].decode(errors="replace")
     selected_headers = {
         key: value[:500]

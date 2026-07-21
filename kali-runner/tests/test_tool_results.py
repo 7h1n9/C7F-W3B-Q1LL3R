@@ -1,4 +1,17 @@
-from app.executors.http_executor import _extract_body
+from app.executors.http_executor import _extract_body, _request_kwargs
+
+
+def test_http_request_preserves_query_and_maps_structured_bodies() -> None:
+    assert _request_kwargs({"query": None}) == {"params": None}
+    assert _request_kwargs({"query": {"page": "2"}}) == {"params": {"page": "2"}}
+    assert _request_kwargs({"query": {"id": ["1", "2"]}, "json": {"ok": True}}) == {
+        "params": {"id": ["1", "2"]},
+        "json": {"ok": True},
+    }
+    assert _request_kwargs({"form": {"user": "ctf"}}) == {
+        "params": None,
+        "data": {"user": "ctf"},
+    }
 
 
 def test_http_extract_collects_html_facts_without_credentials_in_plain_model_fields() -> None:

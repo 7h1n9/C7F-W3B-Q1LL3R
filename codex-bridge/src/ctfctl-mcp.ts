@@ -7,7 +7,7 @@ import { createInterface } from "node:readline";
 import { appendFileSync } from "node:fs";
 
 type Scope = { run_id: string; challenge_id: string; workspace_root: string; allowed_hosts: string[]; attempt_id: string; lease_token: string; thread_id?: string; model_turn_id?: string };
-const scope = JSON.parse(process.env.CTFCTL_SCOPE ?? "{}") as Scope;
+let scope = JSON.parse(process.env.CTFCTL_SCOPE ?? "{}") as Scope;
 const backendUrl = (process.env.CTFCTL_BACKEND_URL ?? "http://127.0.0.1:8000").replace(/\/$/, "");
 const accessKey = process.env.CTFCTL_ACCESS_KEY ?? "";
 const debugLog = process.env.CTFCTL_DEBUG_LOG;
@@ -70,6 +70,29 @@ async function backend(method: string, params: Record<string, unknown>) {
     "workspace_extract_archive", "list_tools", "invoke_tool",
   ]);
   const endpoint = dedicatedMethods.has(method) ? method : `tool/${method}`;
+  // The backend rotates the execution lease token whenever a tool ticket is
+  // issued.  Never reuse the token captured when the Codex thread started:
+  // doing so makes every subsequent MCP call fail with CTFCTL_LEASE_INVALID
+  // and causes the Codex SDK to retry until the engine is marked failed.
+  if (method !== "tool-ticket") {
+    const ticketResponse = await fetch(`${backendUrl}/api/v1/internal/ctfctl/tool-ticket`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-ctfctl-access-key": accessKey },
+      body: JSON.stringify({
+        run_id: scope.run_id,
+        current_attempt_id: scope.attempt_id,
+        thread_id: scope.thread_id ?? null,
+        model_turn_id: scope.model_turn_id ?? null,
+      }),
+    });
+    const ticketBody = await ticketResponse.json().catch(() => ({}));
+    if (!ticketResponse.ok) {
+      throw new Error(`${ticketBody.code ?? "CTFCTL_TICKET_ERROR"}: ${ticketBody.message ?? ticketResponse.statusText}`);
+    }
+    const ticket = ticketBody.data?.ticket;
+    if (typeof ticket !== "string" || !ticket) throw new Error("CTFCTL_TICKET_INVALID");
+    scope = { ...scope, lease_token: ticket };
+  }
   const response = await fetch(`${backendUrl}/api/v1/internal/ctfctl/${endpoint}`, {
     method: "POST",
     headers: { "content-type": "application/json", "x-ctfctl-access-key": accessKey },

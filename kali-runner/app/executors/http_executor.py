@@ -78,6 +78,24 @@ def _extract_body(body: str, content_type: str) -> dict:
     return facts
 
 
+def _request_kwargs(args: dict) -> dict:
+    """Map the structured request body to the matching HTTPX argument.
+
+    ``params=None`` is intentional: HTTPX then preserves query parameters
+    already present in the URL, while a supplied query mapping is merged with
+    them.  Lists are retained so repeated query parameters remain possible.
+    """
+    query = args.get("query")
+    kwargs: dict = {"params": query if query is not None else None}
+    if args.get("json") is not None:
+        kwargs["json"] = args["json"]
+    elif args.get("form") is not None:
+        kwargs["data"] = args["form"]
+    elif args.get("body") is not None:
+        kwargs["content"] = args["body"]
+    return kwargs
+
+
 async def execute_http(request: JobRequest) -> dict:
     args = request.arguments
     url = str(args.get("url", ""))
@@ -106,12 +124,16 @@ async def execute_http(request: JobRequest) -> dict:
     follow = bool(args.get("follow_redirects", False))
     redirect_history: list[dict] = []
     request_method = str(args.get("method", "GET")).upper()
-    request_body = args.get("body")
     request_headers = dict(args.get("headers", {}))
     request_cookies = session_store.cookies(request.run_id, session_name) if is_session else None
     async with httpx.AsyncClient(follow_redirects=False, timeout=min(float(args.get("timeout", 30)), settings.job_timeout_seconds), trust_env=False, cookies=request_cookies) as client:
         for hop in range(6):
-            response = await client.request(method=request_method, url=url, headers=request_headers, params=args.get("query", {}), content=request_body)
+            response = await client.request(
+                method=request_method,
+                url=url,
+                headers=request_headers,
+                **_request_kwargs(args),
+            )
             if is_session:
                 session_store.update(request.run_id, session_name, response)
             location = response.headers.get("location")
@@ -125,10 +147,12 @@ async def execute_http(request: JobRequest) -> dict:
             url = urljoin(str(response.url), location)
             validate(url)
             if response.status_code in {301, 302} and request_method not in {"GET", "HEAD"}:
-                request_method, request_body = "GET", None
+                request_method = "GET"
+                args = {**args, "body": None, "json": None, "form": None}
                 request_headers = {key: value for key, value in request_headers.items() if key.lower() not in {"content-length", "content-type", "transfer-encoding"}}
             elif response.status_code == 303 and request_method != "HEAD":
-                request_method, request_body = "GET", None
+                request_method = "GET"
+                args = {**args, "body": None, "json": None, "form": None}
                 request_headers = {key: value for key, value in request_headers.items() if key.lower() not in {"content-length", "content-type", "transfer-encoding"}}
     body = response.content[: settings.http_excerpt_bytes]
     content_type = response.headers.get("content-type", "")
