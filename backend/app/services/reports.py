@@ -9,7 +9,16 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.challenge import Challenge
-from app.models.run import Artifact, FlagCandidate, Hypothesis, Observation, SolveRun, ToolCall
+from app.models.run import (
+    Artifact,
+    FlagCandidate,
+    Hypothesis,
+    Observation,
+    RunAttempt,
+    SolveRun,
+    ToolCall,
+)
+from app.orchestration.state_machine import TERMINAL, RunStatus
 from app.services.events import event_service
 
 
@@ -167,9 +176,10 @@ class ReproductionPlanner:
 
 class ReproductionVerifier:
     def verify(
-        self, steps: list[ReproductionStep], flags: list[FlagCandidate], challenge: Challenge
+        self, steps: list[ReproductionStep], flags: list[FlagCandidate], challenge: Challenge,
+        *, fresh_session_verified: bool = False,
     ) -> dict:
-        valid = bool(steps) and any(item.verified and item.review_state == "VALID" for item in flags)
+        valid = bool(steps) and fresh_session_verified and any(item.verified and item.review_state == "VALID" for item in flags)
         return {
             "verified": valid,
             "reproducible": valid,
@@ -178,6 +188,7 @@ class ReproductionVerifier:
                 1 for item in flags if item.verified and item.review_state == "VALID"
             ),
             "dynamic_flag_required": True,
+            "fresh_session_verified": fresh_session_verified,
             "notes": [] if valid else ["尚未完成全新 Session 自动重放验证"],
         }
 
@@ -250,6 +261,30 @@ class ChineseWriteupRenderer:
         return "\n".join(lines)
 
 
+class ReportGenerationBarrier:
+    """Single gate for final reports; report data is never a terminal signal."""
+
+    async def check(self, session: AsyncSession, run: SolveRun) -> dict:
+        missing: list[str] = []
+        if RunStatus(run.status) not in TERMINAL:
+            missing.append("run_terminal")
+        flags = list((await session.scalars(select(FlagCandidate).where(FlagCandidate.run_id == run.id))).all())
+        if RunStatus(run.status) == RunStatus.COMPLETED_SOLVED and not any(item.verified and item.review_state == "VALID" for item in flags):
+            missing.append("verified_flag")
+        if RunStatus(run.status) == RunStatus.COMPLETED_SOLVED and any(item.review_state == "OPEN" for item in flags):
+            missing.append("flag_review")
+        if await session.scalar(select(RunAttempt.id).where(RunAttempt.run_id == run.id, RunAttempt.status == "RUNNING")):
+            missing.append("attempt_closed")
+        if await session.scalar(select(ToolCall.id).where(ToolCall.run_id == run.id, ToolCall.status.in_(["REQUESTED", "STARTED"]))):
+            missing.append("key_tool_calls_completed")
+        if RunStatus(run.status) == RunStatus.COMPLETED_SOLVED and not run.thread_invalidated:
+            missing.append("terminal_generation_frozen")
+        return {"allowed": not missing, "missing": missing}
+
+
+report_generation_barrier = ReportGenerationBarrier()
+
+
 class ReportService:
     async def generate(
         self,
@@ -259,6 +294,9 @@ class ReportService:
         result: str,
         failure_reason: str = "",
     ) -> Artifact:
+        barrier = await report_generation_barrier.check(session, run)
+        if not barrier["allowed"]:
+            raise ValueError("REPORT_GENERATION_BLOCKED: " + ", ".join(barrier["missing"]))
         await event_service.append(session, run.id, "report.started", {})
         calls = list(
             (
@@ -298,7 +336,9 @@ class ReportService:
         root = Path(run.workspace_path).resolve()
         final = root / "final"
         final.mkdir(parents=True, exist_ok=True)
-        verifier = ReproductionVerifier().verify(steps, flags, challenge)
+        verifier = ReproductionVerifier().verify(
+            steps, flags, challenge, fresh_session_verified=bool(run.fresh_reproduction_verified)
+        )
         manifest = [
             {
                 "path": item.file_path,
@@ -335,7 +375,11 @@ class ReportService:
             size=len(raw),
             sha256=hashlib.sha256(raw).hexdigest(),
             summary="中文版可复现解题报告",
+            status="ACTIVE",
         )
+        old_reports = list((await session.scalars(select(Artifact).where(Artifact.run_id == run.id, Artifact.artifact_type == "report", Artifact.status == "ACTIVE"))).all())
+        for old in old_reports:
+            old.status = "STALE"
         session.add(artifact)
         await session.commit()
         await event_service.append(

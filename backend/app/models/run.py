@@ -45,6 +45,11 @@ class SolveRun(UUIDTimestampMixin, Base):
         default=lambda: datetime.now(UTC),
         onupdate=lambda: datetime.now(UTC),
     )
+    terminal_generation: Mapped[int] = mapped_column(Integer, default=0)
+    terminal_event_sequence: Mapped[int | None] = mapped_column(Integer)
+    thread_invalidated: Mapped[bool] = mapped_column(Boolean, default=False)
+    post_terminal_events_json: Mapped[list[dict]] = mapped_column(JSON, nullable=False, default=list)
+    fresh_reproduction_verified: Mapped[bool] = mapped_column(Boolean, default=False)
 
 
 class AgentTurn(UUIDTimestampMixin, Base):
@@ -115,6 +120,26 @@ class RunExecutionLease(UUIDTimestampMixin, Base):
     )
 
 
+class ToolInvocationTicket(UUIDTimestampMixin, Base):
+    __tablename__ = "tool_invocation_tickets"
+    __table_args__ = (UniqueConstraint("ticket_hash", name="uq_tool_invocation_ticket_hash"),)
+
+    ticket_hash: Mapped[str] = mapped_column(String(128), nullable=False)
+    run_id: Mapped[str] = mapped_column(ForeignKey("solve_runs.id"), nullable=False, index=True)
+    attempt_id: Mapped[str] = mapped_column(ForeignKey("run_attempts.id"), nullable=False)
+    thread_id: Mapped[str | None] = mapped_column(String(255))
+    model_turn_id: Mapped[str | None] = mapped_column(String(255))
+    lease_id: Mapped[str] = mapped_column(ForeignKey("run_execution_leases.id"), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(UTC))
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(UTC),
+        onupdate=lambda: datetime.now(UTC),
+    )
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
 class RunUserInput(UUIDTimestampMixin, Base):
     __tablename__ = "run_user_inputs"
     run_id: Mapped[str] = mapped_column(ForeignKey("solve_runs.id"), nullable=False, index=True)
@@ -149,6 +174,30 @@ class ToolCall(UUIDTimestampMixin, Base):
     execution_layer: Mapped[str] = mapped_column(String(40), default="gateway")
 
 
+class LogicalToolCall(UUIDTimestampMixin, Base):
+    __tablename__ = "logical_tool_calls"
+    __table_args__ = (UniqueConstraint("run_id", "id", name="uq_logical_tool_call_run_id"),)
+
+    run_id: Mapped[str] = mapped_column(ForeignKey("solve_runs.id"), nullable=False, index=True)
+    attempt_id: Mapped[str | None] = mapped_column(ForeignKey("run_attempts.id"), index=True)
+    engine_type: Mapped[str] = mapped_column(String(40), nullable=False, default="unknown")
+    tool_name: Mapped[str] = mapped_column(String(100), nullable=False)
+    arguments_digest: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    status: Mapped[str] = mapped_column(String(40), nullable=False, default="REQUESTED")
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    result_observation_id: Mapped[str | None] = mapped_column(ForeignKey("observations.id"))
+
+
+class ToolExecutionTrace(UUIDTimestampMixin, Base):
+    __tablename__ = "tool_execution_traces"
+    logical_tool_call_id: Mapped[str] = mapped_column(ForeignKey("logical_tool_calls.id"), nullable=False, index=True)
+    execution_layer: Mapped[str] = mapped_column(String(40), nullable=False)
+    event_type: Mapped[str] = mapped_column(String(80), nullable=False)
+    external_id: Mapped[str | None] = mapped_column(String(255))
+    payload_digest: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+
+
 class Artifact(UUIDTimestampMixin, Base):
     __tablename__ = "artifacts"
     run_id: Mapped[str] = mapped_column(ForeignKey("solve_runs.id"), nullable=False)
@@ -159,6 +208,7 @@ class Artifact(UUIDTimestampMixin, Base):
     size: Mapped[int] = mapped_column(Integer, default=0)
     sha256: Mapped[str] = mapped_column(String(64), default="")
     summary: Mapped[str] = mapped_column(Text, default="")
+    status: Mapped[str] = mapped_column(String(20), default="ACTIVE", nullable=False)
 
 
 class Observation(UUIDTimestampMixin, Base):

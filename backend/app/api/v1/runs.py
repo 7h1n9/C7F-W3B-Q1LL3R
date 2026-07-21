@@ -463,6 +463,10 @@ async def restart_run(
         "code": run.last_error_code,
         "message": run.last_error_message,
     }
+    # The MCP subprocess captures the lease in its process environment when
+    # the Codex thread is created. A restart creates a new Attempt/Lease, so
+    # the old Bridge thread is intentionally not reusable.
+    run.codex_thread_id = None
     challenge = await session.get(Challenge, run.challenge_id)
     if not challenge:
         raise DomainError("CHALLENGE_NOT_FOUND", "Challenge not found.", status_code=404)
@@ -506,7 +510,7 @@ async def restart_run(
             "preserved_workspace": True,
             "preserved_evidence": True,
             "restart_mode": restart_mode,
-            "codex_thread_id_reused": bool(run.codex_thread_id),
+            "codex_thread_id_reused": False,
         },
     )
     message = str((payload or {}).get("message", "")).strip() or None

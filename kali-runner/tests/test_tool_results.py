@@ -1,4 +1,4 @@
-from app.executors.http_executor import _extract_body, _request_kwargs
+from app.executors.http_executor import _extract_body, _request_kwargs, merge_url_query
 
 
 def test_http_request_preserves_query_and_maps_structured_bodies() -> None:
@@ -30,3 +30,10 @@ def test_http_extract_detects_json_keys_and_flag_candidates() -> None:
     assert facts["json_keys"] == ["token", "flag"]
     assert facts["suspected_credentials"] == ["token"]
     assert facts["suspected_flags"] == ["flag{test}"]
+
+
+def test_merge_url_query_preserves_and_replaces_explicitly() -> None:
+    assert merge_url_query("http://target.test/search?q=test", None).endswith("q=test")
+    assert merge_url_query("http://target.test/search?q=test", {"format": "json"}).endswith("q=test&format=json")
+    assert merge_url_query("http://target.test/search?q=old", {"q": "new"}).endswith("q=new")
+    assert merge_url_query("http://target.test/search", {"id": ["1", "2"]}).endswith("id=1&id=2")

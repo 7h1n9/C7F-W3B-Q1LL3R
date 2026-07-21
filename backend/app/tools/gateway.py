@@ -10,16 +10,24 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import DomainError
 from app.models.challenge import Challenge
-from app.models.run import Artifact, Observation, RunExecutionLease, SolveRun, ToolCall
+from app.models.run import (
+    Artifact,
+    LogicalToolCall,
+    Observation,
+    RunExecutionLease,
+    SolveRun,
+    ToolCall,
+    ToolExecutionTrace,
+)
 from app.orchestration.state_machine import RunStatus
 from app.schemas.tool import ToolArtifactRef, ToolExecutionResult, ToolModelView
 from app.services.events import event_service
 from app.services.flags import flag_service
 from app.services.runner_client import runner_client
 from app.services.solver_state import solver_state_service
+from app.services.tool_argument_adapter import adapt_arguments
 from app.services.tool_permissions import effective_tools_for
 from app.services.workspace_sync import workspace_sync_service
-from app.services.tool_argument_adapter import adapt_arguments
 from app.tools.policy import enforce_tool_policy
 from app.tools.registry import load_tool_definitions
 
@@ -83,7 +91,7 @@ class ToolGateway:
                     session,
                     run.id,
                     "tool.read_deduplicated",
-                    {"tool": name, "code": "FILE_RANGE_ALREADY_READ", "path": arguments.get("path")},
+                    {"tool": name, "code": "FILE_RANGE_ALREADY_AVAILABLE", "path": arguments.get("path")},
                 )
                 return cached.model_dump()
         call = ToolCall(
@@ -99,10 +107,27 @@ class ToolGateway:
         session.add(call)
         await session.commit()
         await session.refresh(call)
+        lease = await session.scalar(select(RunExecutionLease).where(RunExecutionLease.run_id == run.id))
+        logical_id = str(call.logical_tool_call_id)
+        logical = LogicalToolCall(
+            id=logical_id,
+            run_id=run.id,
+            attempt_id=lease.attempt_id if lease else None,
+            engine_type=run.engine_type,
+            tool_name=name,
+            arguments_digest=hashlib.sha256(json.dumps(arguments, ensure_ascii=False, sort_keys=True, default=str).encode()).hexdigest(),
+            status="REQUESTED",
+            started_at=call.started_at,
+        )
+        session.add(logical)
+        session.add(ToolExecutionTrace(logical_tool_call_id=logical_id, execution_layer=execution_layer, event_type="requested", external_id=call.id, payload_digest=""))
+        await session.commit()
         await event_service.append(
             session, run.id, "tool.requested", {"tool_call_id": call.id, "logical_tool_call_id": call.logical_tool_call_id, "tool": name, "execution_layer": call.execution_layer}
         )
         call.status = "STARTED"
+        logical.status = "STARTED"
+        session.add(ToolExecutionTrace(logical_tool_call_id=logical_id, execution_layer=execution_layer, event_type="started", external_id=call.id, payload_digest=""))
         await session.commit()
         await event_service.append(
             session, run.id, "tool.started", {"tool_call_id": call.id, "logical_tool_call_id": call.logical_tool_call_id, "tool": name, "execution_layer": call.execution_layer}
@@ -150,6 +175,8 @@ class ToolGateway:
             result.get("job_id"),
             datetime.now(UTC),
         )
+        logical.status = call.status
+        logical.finished_at = call.finished_at
         root = Path(run.workspace_path).resolve()
         relative = str(result.get("artifact_path") or "")
         target = (root / relative).resolve()
@@ -224,6 +251,9 @@ class ToolGateway:
         )
         session.add(observation)
         await session.commit()
+        logical.result_observation_id = observation.id
+        session.add(ToolExecutionTrace(logical_tool_call_id=logical_id, execution_layer=execution_layer, event_type="completed" if unified.status == "COMPLETED" else "failed", external_id=call.runner_job_id, payload_digest=hashlib.sha256(json.dumps(result, ensure_ascii=False, sort_keys=True, default=str).encode()).hexdigest()))
+        await session.commit()
         if artifact_event_payload:
             await event_service.append(session, run.id, "artifact.created", artifact_event_payload)
         candidates = []
@@ -287,11 +317,11 @@ class ToolGateway:
                     summary=str(view.get("summary") or "已返回此前读取的文件范围"),
                     content_excerpt=str(view.get("content_excerpt")),
                     extracted_facts=dict(view.get("extracted_facts") or {}),
-                    warnings=[*list(view.get("warnings") or []), "FILE_RANGE_ALREADY_READ"],
+                    warnings=[*list(view.get("warnings") or []), "FILE_RANGE_ALREADY_AVAILABLE"],
                     suggested_next_dimensions=list(view.get("suggested_next_dimensions") or []),
                 ),
                 artifacts=[],
-                error_code="FILE_RANGE_ALREADY_READ",
+                error_code=None,
                 error_message="The same file range was already returned to the model; Runner was not called.",
             )
         return None

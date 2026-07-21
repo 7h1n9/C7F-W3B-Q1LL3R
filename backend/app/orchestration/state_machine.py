@@ -146,6 +146,12 @@ for status in TIMEOUT_SOURCES:
 
 def transition(run: object, target: RunStatus) -> None:
     current = RunStatus(getattr(run, "status"))
+    if current == RunStatus.COMPLETED_SOLVED and target != current:
+        raise DomainError(
+            "RUN_TERMINAL_IMMUTABLE",
+            "A verified solved run cannot be resumed or overwritten.",
+            {"current_state": current, "requested_state": target},
+        )
     if target not in ALLOWED.get(current, set()):
         raise DomainError(
             "RUN_INVALID_STATE",

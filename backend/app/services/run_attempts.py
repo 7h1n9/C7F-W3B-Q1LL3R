@@ -10,6 +10,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.exceptions import DomainError
 from app.models.run import AgentTurn, RunAttempt, RunExecutionLease, SolveRun
 from app.orchestration.state_machine import TERMINAL, RunStatus
+from app.services.solver_state import solver_state_service
+from app.services.terminal_outcomes import terminal_outcome_resolver
 
 
 def utc_now() -> datetime:
@@ -51,6 +53,12 @@ class RunAttemptService:
             await session.commit()
 
     async def begin(self, session: AsyncSession, run: SolveRun) -> tuple[RunAttempt, RunExecutionLease]:
+        if RunStatus(run.status) == RunStatus.COMPLETED_SOLVED or run.thread_invalidated:
+            raise DomainError(
+                "RUN_NOT_RESTARTABLE",
+                "A verified solved run cannot be resumed.",
+                status_code=409,
+            )
         await self.reclaim_expired_lease(session, run.id)
         existing = await session.scalar(
             select(RunExecutionLease).where(RunExecutionLease.run_id == run.id)
@@ -135,7 +143,10 @@ class RunAttemptService:
         if attempt is not None:
             turns = list((await session.scalars(select(AgentTurn).where(AgentTurn.run_id == run.id))).all())
             attempt.finished_at = utc_now()
-            attempt.status = str(run.status)
+            attempt.status = terminal_outcome_resolver.resolve(
+                str(run.status),
+                flag_verified=str(run.status) == RunStatus.COMPLETED_SOLVED.value,
+            )
             attempt.error_code = run.last_error_code
             attempt.attempt_agent_steps = run.attempt_agent_steps
             attempt.attempt_logical_tool_calls = run.attempt_logical_tool_calls
@@ -145,6 +156,7 @@ class RunAttemptService:
             attempt.input_tokens = max(0, sum(item.input_tokens or 0 for item in turns) - (attempt.initial_input_tokens or 0))
             attempt.output_tokens = max(0, sum(item.output_tokens or 0 for item in turns) - (attempt.initial_output_tokens or 0))
             attempt.heartbeat_at = utc_now()
+            await solver_state_service.sync_from_run(session, run)
         if lease is not None:
             current = await session.get(RunExecutionLease, lease.id)
             if current is not None:

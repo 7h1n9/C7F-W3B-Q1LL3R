@@ -16,6 +16,7 @@ from app.models.run import (
     Artifact,
     FlagCandidate,
     Hypothesis,
+    LogicalToolCall,
     Observation,
     RunAttempt,
     RunEvent,
@@ -23,6 +24,8 @@ from app.models.run import (
     RunUserInput,
     SolveRun,
     ToolCall,
+    ToolExecutionTrace,
+    ToolInvocationTicket,
 )
 from app.models.skill import ChallengeSkillBinding, ModelSkillBinding, RunSkillSnapshot, Skill
 from app.models.solver_state import SolverState
@@ -34,6 +37,9 @@ __all__ = [
     "SolveRun",
     "RunEvent",
     "ToolCall",
+    "LogicalToolCall",
+    "ToolExecutionTrace",
+    "ToolInvocationTicket",
     "RunAttempt",
     "RunExecutionLease",
     "RunUserInput",

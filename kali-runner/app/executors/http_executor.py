@@ -1,7 +1,7 @@
 import json
 import re
 from html.parser import HTMLParser
-from urllib.parse import urljoin, urlparse
+from urllib.parse import parse_qsl, urlencode, urljoin, urlparse, urlsplit, urlunsplit
 
 import httpx
 from fastapi import HTTPException
@@ -78,6 +78,41 @@ def _extract_body(body: str, content_type: str) -> dict:
     return facts
 
 
+def normalize_query_pairs(query: object) -> list[tuple[str, str]]:
+    if query is None:
+        return []
+    if isinstance(query, dict):
+        items = query.items()
+    elif isinstance(query, (list, tuple)):
+        items = query
+    else:
+        raise ValueError("query must be a mapping or list of pairs")
+    pairs: list[tuple[str, str]] = []
+    for item in items:
+        if isinstance(item, tuple | list) and len(item) == 2:
+            key, value = item
+        else:
+            key, value = item
+        if isinstance(value, (list, tuple)):
+            pairs.extend((str(key), str(part)) for part in value)
+        else:
+            pairs.append((str(key), "" if value is None else str(value)))
+    return pairs
+
+
+def merge_url_query(url: str, query: object) -> str:
+    """Merge query pairs explicitly; supplied keys replace existing keys."""
+    parsed = urlsplit(url)
+    existing = parse_qsl(parsed.query, keep_blank_values=True)
+    supplied = normalize_query_pairs(query)
+    if query is None:
+        merged = existing
+    else:
+        supplied_keys = {key for key, _ in supplied}
+        merged = [pair for pair in existing if pair[0] not in supplied_keys] + supplied
+    return urlunsplit(parsed._replace(query=urlencode(merged, doseq=True)))
+
+
 def _request_kwargs(args: dict) -> dict:
     """Map the structured request body to the matching HTTPX argument.
 
@@ -121,6 +156,8 @@ async def execute_http(request: JobRequest) -> dict:
     if is_session and (not args.get("url") or not args.get("method")):
         raise HTTPException(422, detail="method and url are required for a session request")
     validate(url)
+    url = merge_url_query(url, args.get("query"))
+    args = {**args, "query": None}
     follow = bool(args.get("follow_redirects", False))
     redirect_history: list[dict] = []
     request_method = str(args.get("method", "GET")).upper()

@@ -111,6 +111,8 @@ export class CodexService {
       config: {
         mcp_servers: {
           ctfctl: {
+            enabled: true,
+            required: true,
             command: mcpLaunch.command,
             args: mcpLaunch.args,
             env: {

@@ -2,6 +2,11 @@ import type { ThreadEvent, ThreadItem } from "@openai/codex-sdk";
 import type { BridgeEvent } from "./types.js";
 
 const WAITING_USER_MARKER = /^\s*\[\[\s*C7F_WAITING_USER\s*\]\]\s*$/i;
+const SDK_RESOURCE_DISCOVERY_TOOLS = new Set([
+  "list_mcp_resources",
+  "list_mcp_resource_templates",
+  "read_mcp_resource",
+]);
 
 function normalizeAgentMessage(text: string): { message: string; waitingUser: boolean } {
   const lines = text.split(/\r?\n/);
@@ -110,6 +115,10 @@ function itemEventToBridgeEvents(
       return [];
     }
     case "mcp_tool_call": {
+      // Codex may emit its own internal resource-discovery item while
+      // initializing MCP. It is not a model-selected tool and must not be
+      // converted into a policy rejection or a user wait state.
+      if (item.server === "codex" && SDK_RESOURCE_DISCOVERY_TOOLS.has(item.tool)) return [];
       if (item.server !== "ctfctl" && item.server !== "backend-tool-gateway") {
         return kind === "item.started" ? [{ type: "agent.action_rejected", payload: { tool_call_id: item.id, tool: `${item.server}.${item.tool}`, error_code: "CODEX_DIRECT_TOOL_FORBIDDEN", error: "Only ctfctl/Backend Tool Gateway MCP tools are allowed." } }] : [];
       }

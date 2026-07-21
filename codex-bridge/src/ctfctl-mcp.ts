@@ -5,6 +5,7 @@
  */
 import { createInterface } from "node:readline";
 import { appendFileSync } from "node:fs";
+import { parametersToInputSchema } from "./mcp-schema.js";
 
 type Scope = { run_id: string; challenge_id: string; workspace_root: string; allowed_hosts: string[]; attempt_id: string; lease_token: string; thread_id?: string; model_turn_id?: string };
 let scope = JSON.parse(process.env.CTFCTL_SCOPE ?? "{}") as Scope;
@@ -23,15 +24,6 @@ function debug(event: string, detail: Record<string, unknown> = {}) {
 
 const compatibilityTools = new Set(["invoke_tool", "list_tools"]);
 let advertisedTools = new Set<string>();
-
-function schemaFor(name: string) {
-  if (name.startsWith("workspace_")) return { type: "object", additionalProperties: true };
-  if (name === "http_request" || name === "http_session_request") return { type: "object", properties: { method: { type: "string" }, url: { type: "string" }, headers: { type: "object" }, body: { type: "string" }, follow_redirects: { type: "boolean" } }, required: ["method", "url"], additionalProperties: false };
-  if (name === "script_run") return { type: "object", properties: { path: { type: "string" }, interpreter: { type: "string", enum: ["python", "node", "bash"] }, args: { type: "array", items: { type: "string" } }, network_mode: { type: "string", enum: ["none", "target_allowlist"] }, timeout_seconds: { type: "integer" } }, required: ["path", "interpreter"], additionalProperties: false };
-  if (name === "sandbox_exec") return { type: "object", properties: { executable: { type: "string" }, args: { type: "array", items: { type: "string" } }, cwd: { type: "string" }, network_mode: { type: "string", enum: ["none", "target_allowlist"] } }, required: ["executable"], additionalProperties: false };
-  if (name === "python_run") return { type: "object", properties: { path: { type: "string" }, args: { type: "array", items: { type: "string" } } }, required: ["path"], additionalProperties: false };
-  return { type: "object", additionalProperties: true };
-}
 
 async function toolDefinitions() {
   const catalog = await backend("list_tools", {});
@@ -54,10 +46,9 @@ async function toolDefinitions() {
       destructiveHint: false,
       openWorldHint: false,
     },
-    inputSchema: item.parameters && typeof item.parameters === "object" && Object.keys(item.parameters as object).length
-      ? item.parameters
-      : schemaFor(String(item.name)),
+    inputSchema: parametersToInputSchema(item.parameters, String(item.name)),
   }));
+  if (definitions.length === 0) throw new Error("CTFCTL_TOOL_CATALOG_EMPTY");
   advertisedTools = new Set(definitions.map((item) => item.name));
   return definitions;
 }
@@ -70,10 +61,8 @@ async function backend(method: string, params: Record<string, unknown>) {
     "workspace_extract_archive", "list_tools", "invoke_tool",
   ]);
   const endpoint = dedicatedMethods.has(method) ? method : `tool/${method}`;
-  // The backend rotates the execution lease token whenever a tool ticket is
-  // issued.  Never reuse the token captured when the Codex thread started:
-  // doing so makes every subsequent MCP call fail with CTFCTL_LEASE_INVALID
-  // and causes the Codex SDK to retry until the engine is marked failed.
+  // Each call gets an independent one-shot ticket. Never reuse that ticket;
+  // the immutable master lease remains in the thread scope for ticket minting.
   if (method !== "tool-ticket") {
     const ticketResponse = await fetch(`${backendUrl}/api/v1/internal/ctfctl/tool-ticket`, {
       method: "POST",

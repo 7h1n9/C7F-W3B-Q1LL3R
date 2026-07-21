@@ -218,6 +218,11 @@ class ContextBuilder:
                 "last_result_classification": state.last_result_classification if state else None,
                 "finish_rejection_count": state.finish_rejection_count if state else 0,
                 "force_plan_action": bool(state.force_plan_action) if state else False,
+                "duplicate_action_streak": state.duplicate_action_streak if state else 0,
+                "control_rejection_streak": state.control_rejection_streak if state else 0,
+                "schema_error_streak": state.schema_error_streak if state else 0,
+                "investigation_no_progress_count": state.investigation_no_progress_count if state else 0,
+                "degraded_action_streak": state.degraded_action_streak if state else 0,
                 "last_progress_at": state.last_progress_at.isoformat() if state and state.last_progress_at else None,
                 "last_action": {
                     "tool_name": last_call.tool_name,

@@ -1,0 +1,15 @@
+name: sql_union_probe
+display_name: SQL UNION Probe
+category: web
+description: Determine a small column count and reflected columns with a bounded UNION probe.
+risk_level: medium
+enabled: true
+parameters:
+  endpoint: {type: string, required: true}
+  parameter: {type: string, required: true}
+  baseline_value: {type: string, required: false}
+  max_columns: {type: integer, required: false}
+  max_requests: {type: integer, required: false}
+  candidate_comment_styles: {type: array, required: false}
+limits: {max_columns: 10, max_requests: 40, concurrency: 2}
+permissions: {target_allowlist_required: true}

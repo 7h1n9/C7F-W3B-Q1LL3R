@@ -220,6 +220,11 @@ class ProgressEvaluator:
                     "evidence_fingerprint": novelty.evidence_fingerprint,
                 },
             )
+        extracted = facts.get("tool_model_view", {}).get("extracted_facts", {}) if isinstance(facts.get("tool_model_view"), dict) else facts
+        if extracted.get("sql_syntax_signal") and not extracted.get("sql_injection_confirmed"):
+            recommendations.append({"tool_name": "sql_injection_probe", "reason": "SQL syntax signal requires a bounded boolean probe."})
+        if extracted.get("sql_injection_confirmed"):
+            recommendations.append({"tool_name": "sql_union_probe", "reason": "Confirmed boolean differential enables a bounded UNION probe."})
         await solver_state_service.sync_hypotheses(session, run.id)
         made_progress = confirmed
         no_progress_count = await solver_state_service.record_progress(

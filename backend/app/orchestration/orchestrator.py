@@ -37,11 +37,13 @@ from app.models.skill import RunSkillSnapshot, Skill
 from app.orchestration.state_machine import TERMINAL, RunStatus, transition
 from app.schemas.agent import ActionHypothesis, FinishAction, PlanAction, SkillAction, ToolAction
 from app.services.action_fingerprint import fingerprint_action
+from app.services.action_quality import action_quality_gate, recovery_planner
 from app.services.attack_chain import classify_rejection
 from app.services.codex_materializer import codex_materializer
 from app.services.context_builder import context_builder
 from app.services.crypto import decrypt_api_key
 from app.services.events import event_service
+from app.services.evidence_pipeline import evidence_pipeline
 from app.services.finish_gate import finish_gate
 from app.services.flags import flag_service
 from app.services.hypotheses import hypothesis_service
@@ -105,7 +107,10 @@ class SolveOrchestrator:
             return CodexSdkEngine(
                 get_settings().codex_bridge_url,
                 run.workspace_path,
-                thread_id=run.codex_thread_id,
+                # MCP credentials are bound to the Attempt/Lease at thread
+                # creation. A persisted thread belongs to an older attempt
+                # and must never be resumed with a new lease.
+                thread_id=None,
                 scope={
                     "run_id": run.id,
                     "challenge_id": run.challenge_id,
@@ -797,6 +802,26 @@ class SolveOrchestrator:
                 await solver_state_service.record_progress(session, run.id, True)
                 continue
             state = await solver_state_service.load(session, run.id)
+            if isinstance(action, ToolAction):
+                quality = action_quality_gate.evaluate(
+                    action.model_dump(),
+                    {
+                        "current_phase": state.current_phase if state else run.current_phase,
+                        "confirmed_facts": state.confirmed_facts_json if state else [],
+                        "plan_node_id": (state.run_plan_json or {}).get("current_node_id") if state else None,
+                        "decision_question": (state.last_decision_card_json or {}).get("core_question") if state else None,
+                        "degraded_action_streak": state.degraded_action_streak if state else 0,
+                    },
+                )
+                if quality.quality != "ACCEPT":
+                    if state:
+                        state.degraded_action_streak = quality.streak
+                        if quality.action in {"PlanAction", "RecoveryPlanner"}:
+                            state.force_plan_action = 1
+                        await session.commit()
+                    await event_service.append(session, run.id, "agent.action_rejected", {"type": "tool", "code": "ACTION_QUALITY_DEGRADED", "required_action": quality.action, "reason": quality.reason, "streak": quality.streak})
+                    await self._transition(session, run, RunStatus.PLANNING)
+                    continue
             if state and state.force_plan_action and isinstance(action, ToolAction):
                 await event_service.append(
                     session,
@@ -924,6 +949,7 @@ class SolveOrchestrator:
                         {"tool": action.tool_name, "code": "DUPLICATE_ACTION"},
                     )
                     await solver_state_service.record_control_rejection(session, run.id, {"tool": action.tool_name, "code": "DUPLICATE_ACTION", "fingerprint": fingerprint})
+                    await solver_state_service.record_progress(session, run.id, False)
                     current_state = await solver_state_service.load(session, run.id)
                     no_progress_count = current_state.no_progress_count if current_state else 0
                     await event_service.append(
@@ -939,6 +965,8 @@ class SolveOrchestrator:
                             "agent.replan_required",
                             {"reason": "Repeated no-progress actions"},
                         )
+                    if current_state and current_state.duplicate_action_streak >= 3:
+                        await event_service.append(session, run.id, "agent.automation_required", recovery_planner.plan(phase=run.current_phase, no_progress=no_progress_count, duplicate_streak=current_state.duplicate_action_streak))
                     if await self._stop_if_no_progress(
                         session, run, challenge, no_progress_count
                     ):
@@ -1106,6 +1134,18 @@ class SolveOrchestrator:
                         evidence={"tool_name": action.tool_name, "status": result.get("status")},
                     )
                 if progress["made_progress"]:
+                    evidence_view = evidence_pipeline.normalize(
+                        action.tool_name,
+                        result,
+                        [artifact.id] if artifact else [],
+                    )
+                    for capability in evidence_pipeline.infer_capabilities(evidence_view):
+                        await solver_state_service.record_capability(
+                            session,
+                            run.id,
+                            capability,
+                            evidence={"tool": action.tool_name, "artifact_id": artifact.id if artifact else None},
+                        )
                     capability_by_tool = {
                         "http_request": "can_read_public_page",
                         "http_session_request": "can_reuse_session",
@@ -1200,7 +1240,7 @@ class SolveOrchestrator:
                         return
                 await self._transition(session, run, RunStatus.EVALUATING)
                 continue
-            finished = await self._finish(session, run, challenge, action)
+            finished = await self._finish(session, run, challenge, action, attempt, lease)
             if finished:
                 return
             continue
@@ -1219,7 +1259,8 @@ class SolveOrchestrator:
             )
 
     async def _finish(
-        self, session, run: SolveRun, challenge: Challenge, action: FinishAction
+        self, session, run: SolveRun, challenge: Challenge, action: FinishAction,
+        attempt=None, lease=None,
     ) -> bool:
         if action.result == "waiting_user":
             await self._transition(session, run, RunStatus.WAITING_USER)
@@ -1250,6 +1291,14 @@ class SolveOrchestrator:
         if action.flag_candidate:
             await self._transition(session, run, RunStatus.VERIFYING_FLAG)
             solved = await flag_service.verify(session, run, challenge, action.flag_candidate)
+            if solved:
+                # Verification is terminal.  The stop controller has already
+                # closed the attempt and invalidated the thread.
+                await report_service.generate(session, run, challenge, "solved")
+                await event_service.append(session, run.id, "agent.action_completed", {"type": "finish", "result": "solved"})
+                with contextlib.suppress(Exception):
+                    await runner_client.clear_sessions(run.id)
+                return True
         detailed_gate = await finish_gate.evaluate_detailed(
             session, run, challenge, candidate_verified=solved, result=action.result
         )
@@ -1264,8 +1313,13 @@ class SolveOrchestrator:
             await solver_state_service.record_finish_rejection(session, run.id, detailed_gate.get("missing_requirements", []))
             await self._transition(session, run, RunStatus.WAITING_CONFIGURATION if code == "WAITING_CONFIGURATION" else RunStatus.WAITING_USER if code == "WAITING_USER" else RunStatus.PLANNING)
             return False
-        await self._transition(session, run, RunStatus.REPORTING)
         result = "solved" if action.result == "solved" and solved else "unsolved"
+        await self._transition(
+            session,
+            run,
+            RunStatus.COMPLETED_SOLVED if result == "solved" else RunStatus.COMPLETED_UNSOLVED,
+        )
+        await run_attempt_service.finish(session, run, attempt, lease)
         await report_service.generate(
             session,
             run,
@@ -1277,11 +1331,6 @@ class SolveOrchestrator:
         )
         await event_service.append(
             session, run.id, "agent.action_completed", {"type": "finish", "result": result}
-        )
-        await self._transition(
-            session,
-            run,
-            RunStatus.COMPLETED_SOLVED if result == "solved" else RunStatus.COMPLETED_UNSOLVED,
         )
         with contextlib.suppress(Exception):
             await runner_client.clear_sessions(run.id)
@@ -1322,6 +1371,10 @@ class SolveOrchestrator:
                 thread_id = item.payload.get("thread_id")
                 if isinstance(thread_id, str):
                     run.codex_thread_id = thread_id
+                    await session.commit()
+                if item.event_type == "run.failed":
+                    run.last_error_code = str(item.payload.get("code") or "ENGINE_ERROR")[:100]
+                    run.last_error_message = str(item.payload.get("message") or "Engine failed")[:4000]
                     await session.commit()
                 if item.status and item.status != run.status:
                     await self._transition(session, run, RunStatus(item.status))

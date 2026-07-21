@@ -4,7 +4,7 @@ from datetime import UTC, datetime
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.run import Hypothesis, SolveRun
+from app.models.run import FlagCandidate, Hypothesis, SolveRun
 from app.models.skill import RunSkillSnapshot, Skill
 from app.models.solver_state import SolverState
 from app.services.attack_chain import build_attack_chain, reduce_capability
@@ -64,12 +64,31 @@ class SolverStateService:
         return state
 
     async def sync_from_run(self, session: AsyncSession, run: SolveRun) -> SolverState | None:
+        verified = await session.scalar(select(FlagCandidate.id).where(FlagCandidate.run_id == run.id, FlagCandidate.verified, FlagCandidate.review_state == "VALID"))
+        if verified and run.status != "COMPLETED_SOLVED":
+            run.status = "COMPLETED_SOLVED"
+            run.current_phase = "COMPLETED_SOLVED"
+            run.thread_invalidated = True
         state = await self.load(session, run.id)
         if not state:
             return None
         state.current_phase = run.current_phase
+        if run.status == "COMPLETED_SOLVED":
+            state.current_phase = "COMPLETED_SOLVED"
         await session.commit()
         return state
+
+    async def check_consistency(self, session: AsyncSession, run: SolveRun) -> dict:
+        state = await self.load(session, run.id)
+        if not state:
+            return {"ok": False, "code": "STATE_INVARIANT_VIOLATION", "fields": ["SolverState"]}
+        expected = "COMPLETED_SOLVED" if run.status == "COMPLETED_SOLVED" else run.current_phase
+        fields = []
+        if state.current_phase != expected:
+            fields.append("SolverState.current_phase")
+        if run.status == "COMPLETED_SOLVED" and not run.thread_invalidated:
+            fields.append("Run.thread_invalidated")
+        return {"ok": not fields, "code": None if not fields else "STATE_INVARIANT_VIOLATION", "fields": fields}
 
     async def sync_hypotheses(self, session: AsyncSession, run_id: str) -> list[dict]:
         state = await self.load(session, run_id)
@@ -182,6 +201,8 @@ class SolverStateService:
         changed = len(state.confirmed_facts_json) != before
         if changed:
             state.no_progress_count = 0
+            state.investigation_no_progress_count = 0
+            state.duplicate_action_streak = 0
             state.last_progress_at = datetime.now(UTC)
         await session.commit()
         return changed
@@ -204,9 +225,11 @@ class SolverStateService:
             return 0
         if made_progress:
             state.no_progress_count = 0
+            state.investigation_no_progress_count = 0
             state.last_progress_at = datetime.now(UTC)
         else:
             state.no_progress_count += 1
+            state.investigation_no_progress_count += 1
         await session.commit()
         return state.no_progress_count
 
@@ -216,10 +239,40 @@ class SolverStateService:
         if not state:
             return
         state.last_result_classification = "CONTROL_REJECTION"
+        state.investigation_no_progress_count += 1
+        state.control_rejection_streak += 1
+        if str(entry.get("code") or "").upper() in {"TOOL_INVALID_ARGUMENT", "SCHEMA_VALIDATION_FAILED"}:
+            state.schema_error_streak += 1
+        if str(entry.get("code") or "").upper() == "DUPLICATE_ACTION":
+            state.duplicate_action_streak += 1
         state.rejected_paths_json = _unique_json_list(
             state.rejected_paths_json or [], {**entry, "classification": "CONTROL_REJECTION"}
         )
         await session.commit()
+
+    async def record_action_outcome(self, session: AsyncSession, run_id: str, *, progress: bool, duplicate: bool = False) -> dict:
+        state = await self.load(session, run_id)
+        if not state:
+            return {}
+        if progress:
+            state.duplicate_action_streak = 0
+            state.control_rejection_streak = 0
+            state.schema_error_streak = 0
+            state.degraded_action_streak = 0
+        elif duplicate:
+            state.duplicate_action_streak += 1
+        state.investigation_no_progress_count = state.no_progress_count
+        if state.duplicate_action_streak >= 2:
+            state.force_plan_action = 1
+        await session.commit()
+        return {
+            "duplicate_action_streak": state.duplicate_action_streak,
+            "control_rejection_streak": state.control_rejection_streak,
+            "schema_error_streak": state.schema_error_streak,
+            "investigation_no_progress_count": state.investigation_no_progress_count,
+            "force_plan_action": bool(state.force_plan_action),
+            "force_automation": state.duplicate_action_streak >= 3,
+        }
 
     async def record_result_classification(self, session: AsyncSession, run_id: str, classification: str) -> None:
         state = await self.load(session, run_id)
@@ -277,6 +330,8 @@ class SolverStateService:
         state.capability_ledger_json = ledger
         state.attack_chain_plan_json = plan
         state.no_progress_count = 0
+        state.investigation_no_progress_count = 0
+        state.duplicate_action_streak = 0
         state.last_progress_at = datetime.now(UTC)
         await session.commit()
 

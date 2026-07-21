@@ -31,6 +31,11 @@ class SolverState(UUIDTimestampMixin, Base):
     finish_rejection_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     force_plan_action: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     no_progress_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    investigation_no_progress_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    duplicate_action_streak: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    control_rejection_streak: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    schema_error_streak: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    degraded_action_streak: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     last_progress_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),

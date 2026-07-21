@@ -1,0 +1,16 @@
+name: sql_injection_probe
+display_name: SQL Injection Probe
+category: web
+description: Run a bounded SQL syntax and boolean differential probe against an authorized challenge endpoint.
+risk_level: medium
+enabled: true
+parameters:
+  endpoint: {type: string, required: true}
+  parameter: {type: string, required: true}
+  baseline_value: {type: string, required: false}
+  true_condition: {type: string, required: false}
+  false_condition: {type: string, required: false}
+  comment_styles: {type: array, required: false}
+  max_requests: {type: integer, required: false}
+limits: {max_requests: 40, concurrency: 2}
+permissions: {target_allowlist_required: true}

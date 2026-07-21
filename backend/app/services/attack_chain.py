@@ -1,5 +1,6 @@
 """Evidence-driven dynamic attack-chain primitives."""
-from dataclasses import dataclass, asdict
+from dataclasses import asdict, dataclass
+
 
 @dataclass
 class AttackChainNode:
@@ -49,7 +50,7 @@ def reduce_capability(ledger: dict, plan: dict, capability: str, evidence: dict 
         if all(item in ledger for item in node.get("prerequisites", [])):
             node["status"] = "READY"
     current = next((n for n in nodes if n["node_id"] == plan.get("current_node_id")), None)
-    if current and current["status"] == "READY" and current.get("prerequisites") and all(x in ledger for x in current["prerequisites"]):
+    if current and current["status"] == "READY" and (not current.get("prerequisites") or all(x in ledger for x in current["prerequisites"])):
         completed.add(current["node_id"])
     ready = [n for n in nodes if n["status"] == "READY" and n["node_id"] not in completed]
     if ready:

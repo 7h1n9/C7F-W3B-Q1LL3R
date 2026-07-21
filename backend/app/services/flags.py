@@ -7,6 +7,7 @@ from app.models.challenge import Challenge
 from app.models.run import Artifact, FlagCandidate, SolveRun
 from app.orchestration.state_machine import RunStatus
 from app.services.events import event_service
+from app.services.verified_flag_stop import verified_flag_stop_controller
 
 
 class FlagService:
@@ -164,15 +165,12 @@ class FlagService:
             },
         )
         if valid:
-            changed = False
-            if self._should_override_run_status(run):
-                changed = await self._mark_run_solved(session, run)
-            await session.commit()
-            if changed:
-                await event_service.append(
-                    session, run.id, "run.status_changed", {"status": run.status}
-                )
-            await event_service.append(session, run.id, "flag.verified", {"candidate_id": item.id})
+            verified_event = await event_service.append(session, run.id, "flag.verified", {"candidate_id": item.id})
+            # Verification is the authoritative terminal signal.  The stop
+            # controller closes the attempt and removes only its Lease; it
+            # deliberately does not claim that the SDK execution was
+            # cancelled.
+            await verified_flag_stop_controller.stop(session, run, candidate_id=item.id, terminal_event_sequence=verified_event.sequence)
         return valid
 
     async def set_review_state(
@@ -192,11 +190,10 @@ class FlagService:
         normalized = review_state.upper()
         if normalized not in {"OPEN", "VALID", "INVALID"}:
             raise ValueError("invalid review state")
-        changed = False
         item.review_state = normalized
         item.verified = normalized == "VALID"
         if normalized == "VALID" and self._should_override_run_status(run):
-            changed = await self._mark_run_solved(session, run)
+            await self._mark_run_solved(session, run)
         await session.commit()
         await event_service.append(
             session,
@@ -211,11 +208,8 @@ class FlagService:
             },
         )
         if item.verified:
-            if normalized == "VALID" and changed:
-                await event_service.append(
-                    session, run.id, "run.status_changed", {"status": run.status}
-                )
-            await event_service.append(session, run.id, "flag.verified", {"candidate_id": item.id})
+            verified_event = await event_service.append(session, run.id, "flag.verified", {"candidate_id": item.id})
+            await verified_flag_stop_controller.stop(session, run, candidate_id=item.id, terminal_event_sequence=verified_event.sequence)
         return item
 
 

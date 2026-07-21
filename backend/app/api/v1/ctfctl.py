@@ -2,23 +2,23 @@
 from __future__ import annotations
 
 import hashlib
+import secrets
 import shutil
 import tarfile
 import zipfile
-import secrets
 from datetime import UTC, datetime, timedelta
 from pathlib import Path, PurePosixPath
 
 from fastapi import APIRouter, Depends, Header
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
 from app.core.database import get_session
 from app.core.exceptions import DomainError
 from app.models.challenge import Challenge
-from app.models.run import RunAttempt, RunExecutionLease, SolveRun
+from app.models.run import RunAttempt, RunExecutionLease, SolveRun, ToolInvocationTicket
 from app.orchestration.state_machine import RunStatus, transition
 from app.services.events import event_service
 from app.services.tool_permissions import effective_tools_for
@@ -131,10 +131,33 @@ async def scoped_run(payload: Request, access_key: str | None, session: AsyncSes
     attempt = await session.get(RunAttempt, payload.scope.attempt_id)
     now = datetime.now(UTC)
     expires_at = lease.expires_at.replace(tzinfo=UTC) if lease and lease.expires_at.tzinfo is None else lease.expires_at if lease else None
+    master_lease = bool(lease and lease.lease_token == payload.scope.lease_token)
+    ticket = None
+    ticket_valid = False
+    if not master_lease:
+        ticket = await session.scalar(
+            select(ToolInvocationTicket).where(
+                ToolInvocationTicket.ticket_hash == hashlib.sha256(payload.scope.lease_token.encode()).hexdigest(),
+                ToolInvocationTicket.run_id == run.id,
+                ToolInvocationTicket.attempt_id == attempt.id if attempt else False,
+            )
+        )
+        ticket_expires = ticket.expires_at.replace(tzinfo=UTC) if ticket and ticket.expires_at and ticket.expires_at.tzinfo is None else ticket.expires_at if ticket else None
+        if ticket and ticket_expires and ticket_expires > now:
+            consumed = await session.execute(
+                update(ToolInvocationTicket)
+                .where(
+                    ToolInvocationTicket.id == ticket.id,
+                    ToolInvocationTicket.used_at.is_(None),
+                    ToolInvocationTicket.expires_at > now,
+                )
+                .values(used_at=now)
+            )
+            ticket_valid = consumed.rowcount == 1
     if (
         not lease
         or not attempt
-        or lease.lease_token != payload.scope.lease_token
+        or (not master_lease and not ticket_valid)
         or lease.attempt_id != payload.scope.attempt_id
         or attempt.run_id != run.id
         or attempt.status != "RUNNING"
@@ -153,12 +176,22 @@ async def tool_ticket(payload: ToolTicketRequest, x_ctfctl_access_key: str | Non
     now = datetime.now(UTC)
     if not run or not attempt or attempt.run_id != payload.run_id or attempt.status != "RUNNING" or not lease or lease.attempt_id != attempt.id:
         raise DomainError("CTFCTL_LEASE_INVALID", "Run, attempt, or lease is not active.", status_code=409)
-    lease.lease_token = secrets.token_urlsafe(32)
-    lease.acquired_at = now
-    lease.heartbeat_at = now
-    lease.expires_at = now + timedelta(seconds=30)
+    raw_ticket = secrets.token_urlsafe(32)
+    lease_expires = lease.expires_at.replace(tzinfo=UTC) if lease.expires_at.tzinfo is None else lease.expires_at
+    ticket = ToolInvocationTicket(
+        ticket_hash=hashlib.sha256(raw_ticket.encode()).hexdigest(),
+        run_id=run.id,
+        attempt_id=attempt.id,
+        thread_id=payload.thread_id,
+        model_turn_id=payload.model_turn_id,
+        lease_id=lease.id,
+        created_at=now,
+        expires_at=min(lease_expires, now + timedelta(seconds=30)),
+    )
+    session.add(ticket)
     await session.commit()
-    return {"data": {"run_id": run.id, "attempt_id": attempt.id, "ticket": lease.lease_token, "expires_at": lease.expires_at.isoformat(), "ttl_seconds": 30}}
+    expires_at = ticket.expires_at.replace(tzinfo=UTC) if ticket.expires_at.tzinfo is None else ticket.expires_at
+    return {"data": {"run_id": run.id, "attempt_id": attempt.id, "ticket": raw_ticket, "expires_at": expires_at.isoformat(), "ttl_seconds": 30}}
 
 
 def policy_for(payload: Request, root: Path) -> WorkspacePolicy:

@@ -1,5 +1,6 @@
 import contextlib
 import hashlib
+import json
 import re
 from pathlib import Path
 
@@ -7,7 +8,15 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.challenge import Challenge
-from app.models.run import Artifact, Observation, RunEvent, SolveRun, ToolCall
+from app.models.run import (
+    Artifact,
+    LogicalToolCall,
+    Observation,
+    RunEvent,
+    SolveRun,
+    ToolCall,
+    ToolExecutionTrace,
+)
 from app.orchestration.state_machine import TERMINAL, RunStatus
 from app.services.flags import flag_service
 from app.services.reports import report_service
@@ -39,16 +48,27 @@ class CodexMaterializer:
                 )
             ).all()
         )
+        verified_sequence = next(
+            (event.sequence for event in events if event.event_type == "flag.verified"), None
+        )
+        if verified_sequence is not None:
+            run.terminal_event_sequence = verified_sequence
+            run.thread_invalidated = True
         for event in events:
+            if run.thread_invalidated and run.terminal_event_sequence is not None and event.sequence > run.terminal_event_sequence and event.event_type in {
+                "tool.requested", "tool.started", "tool.completed", "tool.failed", "artifact.created", "observation.created",
+            }:
+                existing = list(run.post_terminal_events_json or [])
+                existing.append({"sequence": event.sequence, "event_type": event.event_type, "payload": event.payload_json or {}})
+                run.post_terminal_events_json = existing[-200:]
+                continue
             await self._apply_event(session, run, challenge, event)
 
         self._refresh_run_metrics(run, events)
         await session.commit()
 
         if RunStatus(run.status) in TERMINAL:
-            report = await session.scalar(
-                select(Artifact).where(Artifact.run_id == run.id, Artifact.artifact_type == "report")
-            )
+            report = await session.scalar(select(Artifact).where(Artifact.run_id == run.id, Artifact.artifact_type == "report", Artifact.status == "ACTIVE"))
             if report is None:
                 await report_service.generate(
                     session,
@@ -87,9 +107,8 @@ class CodexMaterializer:
             # forbidden host-side execution as a valid solving step.
             return
         marker = f"codex:{tool_call_ref}"
-        tool_call = await session.scalar(
-            select(ToolCall).where(ToolCall.run_id == run.id, ToolCall.runner_job_id == marker)
-        )
+        logical_id = str(payload.get("logical_tool_call_id") or marker)
+        tool_call = await session.scalar(select(ToolCall).where(ToolCall.run_id == run.id, ToolCall.logical_tool_call_id == logical_id))
         if tool_call is None:
             tool_call = ToolCall(
                 run_id=run.id,
@@ -99,20 +118,64 @@ class CodexMaterializer:
                 runner_job_id=marker,
                 started_at=event.created_at,
                 finished_at=event.created_at if event.event_type != "tool.started" else None,
-                logical_tool_call_id=str(payload.get("logical_tool_call_id") or marker),
+                logical_tool_call_id=logical_id,
                 parent_tool_call_id=str(payload.get("parent_tool_call_id")) if payload.get("parent_tool_call_id") else None,
                 execution_layer="codex_mcp",
             )
             session.add(tool_call)
             await session.flush()
-        else:
-            tool_call.tool_name = str(tool_name)
-            tool_call.arguments_json = self._tool_arguments(payload)
-            tool_call.status = "STARTED" if event.event_type == "tool.started" else self._tool_status(event)
-            if tool_call.started_at is None:
-                tool_call.started_at = event.created_at
-            if event.event_type != "tool.started":
-                tool_call.finished_at = event.created_at
+            logical = LogicalToolCall(
+                id=logical_id,
+                run_id=run.id,
+                attempt_id=str(payload.get("attempt_id")) if payload.get("attempt_id") else None,
+                engine_type=run.engine_type,
+                tool_name=str(tool_name),
+                arguments_digest=hashlib.sha256(json.dumps(self._tool_arguments(payload), sort_keys=True, default=str).encode()).hexdigest(),
+                status=tool_call.status,
+                started_at=tool_call.started_at,
+            )
+            session.add(logical)
+        logical = await session.get(LogicalToolCall, logical_id)
+        if logical is None:
+            logical = LogicalToolCall(
+                id=logical_id,
+                run_id=run.id,
+                engine_type=run.engine_type,
+                tool_name=str(tool_name),
+                arguments_digest=hashlib.sha256(json.dumps(self._tool_arguments(payload), sort_keys=True, default=str).encode()).hexdigest(),
+                status=tool_call.status,
+                started_at=tool_call.started_at,
+            )
+            session.add(logical)
+            await session.flush()
+        if logical:
+            logical.status = tool_call.status
+            logical.finished_at = tool_call.finished_at
+            payload_digest = hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str).encode()).hexdigest()
+            trace = await session.scalar(select(ToolExecutionTrace).where(
+                ToolExecutionTrace.logical_tool_call_id == logical.id,
+                ToolExecutionTrace.event_type == event.event_type,
+                ToolExecutionTrace.external_id == tool_call.runner_job_id,
+                ToolExecutionTrace.payload_digest == payload_digest,
+            ))
+            if trace is None:
+                session.add(ToolExecutionTrace(
+                    logical_tool_call_id=logical.id,
+                    execution_layer=str(payload.get("execution_layer") or "codex_mcp"),
+                    event_type=event.event_type,
+                    external_id=tool_call.runner_job_id,
+                    payload_digest=payload_digest,
+                ))
+        tool_call.tool_name = str(tool_name)
+        tool_call.arguments_json = self._tool_arguments(payload)
+        tool_call.status = "STARTED" if event.event_type == "tool.started" else self._tool_status(event)
+        if tool_call.started_at is None:
+            tool_call.started_at = event.created_at
+        if event.event_type != "tool.started":
+            tool_call.finished_at = event.created_at
+        if logical:
+            logical.status = tool_call.status
+            logical.finished_at = tool_call.finished_at
 
         if event.event_type in {"tool.completed", "tool.failed"}:
             await self._materialize_tool_artifact(session, run, challenge, tool_call, event)
@@ -259,6 +322,11 @@ class CodexMaterializer:
                 seen_tools.add(tool_ref)
         run.agent_step_count = len(seen_steps)
         run.tool_call_count = len(seen_tools)
+        run.run_total_agent_steps = len(seen_steps)
+        run.run_total_logical_tool_calls = len(seen_tools)
+        run.attempt_agent_steps = len(seen_steps)
+        run.attempt_logical_tool_calls = len(seen_tools)
+        run.checkpoint_segment_steps = len(seen_steps)
 
     @staticmethod
     def _tool_arguments(payload: dict) -> dict:

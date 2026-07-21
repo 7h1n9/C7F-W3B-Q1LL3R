@@ -1,0 +1,15 @@
+name: sql_boolean_compare
+display_name: SQL Boolean Compare
+category: web
+description: Compare bounded TRUE and FALSE SQL conditions on an authorized challenge endpoint.
+risk_level: medium
+enabled: true
+parameters:
+  endpoint: {type: string, required: true}
+  parameter: {type: string, required: true}
+  baseline_value: {type: string, required: false}
+  true_condition: {type: string, required: false}
+  false_condition: {type: string, required: false}
+  max_requests: {type: integer, required: false}
+limits: {max_requests: 4, concurrency: 2}
+permissions: {target_allowlist_required: true}
