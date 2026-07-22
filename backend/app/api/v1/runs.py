@@ -399,7 +399,7 @@ async def start_run(run_id: str, session: AsyncSession = Depends(get_session)) -
     active_lease = await session.scalar(select(RunExecutionLease).where(RunExecutionLease.run_id == run.id))
     if active_lease:
         raise DomainError("RUN_ALREADY_EXECUTING", "Run already has an active execution lease.", status_code=409)
-    if run.status not in {RunStatus.CREATED, RunStatus.PAUSED_RECOVERY, RunStatus.PAUSED_CHECKPOINT, RunStatus.WAITING_CONFIGURATION}:
+    if run.status not in {RunStatus.CREATED, RunStatus.PAUSED_RECOVERY, RunStatus.PAUSED_DEPLOYMENT, RunStatus.PAUSED_CHECKPOINT, RunStatus.WAITING_CONFIGURATION}:
         raise DomainError(
             "RUN_INVALID_STATE",
             "Only created or paused recoverable runs can be started.",
@@ -435,7 +435,7 @@ async def enqueue_run_message(run_id: str, payload: dict, session: AsyncSession 
     await event_service.append(session, run.id, "user.input_received", {"revision": revision, "input_type": item.input_type})
     # A running turn is never interrupted. Paused runs can safely resume so
     # this input is consumed on the next Agent Step.
-    if run.id not in orchestrator.active_tasks and RunStatus(run.status) in {RunStatus.WAITING_USER, RunStatus.PAUSED_CHECKPOINT, RunStatus.PAUSED_RECOVERY, RunStatus.WAITING_CONFIGURATION, RunStatus.PAUSED_RATE_LIMIT}:
+    if run.id not in orchestrator.active_tasks and RunStatus(run.status) in {RunStatus.WAITING_USER, RunStatus.PAUSED_CHECKPOINT, RunStatus.PAUSED_RECOVERY, RunStatus.PAUSED_DEPLOYMENT, RunStatus.WAITING_CONFIGURATION, RunStatus.PAUSED_RATE_LIMIT}:
         asyncio.create_task(orchestrator.start(run.id))
     return {"data": {"accepted": True, "revision": revision, "status": "QUEUED", "message": "补充信息已加入，将在下一 Agent Step 使用。"}}
 
@@ -721,6 +721,11 @@ async def review_flag_candidate(
 async def get_report(run_id: str, session: AsyncSession = Depends(get_session)) -> dict:
     run = await ensure_codex_materialized(session, await require_run(run_id, session))
     run = await ensure_flag_consistency(session, run)
+    if RunStatus(run.status) not in {RunStatus.COMPLETED_SOLVED, RunStatus.COMPLETED_UNSOLVED}:
+        raise DomainError("REPORT_NOT_AVAILABLE", "Formal writeups are only available for completed runs.", status_code=409)
+    active_report = await session.scalar(select(Artifact.id).where(Artifact.run_id == run.id, Artifact.artifact_type == "report", Artifact.status == "ACTIVE"))
+    if active_report is None:
+        raise DomainError("REPORT_NOT_FOUND", "No active formal report has been generated for this run.", status_code=404)
     path = Path(run.workspace_path) / "final" / "writeup.md"
     if not path.is_file():
         raise DomainError(

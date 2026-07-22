@@ -23,6 +23,12 @@ class BridgeUnavailableError(RuntimeError):
     pass
 
 
+class BridgeConfigurationError(RuntimeError):
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+
+
 class CodexSdkEngine(SolveEngine):
     def __init__(
         self,
@@ -63,6 +69,13 @@ class CodexSdkEngine(SolveEngine):
             except httpx.HTTPStatusError as error:
                 status = error.response.status_code
                 last_error = error
+                try:
+                    body = error.response.json()
+                except ValueError:
+                    body = {}
+                code = str(body.get("code") or "") if isinstance(body, dict) else ""
+                if code in {"MCP_PROCESS_START_FAILED", "MCP_INITIALIZE_FAILED", "MCP_TOOL_CATALOG_FAILED", "MCP_SCHEMA_INVALID", "MCP_BACKEND_UNREACHABLE", "DATABASE_MIGRATION_MISMATCH", "RUNNER_CONFIGURATION_INVALID", "CODEX_CLI_EXITED", "CODEX_THREAD_CREATE_FAILED"}:
+                    raise BridgeConfigurationError(code, str(body.get("message") or code)) from error
                 if status in TRANSIENT_HTTP_STATUSES and attempt < self.max_attempts - 1:
                     await self._sleep_for_retry(
                         attempt, retry_after=parse_retry_after(error.response.headers)

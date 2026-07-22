@@ -5,10 +5,11 @@
  */
 import { createInterface } from "node:readline";
 import { appendFileSync } from "node:fs";
-import { parametersToInputSchema } from "./mcp-schema.js";
+import { parametersToInputSchema, validateMcpInputSchema } from "./mcp-schema.js";
 
-type Scope = { run_id: string; challenge_id: string; workspace_root: string; allowed_hosts: string[]; attempt_id: string; lease_token: string; thread_id?: string; model_turn_id?: string };
+type Scope = { run_id: string; challenge_id: string; workspace_root: string; allowed_hosts: string[]; attempt_id: string; lease_token: string; master_lease_token?: string; thread_id?: string; model_turn_id?: string };
 let scope = JSON.parse(process.env.CTFCTL_SCOPE ?? "{}") as Scope;
+const masterScope = { ...scope, master_lease_token: scope.master_lease_token ?? scope.lease_token };
 const backendUrl = (process.env.CTFCTL_BACKEND_URL ?? "http://127.0.0.1:8000").replace(/\/$/, "");
 const accessKey = process.env.CTFCTL_ACCESS_KEY ?? "";
 const debugLog = process.env.CTFCTL_DEBUG_LOG;
@@ -29,6 +30,7 @@ async function toolDefinitions() {
   const catalog = await backend("list_tools", {});
   const candidateRows: unknown = catalog?.tools;
   const rows: unknown[] = Array.isArray(candidateRows) ? candidateRows : [];
+  const rejected: Array<{ name: string; errors: string[] }> = [];
   const definitions = rows
     .filter((item: unknown): item is Record<string, unknown> => Boolean(item) && typeof item === "object" && typeof (item as Record<string, unknown>).name === "string")
     .map((item: Record<string, unknown>) => ({
@@ -47,7 +49,16 @@ async function toolDefinitions() {
       openWorldHint: false,
     },
     inputSchema: parametersToInputSchema(item.parameters, String(item.name)),
-  }));
+  }))
+    .filter((item) => {
+      const errors = validateMcpInputSchema(item.inputSchema);
+      if (errors.length) {
+        rejected.push({ name: item.name, errors });
+        return false;
+      }
+      return true;
+    });
+  if (rejected.length) debug("mcp_tool_schema_rejected", { rejected });
   if (definitions.length === 0) throw new Error("CTFCTL_TOOL_CATALOG_EMPTY");
   advertisedTools = new Set(definitions.map((item) => item.name));
   return definitions;
@@ -68,10 +79,10 @@ async function backend(method: string, params: Record<string, unknown>) {
       method: "POST",
       headers: { "content-type": "application/json", "x-ctfctl-access-key": accessKey },
       body: JSON.stringify({
-        run_id: scope.run_id,
-        current_attempt_id: scope.attempt_id,
-        thread_id: scope.thread_id ?? null,
-        model_turn_id: scope.model_turn_id ?? null,
+        run_id: masterScope.run_id,
+        current_attempt_id: masterScope.attempt_id,
+        thread_id: masterScope.thread_id ?? null,
+        model_turn_id: masterScope.model_turn_id ?? null,
       }),
     });
     const ticketBody = await ticketResponse.json().catch(() => ({}));
@@ -80,12 +91,22 @@ async function backend(method: string, params: Record<string, unknown>) {
     }
     const ticket = ticketBody.data?.ticket;
     if (typeof ticket !== "string" || !ticket) throw new Error("CTFCTL_TICKET_INVALID");
-    scope = { ...scope, lease_token: ticket };
+    // Keep the master lease immutable. The one-shot ticket is sent as a
+    // separate request field and never replaces the scope credential.
+    const requestScope = { ...masterScope, lease_token: masterScope.master_lease_token };
+    const response = await fetch(`${backendUrl}/api/v1/internal/ctfctl/${endpoint}`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-ctfctl-access-key": accessKey },
+      body: JSON.stringify({ scope: requestScope, tool_ticket: ticket, ...params }),
+    });
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(`${body.code ?? "CTFCTL_ERROR"}: ${body.message ?? response.statusText}`);
+    return body.data ?? body;
   }
   const response = await fetch(`${backendUrl}/api/v1/internal/ctfctl/${endpoint}`, {
     method: "POST",
     headers: { "content-type": "application/json", "x-ctfctl-access-key": accessKey },
-    body: JSON.stringify({ scope, ...params }),
+    body: JSON.stringify({ scope: masterScope, ...params }),
   });
   const body = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(`${body.code ?? "CTFCTL_ERROR"}: ${body.message ?? response.statusText}`);

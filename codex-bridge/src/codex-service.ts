@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, symlinkSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -30,6 +30,7 @@ export class CodexService {
       mock_mode: this.mock,
       executable: !this.mock,
       codex_sdk_loaded: true,
+      sdk_version: sdkVersion(),
       ctfctl_mcp_ready: ctfctlMcpReady,
       version: bridgeVersion(),
       active_threads: this.threads.size(),
@@ -89,6 +90,47 @@ export class CodexService {
     throw new Error("CANCEL_NOT_SUPPORTED");
   }
 
+  failureResponse(threadId: string, error: unknown): { code: string; message: string; details: Record<string, unknown> } {
+    const raw = error instanceof Error ? error.message : String(error);
+    const lower = raw.toLowerCase();
+    const code = lower.includes("thread/start failed") || lower.includes("failed to create thread")
+      ? "CODEX_THREAD_CREATE_FAILED"
+      : lower.includes("ctfctl_") || lower.includes("mcp error")
+      ? "MCP_BACKEND_UNREACHABLE"
+      : lower.includes("required mcp") || lower.includes("initialize")
+        ? "MCP_INITIALIZE_FAILED"
+        : lower.includes("spawn") || lower.includes("enoent") || lower.includes("process start")
+          ? "MCP_PROCESS_START_FAILED"
+          : lower.includes("tool catalog") || lower.includes("tools/list")
+            ? "MCP_TOOL_CATALOG_FAILED"
+            : lower.includes("codex exec exited")
+              ? "CODEX_CLI_EXITED"
+              : "CODEX_STREAM_INTERRUPTED";
+    const diagnosticId = randomUUID();
+    const scope = this.scopes.get(threadId);
+    const safe = raw.replace(/(access[_ -]?key|lease[_ -]?token|tool[_ -]?ticket|cookie|api[_ -]?key)=?[^\s,;]+/gi, "$1=[REDACTED]");
+    const diagnostic = {
+      diagnostic_id: diagnosticId,
+      exit_code: Number(raw.match(/exited with code (\d+)/i)?.[1] ?? 0),
+      stderr: safe.slice(0, 12000), stdout_excerpt: "", sdk_version: sdkVersion(),
+      node_version: process.version, command: process.env.CODEX_PATH ?? "codex",
+      args: ["exec", "--experimental-json"],
+      environment_key_names: Object.keys(process.env).filter((key) => /CODEX|MCP|NODE_ENV/.test(key)).sort(),
+      failed_stage: code.startsWith("MCP_") ? "MCP_INITIALIZE" : "CODEX_STREAM",
+      timestamp: new Date().toISOString(),
+    };
+    let diagnosticPath: string | undefined;
+    if (scope?.workspace_root) {
+      try {
+        const directory = join(resolve(scope.workspace_root), "diagnostics", "codex-bridge");
+        mkdirSync(directory, { recursive: true });
+        diagnosticPath = join(directory, `${diagnosticId}.json`);
+        writeFileSync(diagnosticPath, JSON.stringify(diagnostic, null, 2), "utf8");
+      } catch { /* diagnostics must never mask the stable error */ }
+    }
+    return { code, message: code.startsWith("MCP_") ? "ctfctl MCP failed during startup." : "Codex Bridge stream failed.", details: { diagnostic_id: diagnosticId, diagnostic_artifact: diagnosticPath, stage: diagnostic.failed_stage } };
+  }
+
   private mockThread(input: ThreadRequest): SdkThread {
     return {
       runStreamed: async (prompt: string) => ({
@@ -112,7 +154,7 @@ export class CodexService {
         mcp_servers: {
           ctfctl: {
             enabled: true,
-            required: true,
+            required: Boolean(scope.mcp_required ?? (process.env.CODEX_MCP_REQUIRED === "true")),
             command: mcpLaunch.command,
             args: mcpLaunch.args,
             env: {
@@ -166,7 +208,7 @@ export function resolveCtfctlMcpLaunch(): { command: string; args: string[] } {
   throw new Error("CTFCTL_MCP_ENTRYPOINT_NOT_FOUND");
 }
 
-type CtfctlScope = { run_id: string; challenge_id: string; workspace_root: string; allowed_hosts: string[]; attempt_id: string; lease_token: string; thread_id?: string; model_turn_id?: string };
+type CtfctlScope = { run_id: string; challenge_id: string; workspace_root: string; allowed_hosts: string[]; attempt_id: string; lease_token: string; master_lease_token?: string; mcp_required?: boolean; thread_id?: string; model_turn_id?: string };
 
 function normalizeScope(input: ThreadRequest): CtfctlScope {
   const raw = input.scope ?? {};
@@ -179,6 +221,8 @@ function normalizeScope(input: ThreadRequest): CtfctlScope {
       : [],
     attempt_id: typeof raw.attempt_id === "string" ? raw.attempt_id : "",
     lease_token: typeof raw.lease_token === "string" ? raw.lease_token : "",
+    master_lease_token: typeof raw.master_lease_token === "string" ? raw.master_lease_token : undefined,
+    mcp_required: typeof raw.mcp_required === "boolean" ? raw.mcp_required : undefined,
     thread_id: typeof raw.thread_id === "string" ? raw.thread_id : undefined,
     model_turn_id: typeof raw.model_turn_id === "string" ? raw.model_turn_id : undefined,
   };
@@ -187,6 +231,15 @@ function normalizeScope(input: ThreadRequest): CtfctlScope {
 function bridgeVersion(): string {
   try {
     const packageJson = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf-8"));
+    return String(packageJson.version || "unknown");
+  } catch {
+    return "unknown";
+  }
+}
+
+function sdkVersion(): string {
+  try {
+    const packageJson = JSON.parse(readFileSync(new URL("../node_modules/@openai/codex-sdk/package.json", import.meta.url), "utf-8"));
     return String(packageJson.version || "unknown");
   } catch {
     return "unknown";

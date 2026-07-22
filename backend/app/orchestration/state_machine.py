@@ -26,6 +26,7 @@ class RunStatus(StrEnum):
     RETRYING = "RETRYING"
     PAUSED_CHECKPOINT = "PAUSED_CHECKPOINT"
     PAUSED_RECOVERY = "PAUSED_RECOVERY"
+    PAUSED_DEPLOYMENT = "PAUSED_DEPLOYMENT"
     WAITING_CONFIGURATION = "WAITING_CONFIGURATION"
 
 
@@ -45,6 +46,7 @@ RESTARTABLE = {
     RunStatus.PAUSED_RATE_LIMIT,
     RunStatus.PAUSED_CHECKPOINT,
     RunStatus.PAUSED_RECOVERY,
+    RunStatus.PAUSED_DEPLOYMENT,
     RunStatus.WAITING_CONFIGURATION,
 }
 TIMEOUT_SOURCES = {
@@ -66,6 +68,7 @@ ALLOWED: dict[RunStatus, set[RunStatus]] = {
         RunStatus.FAILED_RUNNER,
         RunStatus.CANCELLED,
         RunStatus.POLICY_BLOCKED,
+        RunStatus.WAITING_CONFIGURATION,
     },
     RunStatus.PREPARING: {
         RunStatus.ANALYZING,
@@ -106,7 +109,7 @@ ALLOWED: dict[RunStatus, set[RunStatus]] = {
         RunStatus.FAILED_ENGINE,
         RunStatus.CANCELLED,
     },
-    RunStatus.WAITING_USER: {RunStatus.PLANNING, RunStatus.FAILED_ENGINE, RunStatus.CANCELLED},
+    RunStatus.WAITING_USER: {RunStatus.PLANNING, RunStatus.WAITING_CONFIGURATION, RunStatus.FAILED_ENGINE, RunStatus.CANCELLED},
     RunStatus.VERIFYING_FLAG: {
         RunStatus.REPORTING,
         RunStatus.PLANNING,
@@ -126,6 +129,7 @@ ALLOWED: dict[RunStatus, set[RunStatus]] = {
         RunStatus.CANCELLED,
     },
     RunStatus.PAUSED_RECOVERY: {RunStatus.PLANNING, RunStatus.CANCELLED},
+    RunStatus.PAUSED_DEPLOYMENT: {RunStatus.PLANNING, RunStatus.CANCELLED},
     RunStatus.WAITING_CONFIGURATION: {RunStatus.PLANNING, RunStatus.CANCELLED},
     RunStatus.RETRYING: {RunStatus.PLANNING, RunStatus.WAITING_CONFIGURATION, RunStatus.CANCELLED},
 }
@@ -139,9 +143,18 @@ for status in TIMEOUT_SOURCES:
             RunStatus.RETRYING,
             RunStatus.PAUSED_CHECKPOINT,
             RunStatus.PAUSED_RECOVERY,
+            RunStatus.PAUSED_DEPLOYMENT,
             RunStatus.WAITING_CONFIGURATION,
         }
     )
+
+# A planned service restart may encounter any non-terminal phase, including
+# checkpoint/rate-limit/configuration pauses that are not timeout sources.
+# Reconcile those runs into the explicit deployment-pause state instead of
+# aborting application startup on an invalid transition.
+for status in RunStatus:
+    if status not in TERMINAL:
+        ALLOWED.setdefault(status, set()).add(RunStatus.PAUSED_DEPLOYMENT)
 
 
 def transition(run: object, target: RunStatus) -> None:

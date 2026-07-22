@@ -2,7 +2,7 @@ import asyncio
 import contextlib
 import hashlib
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from time import monotonic
 
@@ -12,6 +12,7 @@ from app.core.config import get_settings
 from app.core.database import SessionLocal
 from app.core.exceptions import DomainError
 from app.engines import (
+    BridgeConfigurationError,
     BridgeRateLimitError,
     BridgeUnavailableError,
     CodexSdkEngine,
@@ -29,6 +30,8 @@ from app.models.run import (
     Artifact,
     FlagCandidate,
     Observation,
+    RunAttempt,
+    RunExecutionLease,
     RunUserInput,
     SolveRun,
     ToolCall,
@@ -40,6 +43,7 @@ from app.services.action_fingerprint import fingerprint_action
 from app.services.action_quality import action_quality_gate, recovery_planner
 from app.services.attack_chain import classify_rejection
 from app.services.codex_materializer import codex_materializer
+from app.services.codex_preflight import codex_preflight_service
 from app.services.context_builder import context_builder
 from app.services.crypto import decrypt_api_key
 from app.services.events import event_service
@@ -75,6 +79,20 @@ class SolveOrchestrator:
         self.engine_factory = engine_factory
         self.active_engines: dict[str, object] = {}
         self.active_tasks: dict[str, asyncio.Task[None]] = {}
+
+    async def _lease_heartbeat_loop(self, run_id: str, attempt_id: str, lease_id: str) -> None:
+        while True:
+            await asyncio.sleep(15)
+            async with SessionLocal() as heartbeat_session:
+                attempt = await heartbeat_session.get(RunAttempt, attempt_id)
+                lease = await heartbeat_session.get(RunExecutionLease, lease_id)
+                if not attempt or not lease or attempt.run_id != run_id or attempt.status != "RUNNING":
+                    return
+                now = datetime.now(UTC)
+                attempt.heartbeat_at = now
+                lease.heartbeat_at = now
+                lease.expires_at = now + timedelta(seconds=run_attempt_service.lease_ttl_seconds)
+                await heartbeat_session.commit()
 
     async def _correct_phase(self, session, run: SolveRun, requested: str | None) -> None:
         phase = str(requested or "").upper()
@@ -118,6 +136,8 @@ class SolveOrchestrator:
                     "allowed_hosts": list(challenge.allowed_hosts or []) if challenge else [],
                     "attempt_id": attempt.id if attempt else None,
                     "lease_token": lease.lease_token if lease else None,
+                    "master_lease_token": lease.lease_token if lease else None,
+                    "mcp_required": codex_preflight_service.is_ready(run.id),
                 },
             )
         if run.engine_type == "openai_compatible":
@@ -499,12 +519,28 @@ class SolveOrchestrator:
         async with SessionLocal() as session:
             attempt = None
             lease = None
+            heartbeat_task = None
             try:
                 run = await session.scalar(select(SolveRun).where(SolveRun.id == run_id))
                 if not run:
                     return
+                if run.engine_type == "codex_sdk" and not codex_preflight_service.is_ready(run.id):
+                    result = codex_preflight_service.last_result() or {}
+                    run.last_error_code = str(result.get("error_code") or "PREFLIGHT_REQUIRED")[:100]
+                    run.last_error_message = str(result.get("failed_stage") or "Codex preflight must pass before starting.")[:4000]
+                    if RunStatus(run.status) != RunStatus.WAITING_CONFIGURATION:
+                        await self._transition(session, run, RunStatus.WAITING_CONFIGURATION)
+                    await session.commit()
+                    await event_service.append(session, run.id, "run.configuration_blocked", {"code": run.last_error_code, "failed_stage": result.get("failed_stage") or "NOT_RUN", "diagnostic_artifact": result.get("diagnostic_artifact")})
+                    return
                 try:
                     attempt, lease = await run_attempt_service.begin(session, run)
+                    heartbeat_task = asyncio.create_task(self._lease_heartbeat_loop(run.id, attempt.id, lease.id))
+                    if run.status == RunStatus.PAUSED_DEPLOYMENT:
+                        run.last_error_code = None
+                        run.last_error_message = None
+                        await session.commit()
+                        await event_service.append(session, run.id, "run.resumed_after_deployment", {"code": "RESUMED_AFTER_DEPLOYMENT"})
                 except DomainError:
                     raise
                 except Exception as error:
@@ -562,27 +598,28 @@ class SolveOrchestrator:
                         code = "MODEL_UNAVAILABLE"
                     elif isinstance(error, ModelProviderError):
                         code = error.code
+                    elif isinstance(error, BridgeConfigurationError):
+                        code = error.code
                     elif isinstance(error, BridgeUnavailableError):
-                        code = "CODEX_BRIDGE_UNAVAILABLE"
+                        code = "CODEX_STREAM_INTERRUPTED"
                     elif isinstance(error, DomainError):
                         code = error.code
                     else:
                         code = "ENGINE_ERROR"
                     run.last_error_code, run.last_error_message = code, str(error)[:4000]
-                    await self._transition(
-                        session,
-                        run,
-                        RunStatus.PAUSED_RATE_LIMIT
-                        if isinstance(error, ModelRateLimitError)
-                        else RunStatus.FAILED_ENGINE,
-                    )
+                    target = RunStatus.PAUSED_RATE_LIMIT if isinstance(error, ModelRateLimitError) else RunStatus.PAUSED_RECOVERY if isinstance(error, BridgeUnavailableError) or code == "CODEX_STREAM_INTERRUPTED" else RunStatus.WAITING_CONFIGURATION if isinstance(error, (BridgeConfigurationError, DomainError) and code == "RUN_CONFIGURATION_BLOCKED") else RunStatus.FAILED_ENGINE
+                    await self._transition(session, run, target)
                     await event_service.append(
                         session,
                         run_id,
-                        "run.failed",
+                        "run.paused_recovery" if isinstance(error, BridgeUnavailableError) or code == "CODEX_STREAM_INTERRUPTED" else "run.configuration_blocked" if isinstance(error, BridgeConfigurationError) or code == "RUN_CONFIGURATION_BLOCKED" else "run.failed",
                         {"code": code, "message": str(error)[:1000]},
                     )
             finally:
+                if heartbeat_task is not None:
+                    heartbeat_task.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await heartbeat_task
                 if attempt is not None and "run" in locals():
                     await run_attempt_service.finish(session, run, attempt, lease)
                 self.active_engines.pop(run_id, None)
@@ -609,6 +646,7 @@ class SolveOrchestrator:
             RunStatus.PAUSED_RATE_LIMIT,
             RunStatus.PAUSED_CHECKPOINT,
             RunStatus.PAUSED_RECOVERY,
+            RunStatus.PAUSED_DEPLOYMENT,
             RunStatus.WAITING_CONFIGURATION,
         }:
             await self._transition(session, run, RunStatus.PLANNING)
@@ -1352,17 +1390,18 @@ class SolveOrchestrator:
             await event_service.append(session, run.id, "run.started", {})
             iterator = engine.start(run.id)
         elif user_message:
-            if run.status in {RunStatus.WAITING_USER, RunStatus.PAUSED_CHECKPOINT, RunStatus.PAUSED_RECOVERY, RunStatus.WAITING_CONFIGURATION, RunStatus.PAUSED_RATE_LIMIT}:
+            if run.status in {RunStatus.WAITING_USER, RunStatus.PAUSED_CHECKPOINT, RunStatus.PAUSED_RECOVERY, RunStatus.PAUSED_DEPLOYMENT, RunStatus.WAITING_CONFIGURATION, RunStatus.PAUSED_RATE_LIMIT}:
                 await self._transition(session, run, RunStatus.PLANNING)
             iterator = engine.continue_run(run.id, user_message)
         else:
-            if run.status in {RunStatus.WAITING_USER, RunStatus.PAUSED_CHECKPOINT, RunStatus.PAUSED_RECOVERY, RunStatus.WAITING_CONFIGURATION, RunStatus.PAUSED_RATE_LIMIT}:
+            if run.status in {RunStatus.WAITING_USER, RunStatus.PAUSED_CHECKPOINT, RunStatus.PAUSED_RECOVERY, RunStatus.PAUSED_DEPLOYMENT, RunStatus.WAITING_CONFIGURATION, RunStatus.PAUSED_RATE_LIMIT}:
                 await self._transition(session, run, RunStatus.PLANNING)
             iterator = engine.resume(run.id)
         auto_turns = 0
         max_auto_turns = max(1, run.max_agent_steps)
         auto_started = monotonic()
         no_progress_turns = 0
+        zero_evidence_turns = 0
         while True:
             await run_attempt_service.heartbeat(session, attempt, lease)
             auto_turns += 1
@@ -1373,8 +1412,20 @@ class SolveOrchestrator:
                     run.codex_thread_id = thread_id
                     await session.commit()
                 if item.event_type == "run.failed":
-                    run.last_error_code = str(item.payload.get("code") or "ENGINE_ERROR")[:100]
+                    event_code = str(item.payload.get("code") or "ENGINE_ERROR")[:100]
+                    run.last_error_code = event_code
                     run.last_error_message = str(item.payload.get("message") or "Engine failed")[:4000]
+                    if event_code in {"MCP_PROCESS_START_FAILED", "MCP_INITIALIZE_FAILED", "MCP_TOOL_CATALOG_FAILED", "MCP_SCHEMA_INVALID", "MCP_BACKEND_UNREACHABLE", "DATABASE_MIGRATION_MISMATCH", "RUNNER_CONFIGURATION_INVALID", "CODEX_CLI_EXITED", "CODEX_THREAD_CREATE_FAILED"}:
+                        if RunStatus(run.status) != RunStatus.WAITING_CONFIGURATION:
+                            await self._transition(session, run, RunStatus.WAITING_CONFIGURATION)
+                        await session.commit()
+                        await event_service.append(session, run.id, "run.configuration_blocked", {"code": event_code, "diagnostic_artifact": item.payload.get("diagnostic_artifact"), "stage": item.payload.get("stage")})
+                        continue
+                    if event_code == "CODEX_STREAM_INTERRUPTED":
+                        await self._transition(session, run, RunStatus.PAUSED_RECOVERY)
+                        await session.commit()
+                        await event_service.append(session, run.id, "run.paused_recovery", {"code": event_code})
+                        return
                     await session.commit()
                 if item.status and item.status != run.status:
                     await self._transition(session, run, RunStatus(item.status))
@@ -1386,12 +1437,41 @@ class SolveOrchestrator:
                 await event_service.append(session, run.id, "run.checkpoint_reached", {"step": run.agent_step_count, "interval": interval, "phase": run.current_phase, "remaining_steps": max(0, run.max_agent_steps - run.agent_step_count)})
                 return
             after_progress = await self._codex_progress_snapshot(session, run.id)
+            if after_progress[:3] == before_progress[:3]:
+                zero_evidence_turns += 1
+                await event_service.append(
+                    session,
+                    run.id,
+                    "codex.runtime_diagnostic",
+                    {
+                        "code": "CODEX_RUNTIME_DIAGNOSTIC",
+                        "turn": auto_turns,
+                        "tool_calls": 0,
+                        "artifacts": 0,
+                        "observations": 0,
+                        "action": "REPLAN_RETRY",
+                    },
+                )
+                no_progress_turns = 0
+                if zero_evidence_turns >= 3:
+                    run.last_error_code = "CODEX_RUNTIME_DIAGNOSTIC"
+                    run.last_error_message = "Codex produced no ToolCall, Artifact, or Observation after repeated replans."
+                    await self._transition(session, run, RunStatus.WAITING_CONFIGURATION)
+                    await event_service.append(
+                        session,
+                        run.id,
+                        "run.configuration_blocked",
+                        {"code": "CODEX_RUNTIME_DIAGNOSTIC", "required_action": "Run Codex preflight and continue."},
+                    )
+                    return
+            else:
+                zero_evidence_turns = 0
             if after_progress == before_progress:
                 no_progress_turns += 1
             else:
                 no_progress_turns = 0
             current_status = RunStatus(run.status)
-            if current_status in TERMINAL or current_status == RunStatus.WAITING_USER:
+            if current_status in TERMINAL or current_status in {RunStatus.WAITING_USER, RunStatus.WAITING_CONFIGURATION}:
                 return
             if run.engine_type != "codex_sdk":
                 return

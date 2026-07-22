@@ -1,5 +1,10 @@
 from app.engines.base import EngineEvent, SolveEngine
-from app.engines.codex_bridge import BridgeRateLimitError, BridgeUnavailableError, CodexSdkEngine
+from app.engines.codex_bridge import (
+    BridgeConfigurationError,
+    BridgeRateLimitError,
+    BridgeUnavailableError,
+    CodexSdkEngine,
+)
 from app.engines.mock import MockSolveEngine
 from app.engines.openai_compatible import (
     ModelProviderError,
@@ -18,5 +23,6 @@ __all__ = [
     "ModelProviderError",
     "CodexSdkEngine",
     "BridgeRateLimitError",
+    "BridgeConfigurationError",
     "BridgeUnavailableError",
 ]

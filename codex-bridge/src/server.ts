@@ -4,15 +4,23 @@ import type { ThreadRequest } from "./types.js";
 
 const app = Fastify({ logger: true });
 const service = new CodexService();
-function bridgeError(error: unknown) {
+function bridgeError(error: unknown, threadId?: string) {
   const code = error instanceof Error ? error.message : "BRIDGE_ERROR";
+  if (threadId && !["THREAD_NOT_FOUND", "CANCEL_NOT_SUPPORTED", "MOCK_MODE_DISABLED"].includes(code)) {
+    return { status: 502, body: service.failureResponse(threadId, error) };
+  }
   return { status: code === "THREAD_NOT_FOUND" ? 404 : code === "CANCEL_NOT_SUPPORTED" ? 501 : code === "MOCK_MODE_DISABLED" ? 503 : 502, body: { code, message: code === "THREAD_NOT_FOUND" ? "Thread not found" : code === "CANCEL_NOT_SUPPORTED" ? "Cancellation is not supported by the current Codex SDK" : code === "MOCK_MODE_DISABLED" ? "MOCK MODE — not executable for solving runs." : "Codex Bridge request failed", details: {} } };
 }
 
 app.get("/health", async () => service.health());
 app.post<{ Body: ThreadRequest }>("/threads", async (request, reply) => {
   if (!request.body?.run_id || !request.body.workspace_path || !request.body.prompt) return reply.code(422).send({ code: "VALIDATION_ERROR", message: "run_id, workspace_path and prompt are required", details: {} });
-  return service.create(request.body);
+  try {
+    return await service.create(request.body);
+  } catch (error) {
+    const response = service.failureResponse("", error);
+    return reply.code(502).send(response);
+  }
 });
 app.post<{ Params: { thread_id: string }; Body: { prompt: string } }>("/threads/:thread_id/run", async (request, reply) => {
   if (!service.hasThread(request.params.thread_id)) {
@@ -28,9 +36,9 @@ app.post<{ Params: { thread_id: string }; Body: { prompt: string } }>("/threads/
     }
     reply.raw.end();
   } catch (error) {
-    const response = bridgeError(error);
+    const response = bridgeError(error, request.params.thread_id);
     if (hijacked) {
-      reply.raw.write(`${JSON.stringify({ type: "run.failed", status: "FAILED_ENGINE", payload: { code: response.body.code, message: response.body.message } })}\n`);
+      reply.raw.write(`${JSON.stringify({ type: "run.failed", status: "FAILED_ENGINE", payload: { code: response.body.code, message: response.body.message, ...response.body.details } })}\n`);
       reply.raw.end();
     } else {
       return reply.code(response.status).send(response.body);
@@ -51,9 +59,9 @@ app.post<{ Params: { thread_id: string }; Body: { prompt: string } }>("/threads/
     }
     reply.raw.end();
   } catch (error) {
-    const response = bridgeError(error);
+    const response = bridgeError(error, request.params.thread_id);
     if (hijacked) {
-      reply.raw.write(`${JSON.stringify({ type: "run.failed", status: "FAILED_ENGINE", payload: { code: response.body.code, message: response.body.message } })}\n`);
+      reply.raw.write(`${JSON.stringify({ type: "run.failed", status: "FAILED_ENGINE", payload: { code: response.body.code, message: response.body.message, ...response.body.details } })}\n`);
       reply.raw.end();
     } else {
       return reply.code(response.status).send(response.body);

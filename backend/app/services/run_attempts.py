@@ -3,13 +3,15 @@ import socket
 import uuid
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import DomainError
-from app.models.run import AgentTurn, RunAttempt, RunExecutionLease, SolveRun
+from app.models.run import AgentTurn, RunAttempt, RunExecutionLease, SolveRun, ToolInvocationTicket
 from app.orchestration.state_machine import TERMINAL, RunStatus
+from app.services.codex_preflight import codex_preflight_service
+from app.services.events import event_service
 from app.services.solver_state import solver_state_service
 from app.services.terminal_outcomes import terminal_outcome_resolver
 
@@ -60,6 +62,13 @@ class RunAttemptService:
                 status_code=409,
             )
         await self.reclaim_expired_lease(session, run.id)
+        if await self.consecutive_zero_tool_failures(session, run.id) >= 2 and not codex_preflight_service.is_ready(run.id):
+            raise DomainError(
+                "RUN_CONFIGURATION_BLOCKED",
+                "Two consecutive zero-tool engine failures require a successful Codex preflight before another Attempt.",
+                {"run_id": run.id, "required_action": "POST /api/v1/readiness/codex-preflight/run"},
+                409,
+            )
         existing = await session.scalar(
             select(RunExecutionLease).where(RunExecutionLease.run_id == run.id)
         )
@@ -122,6 +131,22 @@ class RunAttemptService:
         await session.refresh(lease)
         return attempt, lease
 
+    async def consecutive_zero_tool_failures(self, session: AsyncSession, run_id: str) -> int:
+        attempts = list((await session.scalars(select(RunAttempt).where(RunAttempt.run_id == run_id).order_by(RunAttempt.attempt_number.desc()))).all())
+        count = 0
+        for attempt in attempts:
+            if attempt.status == "FAILED_ENGINE" and int(attempt.tool_calls or 0) == 0:
+                count += 1
+            else:
+                break
+        return count
+
+    async def cleanup_tickets(self, session: AsyncSession) -> int:
+        cutoff = utc_now() - timedelta(hours=24)
+        result = await session.execute(delete(ToolInvocationTicket).where(ToolInvocationTicket.expires_at < cutoff))
+        await session.commit()
+        return int(result.rowcount or 0)
+
     async def heartbeat(
         self, session: AsyncSession, attempt: RunAttempt | None, lease: RunExecutionLease | None
     ) -> None:
@@ -177,12 +202,23 @@ class RunAttemptService:
                 if expired or stale_owner:
                     attempt = await session.get(RunAttempt, lease.attempt_id)
                     if attempt and attempt.status == "RUNNING":
-                        attempt.status = "ABORTED"
-                        attempt.error_code = "PROCESS_INTERRUPTED"
+                        attempt.status = "PAUSED_DEPLOYMENT" if stale_owner and not expired else "ABORTED"
+                        attempt.error_code = "PAUSED_DEPLOYMENT" if stale_owner and not expired else "PROCESS_INTERRUPTED"
                         attempt.finished_at = now
-                        aborted_attempts += 1
+                        if not (stale_owner and not expired):
+                            aborted_attempts += 1
+                        if run and stale_owner and not expired and RunStatus(run.status) not in TERMINAL:
+                            run.status = RunStatus.PAUSED_DEPLOYMENT.value
+                            run.current_phase = RunStatus.PAUSED_DEPLOYMENT.value
+                            await event_service.append(session, run.id, "run.paused_deployment", {"code": "PAUSED_DEPLOYMENT"})
+                # Tickets reference the lease by foreign key.  Reconcile
+                # stale leases in dependency order so one orphaned ticket
+                # cannot abort backend startup before the health endpoint is
+                # available.
+                await session.execute(delete(ToolInvocationTicket).where(ToolInvocationTicket.lease_id == lease.id))
                 await session.delete(lease)
                 leases_deleted += 1
+        active_lease_attempt_ids = {item.attempt_id for item in (await session.scalars(select(RunExecutionLease))).all()}
         attempts = list((await session.scalars(select(RunAttempt).where(RunAttempt.status == "RUNNING"))).all())
         for attempt in attempts:
             run = await session.get(SolveRun, attempt.run_id)
@@ -191,7 +227,7 @@ class RunAttemptService:
                 attempt.error_code = run.last_error_code
                 attempt.finished_at = ensure_aware(run.finished_at) or now
                 closed_attempts += 1
-            elif not any(lease.attempt_id == attempt.id for lease in leases):
+            elif attempt.id not in active_lease_attempt_ids:
                 attempt.status = "ABORTED"
                 attempt.error_code = "PROCESS_INTERRUPTED"
                 attempt.finished_at = now

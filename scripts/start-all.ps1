@@ -346,6 +346,19 @@ Invoke-CommandInDirectory -Name "backend migrate" -WorkingDirectory $backendDir 
 Start-BackgroundService -Name "runner" -Port $RunnerPort -WorkingDirectory $runnerDir -Command $pythonExe -Arguments @("-m", "uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", "$RunnerPort") -HealthyUri "http://127.0.0.1:$RunnerPort/health" -ProcessPattern "app\.main:app.*--port\s+$RunnerPort"
 Start-BackgroundService -Name "backend" -Port $BackendPort -WorkingDirectory $backendDir -Command $pythonExe -Arguments @("-m", "uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", "$BackendPort") -HealthyUri "http://127.0.0.1:$BackendPort/api/v1/health" -ProcessPattern "app\.main:app.*--port\s+$BackendPort"
 Start-BackgroundService -Name "bridge" -Port $BridgePort -WorkingDirectory $bridgeDir -Command $npmExe -Arguments @("run", "dev") -HealthyUri "http://127.0.0.1:$BridgePort/health" -ProcessPattern "codex-bridge.*(dist[\\/]server\.js|src[\\/]server\.ts)"
+
+Write-Host "[preflight] checking Codex SDK, Bridge and ctfctl MCP..."
+try {
+    $preflight = Invoke-WebRequest -Uri "http://127.0.0.1:$BackendPort/api/v1/readiness/codex-preflight/run" -Method Post -ContentType "application/json" -Body "{}" -UseBasicParsing -TimeoutSec 90 | Select-Object -ExpandProperty Content | ConvertFrom-Json
+    if ($preflight.data.ready) {
+        Write-Host "[preflight] Codex MCP is ready."
+    } else {
+        Write-Warning "[preflight] Codex MCP is not ready: stage=$($preflight.data.failed_stage), code=$($preflight.data.error_code), diagnostic=$($preflight.data.diagnostic_artifact)"
+    }
+} catch {
+    Write-Warning "[preflight] Codex preflight request failed: $($_.Exception.Message)"
+}
+
 Start-BackgroundService -Name "frontend" -Port $FrontendPort -WorkingDirectory $frontendDir -Command $npmExe -Arguments @("run", "dev", "--", "--host", "127.0.0.1", "--port", "$FrontendPort") -HealthyUri "http://127.0.0.1:$FrontendPort" -ProcessPattern "frontend[\\/]node_modules.*vite"
 
 Write-Host ""

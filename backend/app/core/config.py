@@ -28,6 +28,29 @@ class Settings(BaseSettings):
     codex_diagnostic_mode: bool = False
     historical_lesson_mode: str = "strategy_only"
 
+    # Hotfix feature gates. They deliberately default to off; Codex MCP is
+    # enabled for a run only after the explicit preflight succeeds.
+    codex_mcp_required: bool = False
+    enable_tool_tickets: bool = False
+    enable_logical_tool_calls: bool = False
+    enable_terminal_generation_guard: bool = False
+
+    @staticmethod
+    def _feature_flag(name: str, default: bool = False) -> bool:
+        raw = os.getenv(name)
+        if raw is None:
+            raw = os.getenv(f"APP_{name}")
+        return default if raw is None else raw.strip().lower() in {"1", "true", "yes", "on"}
+
+    @property
+    def feature_flags(self) -> dict[str, bool]:
+        return {
+            "CODEX_MCP_REQUIRED": self._feature_flag("CODEX_MCP_REQUIRED", self.codex_mcp_required),
+            "ENABLE_TOOL_TICKETS": self._feature_flag("ENABLE_TOOL_TICKETS", self.enable_tool_tickets),
+            "ENABLE_LOGICAL_TOOL_CALLS": self._feature_flag("ENABLE_LOGICAL_TOOL_CALLS", self.enable_logical_tool_calls),
+            "ENABLE_TERMINAL_GENERATION_GUARD": self._feature_flag("ENABLE_TERMINAL_GENERATION_GUARD", self.enable_terminal_generation_guard),
+        }
+
     def require_safe_production_secrets(self) -> None:
         if self.environment.lower() not in {"dev", "development", "test", "testing"} and (
             self.runner_api_token == "development-runner-token"

@@ -5,10 +5,23 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_session
 from app.models.model_config import ModelConfig
 from app.models.skill import Skill
+from app.services.codex_preflight import codex_preflight_service
 from app.services.runner_client import runner_client
 
 router = APIRouter(prefix="/readiness", tags=["readiness"])
 EXPECTED_REVISION = "0017_terminal_tool_tickets"
+
+
+@router.get("/codex-preflight")
+async def codex_preflight_status() -> dict:
+    result = codex_preflight_service.last_result()
+    return {"data": result or {"ready": False, "sdk_version": "", "bridge_version": "", "failed_stage": "NOT_RUN", "error_code": "PREFLIGHT_NOT_RUN", "diagnostic_artifact": None, "feature_flags": {}}}
+
+
+@router.post("/codex-preflight/run")
+async def run_codex_preflight(payload: dict | None = None, session: AsyncSession = Depends(get_session)) -> dict:
+    run_id = str((payload or {}).get("run_id") or "").strip() or None
+    return {"data": await codex_preflight_service.run(session, run_id)}
 
 
 @router.get("/range-test")

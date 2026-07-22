@@ -42,12 +42,14 @@ class Scope(BaseModel):
     allowed_hosts: list[str] = Field(default_factory=list)
     attempt_id: str
     lease_token: str
+    master_lease_token: str | None = None
     thread_id: str | None = None
     model_turn_id: str | None = None
 
 
 class Request(BaseModel):
     scope: Scope
+    tool_ticket: str | None = None
 
 
 class ReadRequest(Request):
@@ -131,15 +133,18 @@ async def scoped_run(payload: Request, access_key: str | None, session: AsyncSes
     attempt = await session.get(RunAttempt, payload.scope.attempt_id)
     now = datetime.now(UTC)
     expires_at = lease.expires_at.replace(tzinfo=UTC) if lease and lease.expires_at.tzinfo is None else lease.expires_at if lease else None
-    master_lease = bool(lease and lease.lease_token == payload.scope.lease_token)
+    master_token = payload.scope.master_lease_token or payload.scope.lease_token
+    presented_ticket = payload.tool_ticket
+    master_lease = bool(not presented_ticket and lease and lease.lease_token == master_token)
     ticket = None
     ticket_valid = False
     if not master_lease:
         ticket = await session.scalar(
             select(ToolInvocationTicket).where(
-                ToolInvocationTicket.ticket_hash == hashlib.sha256(payload.scope.lease_token.encode()).hexdigest(),
+                ToolInvocationTicket.ticket_hash == hashlib.sha256(presented_ticket.encode()).hexdigest() if presented_ticket else False,
                 ToolInvocationTicket.run_id == run.id,
                 ToolInvocationTicket.attempt_id == attempt.id if attempt else False,
+                ToolInvocationTicket.lease_id == lease.id if lease else False,
             )
         )
         ticket_expires = ticket.expires_at.replace(tzinfo=UTC) if ticket and ticket.expires_at and ticket.expires_at.tzinfo is None else ticket.expires_at if ticket else None
@@ -152,6 +157,7 @@ async def scoped_run(payload: Request, access_key: str | None, session: AsyncSes
                     ToolInvocationTicket.expires_at > now,
                 )
                 .values(used_at=now)
+                .execution_options(synchronize_session=False)
             )
             ticket_valid = consumed.rowcount == 1
     if (
@@ -164,6 +170,8 @@ async def scoped_run(payload: Request, access_key: str | None, session: AsyncSes
         or (expires_at and expires_at <= now)
     ):
         raise DomainError("CTFCTL_LEASE_INVALID", "Thread execution lease is no longer active.", {"attempt_id": payload.scope.attempt_id}, 409)
+    if ticket_valid:
+        await session.commit()
     return run, challenge, root
 
 @router.post("/tool-ticket")
@@ -186,12 +194,12 @@ async def tool_ticket(payload: ToolTicketRequest, x_ctfctl_access_key: str | Non
         model_turn_id=payload.model_turn_id,
         lease_id=lease.id,
         created_at=now,
-        expires_at=min(lease_expires, now + timedelta(seconds=30)),
+        expires_at=min(lease_expires, now + timedelta(seconds=60)),
     )
     session.add(ticket)
     await session.commit()
     expires_at = ticket.expires_at.replace(tzinfo=UTC) if ticket.expires_at.tzinfo is None else ticket.expires_at
-    return {"data": {"run_id": run.id, "attempt_id": attempt.id, "ticket": raw_ticket, "expires_at": expires_at.isoformat(), "ttl_seconds": 30}}
+    return {"data": {"run_id": run.id, "attempt_id": attempt.id, "ticket": raw_ticket, "expires_at": expires_at.isoformat(), "ttl_seconds": 60}}
 
 
 def policy_for(payload: Request, root: Path) -> WorkspacePolicy:
@@ -447,6 +455,11 @@ async def direct_tool(tool_name: str, payload: DirectToolRequest, x_ctfctl_acces
     if tool_name in {"workspace_list", "workspace_read", "workspace_search"}:
         raise DomainError("TOOL_INVALID_ARGUMENT", "Workspace tools use their dedicated schema endpoint.", {"tool": tool_name}, 422)
     raw = payload.model_dump(exclude={"scope"})
+    # The one-shot Ticket authenticates the gateway request; it is not an
+    # argument of the underlying tool. Keeping it in this dict makes the
+    # declarative ToolDefinition validator reject every direct MCP tool call
+    # as an unexpected field.
+    raw.pop("tool_ticket", None)
     arguments = raw.pop("arguments", None)
     if not isinstance(arguments, dict):
         arguments = raw

@@ -1,3 +1,5 @@
+import asyncio
+import contextlib
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
@@ -28,23 +30,37 @@ async def lifespan(_: FastAPI):
         return
     async with SessionLocal() as session:
         await builtin_skill_sync_service.sync(session)
+        await run_attempt_service.cleanup_tickets(session)
         await run_attempt_service.reconcile_startup(session)
         runs = list((await session.scalars(select(SolveRun))).all())
         for run in runs:
             if RunStatus(run.status) not in TERMINAL and run.status not in {
                 RunStatus.CREATED,
                 RunStatus.PAUSED_RECOVERY,
+                RunStatus.PAUSED_DEPLOYMENT,
             }:
-                transition(run, RunStatus.PAUSED_RECOVERY)
+                transition(run, RunStatus.PAUSED_DEPLOYMENT)
                 run.last_error_code, run.last_error_message = (
-                    "INTERRUPTED_RESTART",
+                    "PAUSED_DEPLOYMENT",
                     "服务重启后任务已保留为可恢复状态。",
                 )
                 await session.commit()
                 await event_service.append(
-                    session, run.id, "run.recovery_paused", {"code": "INTERRUPTED_RESTART"}
+                    session, run.id, "run.paused_deployment", {"code": "PAUSED_DEPLOYMENT"}
                 )
-    yield
+    async def cleanup_loop() -> None:
+        while True:
+            await asyncio.sleep(600)
+            async with SessionLocal() as cleanup_session:
+                await run_attempt_service.cleanup_tickets(cleanup_session)
+
+    cleanup_task = asyncio.create_task(cleanup_loop())
+    try:
+        yield
+    finally:
+        cleanup_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await cleanup_task
 
 
 app = FastAPI(title="CTF Web Agent API", version="0.1.0", lifespan=lifespan)

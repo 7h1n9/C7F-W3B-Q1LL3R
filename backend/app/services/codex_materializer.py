@@ -20,6 +20,7 @@ from app.models.run import (
 from app.orchestration.state_machine import TERMINAL, RunStatus
 from app.services.flags import flag_service
 from app.services.reports import report_service
+from app.services.run_diagnostics import run_diagnostics_service
 from app.services.runner_client import runner_client
 
 
@@ -67,7 +68,7 @@ class CodexMaterializer:
         self._refresh_run_metrics(run, events)
         await session.commit()
 
-        if RunStatus(run.status) in TERMINAL:
+        if RunStatus(run.status) in {RunStatus.COMPLETED_SOLVED, RunStatus.COMPLETED_UNSOLVED}:
             report = await session.scalar(select(Artifact).where(Artifact.run_id == run.id, Artifact.artifact_type == "report", Artifact.status == "ACTIVE"))
             if report is None:
                 await report_service.generate(
@@ -77,6 +78,8 @@ class CodexMaterializer:
                     "solved" if RunStatus(run.status) == RunStatus.COMPLETED_SOLVED else "unsolved",
                     run.last_error_message or "",
                 )
+        elif RunStatus(run.status) in TERMINAL or RunStatus(run.status) == RunStatus.WAITING_CONFIGURATION:
+            await run_diagnostics_service.write_artifact(session, run)
             with contextlib.suppress(Exception):
                 await runner_client.clear_sessions(run.id)
 

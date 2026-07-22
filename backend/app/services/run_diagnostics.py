@@ -1,4 +1,7 @@
+import asyncio
+import hashlib
 import json
+from pathlib import Path
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -47,6 +50,26 @@ def _append_anomaly(
 
 
 class RunDiagnosticsService:
+    def __init__(self) -> None:
+        self._locks: dict[str, asyncio.Lock] = {}
+
+    async def write_artifact(self, session: AsyncSession, run: SolveRun) -> Artifact:
+        lock = self._locks.setdefault(run.id, asyncio.Lock())
+        async with lock:
+            existing = await session.scalar(select(Artifact).where(Artifact.run_id == run.id, Artifact.artifact_type == "diagnostic", Artifact.status == "ACTIVE"))
+            if existing:
+                return existing
+            payload = await self.analyze(session, run)
+            root = Path(run.workspace_path).resolve()
+            path = root / "diagnostics" / "run-diagnostic.json"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            raw = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
+            path.write_bytes(raw)
+            artifact = Artifact(run_id=run.id, artifact_type="diagnostic", file_path="diagnostics/run-diagnostic.json", mime_type="application/json", size=len(raw), sha256=hashlib.sha256(raw).hexdigest(), summary="Run diagnostic artifact", status="ACTIVE")
+            session.add(artifact)
+            await session.commit()
+            await event_service.append(session, run.id, "diagnostic.created", {"artifact_id": artifact.id, "path": artifact.file_path})
+            return artifact
     async def _active_skill_names(self, session: AsyncSession, state) -> list[str]:
         if not state or not (state.active_skill_ids_json or []):
             return []

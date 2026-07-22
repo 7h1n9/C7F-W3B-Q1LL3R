@@ -187,6 +187,11 @@ class LogicalToolCall(UUIDTimestampMixin, Base):
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     result_observation_id: Mapped[str | None] = mapped_column(ForeignKey("observations.id"))
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(UTC),
+        onupdate=lambda: datetime.now(UTC),
+    )
 
 
 class ToolExecutionTrace(UUIDTimestampMixin, Base):
@@ -196,6 +201,11 @@ class ToolExecutionTrace(UUIDTimestampMixin, Base):
     event_type: Mapped[str] = mapped_column(String(80), nullable=False)
     external_id: Mapped[str | None] = mapped_column(String(255))
     payload_digest: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(UTC),
+        onupdate=lambda: datetime.now(UTC),
+    )
 
 
 class Artifact(UUIDTimestampMixin, Base):

@@ -1,3 +1,4 @@
+import asyncio
 import hashlib
 import json
 import re
@@ -286,7 +287,25 @@ report_generation_barrier = ReportGenerationBarrier()
 
 
 class ReportService:
+    def __init__(self) -> None:
+        self._locks: dict[str, asyncio.Lock] = {}
+
     async def generate(
+        self,
+        session: AsyncSession,
+        run: SolveRun,
+        challenge: Challenge,
+        result: str,
+        failure_reason: str = "",
+    ) -> Artifact:
+        lock = self._locks.setdefault(run.id, asyncio.Lock())
+        async with lock:
+            existing = await session.scalar(select(Artifact).where(Artifact.run_id == run.id, Artifact.artifact_type == "report", Artifact.status == "ACTIVE"))
+            if existing:
+                return existing
+            return await self._generate(session, run, challenge, result, failure_reason)
+
+    async def _generate(
         self,
         session: AsyncSession,
         run: SolveRun,
