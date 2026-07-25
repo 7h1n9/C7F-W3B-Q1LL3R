@@ -353,6 +353,11 @@ class SolverStateService:
         state = await self.load(session, run_id)
         if state:
             state.force_plan_action = 1 if required else 0
+            if not required:
+                # A committed recovery plan satisfies the control requirement.
+                # Clear stale rejection pressure before the next action.
+                state.control_rejection_streak = 0
+                state.degraded_action_streak = 0
             await session.commit()
 
 

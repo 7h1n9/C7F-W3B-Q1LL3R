@@ -292,11 +292,36 @@ class CodexPreflightService:
 
     @staticmethod
     def _cli_version() -> str:
-        try:
-            result = subprocess.run(["codex", "--version"], capture_output=True, text=True, timeout=8, check=False)
-            return (result.stdout or result.stderr).strip().splitlines()[0] if result.returncode == 0 else ""
-        except (OSError, subprocess.TimeoutExpired):
-            return ""
+        candidates: list[str] = []
+        configured = os.getenv("CODEX_CLI_PATH")
+        if configured:
+            candidates.append(configured)
+        resolved = shutil.which("codex")
+        if resolved:
+            candidates.append(resolved)
+        # Windows desktop installations may not put the VS Code extension's
+        # bundled CLI on the environment inherited by the backend service.
+        vscode_bin = Path.home() / ".vscode" / "extensions"
+        if vscode_bin.is_dir():
+            candidates.extend(
+                str(path)
+                for path in sorted(
+                    vscode_bin.glob("openai.chatgpt-*/bin/windows-x86_64/codex.exe"),
+                    reverse=True,
+                )
+            )
+        seen: set[str] = set()
+        for candidate in candidates:
+            if candidate in seen:
+                continue
+            seen.add(candidate)
+            try:
+                result = subprocess.run([candidate, "--version"], capture_output=True, text=True, timeout=8, check=False)
+            except (OSError, subprocess.TimeoutExpired):
+                continue
+            if result.returncode == 0:
+                return (result.stdout or result.stderr).strip().splitlines()[0]
+        return ""
 
     async def _failure(self, settings, diagnostic_id: str, stages: list[dict[str, Any]], error: "PreflightFailure", run_id: str | None) -> dict[str, Any]:
         artifact_root = Path(settings.workspace_root).resolve() / "diagnostics"

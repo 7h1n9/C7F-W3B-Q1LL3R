@@ -31,6 +31,7 @@ from app.models.run import (
     FlagCandidate,
     Observation,
     RunAttempt,
+    RunEvent,
     RunExecutionLease,
     RunUserInput,
     SolveRun,
@@ -42,7 +43,7 @@ from app.schemas.agent import ActionHypothesis, FinishAction, PlanAction, SkillA
 from app.services.action_fingerprint import fingerprint_action
 from app.services.action_quality import action_quality_gate, recovery_planner
 from app.services.attack_chain import classify_rejection
-from app.services.codex_materializer import codex_materializer
+from app.services.codex_materializer import codex_materializer, logical_tool_budget_ref
 from app.services.codex_preflight import codex_preflight_service
 from app.services.context_builder import context_builder
 from app.services.crypto import decrypt_api_key
@@ -677,12 +678,20 @@ class SolveOrchestrator:
             if run.started_at:
                 started_at = run.started_at.replace(tzinfo=UTC) if run.started_at.tzinfo is None else run.started_at
                 if (datetime.now(UTC) - started_at).total_seconds() > run.max_total_runtime_seconds:
+                    run.last_error_code = "MAX_TOTAL_RUNTIME"
+                    run.last_error_message = (
+                        f"Run total runtime limit reached ({run.max_total_runtime_seconds}s); restart to open a new runtime window."
+                    )
                     await self._transition(session, run, RunStatus.PAUSED_CHECKPOINT)
                     await event_service.append(
                         session,
                         run.id,
                         "run.runtime_checkpoint",
-                        {"max_total_runtime_seconds": run.max_total_runtime_seconds, "requires_user_input": True},
+                        {
+                            "code": "MAX_TOTAL_RUNTIME",
+                            "max_total_runtime_seconds": run.max_total_runtime_seconds,
+                            "requires_user_input": True,
+                        },
                     )
                     return
             if RunStatus(run.status) in {RunStatus.ANALYZING, RunStatus.EVALUATING}:
@@ -779,9 +788,9 @@ class SolveOrchestrator:
                     "phase": getattr(action, "phase", None),
                     "objective": getattr(action, "objective", None),
                     "hypothesis": hypothesis_payload,
-                    "reason": action.reason
-                    if isinstance(action, (ToolAction, SkillAction))
-                    else action.summary,
+                    "reason": getattr(action, "reason", None)
+                    or getattr(action, "summary", None)
+                    or getattr(action, "objective", None),
                     "expected_evidence": getattr(action, "expected_evidence", None),
                     "success_condition": getattr(action, "success_condition", None),
                     "failure_pivot": getattr(action, "failure_pivot", None),
@@ -871,6 +880,65 @@ class SolveOrchestrator:
                     session,
                     run.id,
                     {"code": "PLAN_REQUIRED", "tool": action.tool_name},
+                )
+                current_state = await solver_state_service.load(session, run.id)
+                rejection_streak = current_state.control_rejection_streak if current_state else 1
+                if rejection_streak >= 3:
+                    run.last_error_code = "PLAN_REQUIRED"
+                    run.last_error_message = "The agent repeatedly ignored the required recovery plan."
+                    await self._transition(session, run, RunStatus.PAUSED_RECOVERY)
+                    await event_service.append(
+                        session,
+                        run.id,
+                        "agent.recovery_checkpoint",
+                        {
+                            "code": "PLAN_REQUIRED",
+                            "rejection_streak": rejection_streak,
+                            "requires_user_input": True,
+                        },
+                    )
+                    return
+
+                # Do not let a provider that keeps returning ToolAction spin
+                # forever. Materialize a bounded recovery plan from the
+                # rejected action, then ask the model for the next action with
+                # the plan requirement satisfied. Mark it as controller
+                # generated in the audit trail.
+                hypothesis = (
+                    action.hypothesis.statement
+                    if isinstance(action.hypothesis, ActionHypothesis)
+                    else str(action.hypothesis)
+                )
+                recovery_id = f"controller-recovery-{run.run_total_agent_steps}"
+                plan = dict(current_state.run_plan_json or {}) if current_state else {}
+                plan.update(
+                    {
+                        "current_node_id": recovery_id,
+                        "current_goal": action.objective,
+                        "current_experiment": {
+                            "experiment_id": f"{recovery_id}-experiment",
+                            "hypothesis_id": action.hypothesis_id,
+                            "decision_question": action.success_condition or action.reason,
+                            "next_tool": action.tool_name,
+                            "expected_evidence": action.expected_evidence,
+                            "failure_pivot": action.failure_pivot,
+                            "hypothesis": hypothesis,
+                        },
+                        "source": "controller_recovery",
+                    }
+                )
+                await solver_state_service.set_run_plan(session, run.id, plan)
+                await solver_state_service.require_plan_action(session, run.id, False)
+                await event_service.append(
+                    session,
+                    run.id,
+                    "agent.plan_created",
+                    {
+                        "source": "controller_recovery",
+                        "plan_node_id": recovery_id,
+                        "next_tool": action.tool_name,
+                        "decision_question": action.success_condition or action.reason,
+                    },
                 )
                 await self._transition(session, run, RunStatus.PLANNING)
                 continue
@@ -1402,11 +1470,80 @@ class SolveOrchestrator:
         auto_started = monotonic()
         no_progress_turns = 0
         zero_evidence_turns = 0
+        # The Codex SDK streams tool events directly and can emit many tool
+        # calls inside one iterator turn.  The OpenAI-compatible action loop
+        # checks max_tool_calls before invoking a tool, but this event loop
+        # previously only checked max_agent_steps after the whole stream,
+        # allowing an SDK run to grow without bound.
+        existing_events = list(
+            (
+                await session.scalars(
+                    select(RunEvent).where(
+                        RunEvent.run_id == run.id,
+                        RunEvent.event_type.in_(("tool.requested", "tool.started", "tool.completed", "tool.failed")),
+                    )
+                )
+            ).all()
+        )
+        seen_tool_refs = {
+            tool_ref
+            for event in existing_events
+            if (tool_ref := logical_tool_budget_ref(event.payload_json or {}))
+        }
+        max_tool_calls = max(1, int(run.max_tool_calls or 1))
+        existing_tool_count = max(
+            len(seen_tool_refs), int(run.run_total_logical_tool_calls or 0)
+        )
+        if existing_tool_count >= max_tool_calls:
+            run.last_error_code = "MAX_TOOL_CALLS"
+            run.last_error_message = (
+                f"Codex tool-call limit reached ({max_tool_calls}); execution paused."
+            )
+            await self._transition(session, run, RunStatus.PAUSED_CHECKPOINT)
+            await event_service.append(
+                session,
+                run.id,
+                "run.budget_exhausted",
+                {
+                    "reason": "MAX_TOOL_CALLS",
+                    "max_tool_calls": max_tool_calls,
+                    "run_total_logical_tool_calls": existing_tool_count,
+                },
+            )
+            return
         while True:
             await run_attempt_service.heartbeat(session, attempt, lease)
             auto_turns += 1
             before_progress = await self._codex_progress_snapshot(session, run.id)
             async for item in iterator:
+                if item.event_type in {"tool.requested", "tool.started", "tool.completed", "tool.failed"}:
+                    tool_ref = logical_tool_budget_ref(item.payload)
+                    if tool_ref:
+                        if tool_ref not in seen_tool_refs:
+                            current_tool_count = max(
+                                len(seen_tool_refs),
+                                int(run.run_total_logical_tool_calls or 0),
+                            )
+                            if current_tool_count >= max_tool_calls:
+                                run.last_error_code = "MAX_TOOL_CALLS"
+                                run.last_error_message = (
+                                    f"Codex tool-call limit reached ({max_tool_calls}); execution paused."
+                                )
+                                with contextlib.suppress(Exception):
+                                    await engine.cancel(run.id)
+                                await self._transition(session, run, RunStatus.PAUSED_CHECKPOINT)
+                                await event_service.append(
+                                    session,
+                                    run.id,
+                                    "run.budget_exhausted",
+                                    {
+                                        "reason": "MAX_TOOL_CALLS",
+                                        "max_tool_calls": max_tool_calls,
+                                        "run_total_logical_tool_calls": current_tool_count,
+                                    },
+                                )
+                                return
+                            seen_tool_refs.add(tool_ref)
                 thread_id = item.payload.get("thread_id")
                 if isinstance(thread_id, str):
                     run.codex_thread_id = thread_id
@@ -1428,7 +1565,18 @@ class SolveOrchestrator:
                         return
                     await session.commit()
                 if item.status and item.status != run.status:
-                    await self._transition(session, run, RunStatus(item.status))
+                    incoming_status = RunStatus(item.status)
+                    # A recreated/resumed Codex thread reports its bootstrap
+                    # state as ANALYZING even after the orchestrator has
+                    # already moved the durable run to PLANNING.  The engine
+                    # adapters filter this in the normal path; keep the
+                    # orchestrator defensive because old Bridge processes or
+                    # concurrent resumes can still forward that stale event.
+                    if not (
+                        RunStatus(run.status) == RunStatus.PLANNING
+                        and incoming_status == RunStatus.ANALYZING
+                    ):
+                        await self._transition(session, run, incoming_status)
                 await event_service.append(session, run.id, item.event_type, item.payload)
             await codex_materializer.sync(session, run)
             interval = max(1, int(run.agent_checkpoint_interval or 30))

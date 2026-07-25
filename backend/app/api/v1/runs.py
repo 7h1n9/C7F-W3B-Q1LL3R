@@ -21,9 +21,11 @@ from app.models.conversation import (
 )
 from app.models.model_config import ModelConfig
 from app.models.run import (
+    AgentTurn,
     Artifact,
     FlagCandidate,
     Hypothesis,
+    LogicalToolCall,
     Observation,
     RunAttempt,
     RunEvent,
@@ -31,6 +33,8 @@ from app.models.run import (
     RunUserInput,
     SolveRun,
     ToolCall,
+    ToolExecutionTrace,
+    ToolInvocationTicket,
 )
 from app.models.skill import RunSkillSnapshot
 from app.models.solver_state import SolverState
@@ -41,6 +45,7 @@ from app.schemas.flag import FlagReviewUpdate
 from app.schemas.run import RunCreate, RunRead
 from app.schemas.solver_state import SolverStateRead
 from app.services.codex_materializer import codex_materializer
+from app.services.codex_preflight import codex_preflight_service
 from app.services.events import event_service
 from app.services.flags import flag_service
 from app.services.role_loader import role_loader
@@ -309,13 +314,22 @@ def _remove_local_workspace(workspace_path: str) -> None:
 async def _delete_run_records(session: AsyncSession, run_id: str) -> None:
     # Delete children explicitly because the schema intentionally keeps these
     # tables unconfigured with ORM cascade rules.
+    logical_ids = select(LogicalToolCall.id).where(LogicalToolCall.run_id == run_id)
+    # Tool traces reference logical calls, so they must be removed first.
+    await session.execute(
+        delete(ToolExecutionTrace).where(ToolExecutionTrace.logical_tool_call_id.in_(logical_ids))
+    )
     for model in (
+        ToolInvocationTicket,
         FlagCandidate,
         Observation,
         Artifact,
         ToolCall,
+        LogicalToolCall,
         Hypothesis,
         RunEvent,
+        RunUserInput,
+        AgentTurn,
         RunSkillSnapshot,
         SolverState,
         RunExecutionLease,
@@ -332,6 +346,7 @@ async def _delete_run_records(session: AsyncSession, run_id: str) -> None:
     await session.execute(delete(LearnedSkillCandidateSource).where(LearnedSkillCandidateSource.candidate_id.in_(candidate_ids)))
     await session.execute(delete(LearnedSkillReview).where(LearnedSkillReview.candidate_id.in_(candidate_ids)))
     await session.execute(delete(LearnedSkillValidationRun).where(LearnedSkillValidationRun.candidate_id.in_(candidate_ids)))
+    await session.execute(delete(LearnedSkillValidationRun).where(LearnedSkillValidationRun.run_id == run_id))
     await session.execute(delete(LearnedSkillCandidate).where(LearnedSkillCandidate.source_run_id == run_id))
     await session.execute(delete(SolveRun).where(SolveRun.id == run_id))
 
@@ -342,8 +357,12 @@ async def delete_run(run_id: str, session: AsyncSession = Depends(get_session)) 
     task = orchestrator.active_tasks.get(run_id)
     if task and task is not asyncio.current_task():
         task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
+        # A running Codex task may already have a failed transaction (for
+        # example after a duplicate materialization record).  Cancellation
+        # must not turn an otherwise valid delete into HTTP 500.
+        with contextlib.suppress(asyncio.CancelledError, Exception):
             await task
+        await session.rollback()
     with contextlib.suppress(Exception):
         await runner_client.delete_workspace(run_id)
     _remove_local_workspace(run.workspace_path)
@@ -355,7 +374,11 @@ async def delete_run(run_id: str, session: AsyncSession = Depends(get_session)) 
 async def get_run(run_id: str, session: AsyncSession = Depends(get_session)) -> dict:
     run = await ensure_codex_materialized(session, await require_run(run_id, session))
     run = await ensure_flag_consistency(session, run)
-    return {"data": await read_with_summary(session, run)}
+    # Diagnostics scan the complete event/tool history. They are useful for
+    # terminal/error views, but doing that work on every live polling request
+    # makes the counters visibly lag as a run grows.
+    include_diagnostics = RunStatus(run.status) in TERMINAL or bool(run.last_error_code)
+    return {"data": await read_with_summary(session, run, include_diagnostics=include_diagnostics)}
 
 
 @router.get("/runs/{run_id}/solver-state")
@@ -405,6 +428,28 @@ async def start_run(run_id: str, session: AsyncSession = Depends(get_session)) -
             "Only created or paused recoverable runs can be started.",
             {"current_state": run.status},
         )
+    if run.status == RunStatus.PAUSED_CHECKPOINT and run.started_at:
+        started_at = run.started_at.replace(tzinfo=UTC) if run.started_at.tzinfo is None else run.started_at
+        if (datetime.now(UTC) - started_at).total_seconds() >= run.max_total_runtime_seconds:
+            raise DomainError(
+                "MAX_TOTAL_RUNTIME",
+                "任务累计运行时间已达到上限，请点击“重启任务”开启新的运行窗口。",
+                {"max_total_runtime_seconds": run.max_total_runtime_seconds},
+                status_code=409,
+            )
+    # Preflight readiness is process-local, so a backend restart used to turn
+    # every recoverable Codex run into a permanent WAITING_CONFIGURATION
+    # state until the user found the separate readiness endpoint. Starting a
+    # recoverable run should perform that prerequisite automatically.
+    if run.engine_type == "codex_sdk" and not codex_preflight_service.is_ready(run.id):
+        result = await codex_preflight_service.run(session, run.id)
+        if not result.get("ready"):
+            raise DomainError(
+                "PREFLIGHT_REQUIRED",
+                "Codex preflight did not pass; check the readiness diagnostics before starting.",
+                {"failed_stage": result.get("failed_stage"), "error_code": result.get("error_code")},
+                status_code=503,
+            )
     asyncio.create_task(orchestrator.start(run.id))
     return {"data": {"run_id": run.id, "status": "STARTING"}}
 
@@ -435,7 +480,7 @@ async def enqueue_run_message(run_id: str, payload: dict, session: AsyncSession 
     await event_service.append(session, run.id, "user.input_received", {"revision": revision, "input_type": item.input_type})
     # A running turn is never interrupted. Paused runs can safely resume so
     # this input is consumed on the next Agent Step.
-    if run.id not in orchestrator.active_tasks and RunStatus(run.status) in {RunStatus.WAITING_USER, RunStatus.PAUSED_CHECKPOINT, RunStatus.PAUSED_RECOVERY, RunStatus.PAUSED_DEPLOYMENT, RunStatus.WAITING_CONFIGURATION, RunStatus.PAUSED_RATE_LIMIT}:
+    if run.id not in orchestrator.active_tasks and RunStatus(run.status) in {RunStatus.WAITING_USER, RunStatus.PAUSED_RECOVERY, RunStatus.PAUSED_DEPLOYMENT, RunStatus.WAITING_CONFIGURATION, RunStatus.PAUSED_RATE_LIMIT}:
         asyncio.create_task(orchestrator.start(run.id))
     return {"data": {"accepted": True, "revision": revision, "status": "QUEUED", "message": "补充信息已加入，将在下一 Agent Step 使用。"}}
 
@@ -463,6 +508,12 @@ async def restart_run(
         "code": run.last_error_code,
         "message": run.last_error_message,
     }
+    runtime_window_reset = restart_mode == "fresh"
+    if run.started_at and previous_status in {RunStatus.PAUSED_CHECKPOINT, RunStatus.PAUSED_DEPLOYMENT}:
+        started_at = run.started_at.replace(tzinfo=UTC) if run.started_at.tzinfo is None else run.started_at
+        runtime_window_reset = runtime_window_reset or (
+            datetime.now(UTC) - started_at
+        ).total_seconds() >= run.max_total_runtime_seconds
     # The MCP subprocess captures the lease in its process environment when
     # the Codex thread is created. A restart creates a new Attempt/Lease, so
     # the old Bridge thread is intentionally not reusable.
@@ -484,6 +535,8 @@ async def restart_run(
     # agent-created files remain intact.
     run.workspace_path = str(create_workspace(run.id, challenge, attachments))
     restart_state(run)
+    if runtime_window_reset:
+        run.started_at = datetime.now(UTC)
     run.last_error_code = None
     run.last_error_message = None
     await session.commit()
@@ -511,6 +564,7 @@ async def restart_run(
             "preserved_evidence": True,
             "restart_mode": restart_mode,
             "codex_thread_id_reused": False,
+            "runtime_window_reset": runtime_window_reset,
         },
     )
     message = str((payload or {}).get("message", "")).strip() or None

@@ -81,6 +81,28 @@ function flagStatusMeta(state?: FlagCandidate["review_state"]) {
   return { color: "gold", text: "待确认" };
 }
 
+const startableRunStatuses = [
+  "CREATED",
+  "PAUSED_RECOVERY",
+  "PAUSED_DEPLOYMENT",
+  "PAUSED_CHECKPOINT",
+  "WAITING_CONFIGURATION",
+];
+
+const restartableRunStatuses = [
+  "WAITING_USER",
+  "FAILED_ENGINE",
+  "FAILED_TOOL",
+  "FAILED_RUNNER",
+  "TIMEOUT",
+  "COMPLETED_UNSOLVED",
+  "CANCELLED",
+  "PAUSED_CHECKPOINT",
+  "PAUSED_RECOVERY",
+  "PAUSED_DEPLOYMENT",
+  "WAITING_CONFIGURATION",
+];
+
 export function WorkspacePage() {
   const { id = "" } = useParams();
   const client = useQueryClient();
@@ -168,13 +190,46 @@ export function WorkspacePage() {
   });
 
   useEffect(() => {
+    let refreshTimer: ReturnType<typeof setTimeout> | undefined;
+    const pendingRefresh = new Set<string>();
+    const scheduleDataRefresh = (eventType: string) => {
+      const liveDataEvent = eventType.startsWith("tool.") || eventType.startsWith("artifact.") || eventType.startsWith("flag.") || eventType === "agent.message";
+      if (!liveDataEvent) return;
+      pendingRefresh.add(eventType);
+      if (refreshTimer !== undefined) return;
+      // Coalesce bursts from one Codex turn into one batch of requests. This
+      // keeps the tabs live without issuing one HTTP request per event.
+      refreshTimer = setTimeout(() => {
+        refreshTimer = undefined;
+        const eventTypes = [...pendingRefresh];
+        pendingRefresh.clear();
+        void client.invalidateQueries({ queryKey: ["run", id] });
+        if (eventTypes.some((type) => type.startsWith("tool."))) {
+          void client.invalidateQueries({ queryKey: ["tool-calls", id] });
+          void client.invalidateQueries({ queryKey: ["observations", id] });
+        }
+        if (eventTypes.some((type) => type.startsWith("artifact."))) {
+          void client.invalidateQueries({ queryKey: ["artifacts", id] });
+        }
+        if (eventTypes.some((type) => type.startsWith("flag."))) {
+          void client.invalidateQueries({ queryKey: ["flags", id] });
+        }
+        if (eventTypes.includes("agent.message")) {
+          void client.invalidateQueries({ queryKey: ["solver-state", id] });
+        }
+      }, 250);
+    };
     const source = api.streamRunEvents(id, (event) => {
       setEvents((current) =>
         current.some((item) => item.sequence === event.sequence) ? current : [...current, event],
       );
+      scheduleDataRefresh(event.event_type);
     });
-    return () => source.close();
-  }, [id]);
+    return () => {
+      source.close();
+      if (refreshTimer !== undefined) clearTimeout(refreshTimer);
+    };
+  }, [client, id]);
 
   const auditEvents = useMemo(
     () =>
@@ -213,9 +268,9 @@ export function WorkspacePage() {
             icon={<CaretRightOutlined />}
             loading={start.isPending}
             onClick={() => start.mutate()}
-            disabled={run.data?.status !== "CREATED"}
+            disabled={!run.data || !startableRunStatuses.includes(run.data.status)}
           >
-            启动任务
+            {run.data?.status === "CREATED" ? "启动任务" : "恢复任务"}
           </Button>
           <Button
             icon={<ReloadOutlined />}
@@ -223,7 +278,7 @@ export function WorkspacePage() {
             onClick={() => restart.mutate()}
             disabled={
               !run.data ||
-              !["WAITING_USER", "FAILED_ENGINE", "FAILED_TOOL", "FAILED_RUNNER", "TIMEOUT", "COMPLETED_UNSOLVED", "CANCELLED"].includes(run.data.status)
+              !restartableRunStatuses.includes(run.data.status)
             }
           >
             重启任务

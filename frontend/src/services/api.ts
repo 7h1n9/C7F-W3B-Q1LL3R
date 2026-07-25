@@ -9,7 +9,12 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   } catch {
     throw new Error("无法连接后端服务，请确认 127.0.0.1:8000 已启动");
   }
-  if (!response.ok) { const error = await response.json().catch(() => ({})); const detail = error.details?.errors?.[0]?.msg; throw new Error(error.message === "Request validation failed." && detail ? detail : error.message ?? `HTTP ${response.status}`); }
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}));
+    const detail = error.details?.errors?.[0]?.msg;
+    const message = error.message === "Request validation failed." && detail ? detail : error.message;
+    throw new Error(message || `后端请求失败（HTTP ${response.status}）`);
+  }
   if (response.status === 204) return undefined as T;
   return (await response.json() as ApiEnvelope<T>).data;
 }

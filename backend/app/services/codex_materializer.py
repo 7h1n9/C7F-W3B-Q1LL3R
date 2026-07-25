@@ -1,10 +1,13 @@
+import asyncio
 import contextlib
 import hashlib
 import json
 import re
+from dataclasses import dataclass, field
 from pathlib import Path
+from uuid import NAMESPACE_URL, uuid5
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.challenge import Challenge
@@ -24,7 +27,38 @@ from app.services.run_diagnostics import run_diagnostics_service
 from app.services.runner_client import runner_client
 
 
+def logical_tool_budget_ref(payload: dict) -> str | None:
+    """Return one canonical budget key for a tool invocation.
+
+    A Codex MCP call produces an outer ``ctfctl.*`` event and an inner
+    Tool-Gateway event.  Only the latter carries ``logical_tool_call_id``;
+    counting both makes one model action consume the budget twice.
+    """
+    logical_id = payload.get("logical_tool_call_id")
+    if logical_id:
+        return f"logical:{logical_id}"
+    tool_name = str(payload.get("tool") or "")
+    if tool_name.startswith("ctfctl."):
+        return None
+    tool_ref = payload.get("tool_call_id")
+    return f"legacy:{tool_ref}" if tool_ref else None
+
+
+@dataclass
+class _MaterializationCursor:
+    sequence: int = 0
+    agent_steps: set[str] = field(default_factory=set)
+    tool_calls: set[str] = field(default_factory=set)
+
+
 class CodexMaterializer:
+    def __init__(self) -> None:
+        # The event stream and the workspace detail page can request
+        # materialization at the same time. Serialize one run and remember the
+        # last sequence so normal polling only handles newly appended events.
+        self._locks: dict[str, asyncio.Lock] = {}
+        self._cursors: dict[str, _MaterializationCursor] = {}
+
     _FORBIDDEN_DIRECT_TOOLS = {
         "command_execution",
         "node_repl",
@@ -39,49 +73,84 @@ class CodexMaterializer:
     async def sync(self, session: AsyncSession, run: SolveRun) -> None:
         if run.engine_type != "codex_sdk":
             return
-        challenge = await session.get(Challenge, run.challenge_id)
-        if not challenge:
-            return
-        events = list(
-            (
-                await session.scalars(
-                    select(RunEvent).where(RunEvent.run_id == run.id).order_by(RunEvent.sequence)
-                )
-            ).all()
-        )
-        verified_sequence = next(
-            (event.sequence for event in events if event.event_type == "flag.verified"), None
-        )
-        if verified_sequence is not None:
-            run.terminal_event_sequence = verified_sequence
-            run.thread_invalidated = True
-        for event in events:
-            if run.thread_invalidated and run.terminal_event_sequence is not None and event.sequence > run.terminal_event_sequence and event.event_type in {
-                "tool.requested", "tool.started", "tool.completed", "tool.failed", "artifact.created", "observation.created",
-            }:
-                existing = list(run.post_terminal_events_json or [])
-                existing.append({"sequence": event.sequence, "event_type": event.event_type, "payload": event.payload_json or {}})
-                run.post_terminal_events_json = existing[-200:]
-                continue
-            await self._apply_event(session, run, challenge, event)
+        lock = self._locks.setdefault(run.id, asyncio.Lock())
+        async with lock:
+            challenge = await session.get(Challenge, run.challenge_id)
+            if not challenge:
+                return
 
-        self._refresh_run_metrics(run, events)
-        await session.commit()
-
-        if RunStatus(run.status) in {RunStatus.COMPLETED_SOLVED, RunStatus.COMPLETED_UNSOLVED}:
-            report = await session.scalar(select(Artifact).where(Artifact.run_id == run.id, Artifact.artifact_type == "report", Artifact.status == "ACTIVE"))
-            if report is None:
-                await report_service.generate(
-                    session,
-                    run,
-                    challenge,
-                    "solved" if RunStatus(run.status) == RunStatus.COMPLETED_SOLVED else "unsolved",
-                    run.last_error_message or "",
+            latest_sequence = int(
+                await session.scalar(
+                    select(func.max(RunEvent.sequence)).where(RunEvent.run_id == run.id)
                 )
-        elif RunStatus(run.status) in TERMINAL or RunStatus(run.status) == RunStatus.WAITING_CONFIGURATION:
-            await run_diagnostics_service.write_artifact(session, run)
-            with contextlib.suppress(Exception):
-                await runner_client.clear_sessions(run.id)
+                or 0
+            )
+            cursor = self._cursors.get(run.id)
+            full_refresh = cursor is None or latest_sequence < cursor.sequence
+            if full_refresh:
+                events = list(
+                    (
+                        await session.scalars(
+                            select(RunEvent)
+                            .where(RunEvent.run_id == run.id)
+                            .order_by(RunEvent.sequence)
+                        )
+                    ).all()
+                )
+                cursor = _MaterializationCursor()
+            else:
+                events = list(
+                    (
+                        await session.scalars(
+                            select(RunEvent)
+                            .where(
+                                RunEvent.run_id == run.id,
+                                RunEvent.sequence > cursor.sequence,
+                            )
+                            .order_by(RunEvent.sequence)
+                        )
+                    ).all()
+                )
+            if not events:
+                cursor.sequence = latest_sequence
+                self._cursors[run.id] = cursor
+                return
+
+            verified_sequence = next(
+                (event.sequence for event in events if event.event_type == "flag.verified"), None
+            )
+            if verified_sequence is not None:
+                run.terminal_event_sequence = verified_sequence
+                run.thread_invalidated = True
+            for event in events:
+                if run.thread_invalidated and run.terminal_event_sequence is not None and event.sequence > run.terminal_event_sequence and event.event_type in {
+                    "tool.requested", "tool.started", "tool.completed", "tool.failed", "artifact.created", "observation.created",
+                }:
+                    existing = list(run.post_terminal_events_json or [])
+                    existing.append({"sequence": event.sequence, "event_type": event.event_type, "payload": event.payload_json or {}})
+                    run.post_terminal_events_json = existing[-200:]
+                    continue
+                await self._apply_event(session, run, challenge, event)
+
+            self._refresh_run_metrics(run, cursor, events)
+            cursor.sequence = max(cursor.sequence, max(event.sequence for event in events))
+            self._cursors[run.id] = cursor
+            await session.commit()
+
+            if RunStatus(run.status) in {RunStatus.COMPLETED_SOLVED, RunStatus.COMPLETED_UNSOLVED}:
+                report = await session.scalar(select(Artifact).where(Artifact.run_id == run.id, Artifact.artifact_type == "report", Artifact.status == "ACTIVE"))
+                if report is None:
+                    await report_service.generate(
+                        session,
+                        run,
+                        challenge,
+                        "solved" if RunStatus(run.status) == RunStatus.COMPLETED_SOLVED else "unsolved",
+                        run.last_error_message or "",
+                    )
+            elif RunStatus(run.status) in TERMINAL or RunStatus(run.status) == RunStatus.WAITING_CONFIGURATION:
+                await run_diagnostics_service.write_artifact(session, run)
+                with contextlib.suppress(Exception):
+                    await runner_client.clear_sessions(run.id)
 
     async def _apply_event(
         self, session: AsyncSession, run: SolveRun, challenge: Challenge, event: RunEvent
@@ -111,6 +180,11 @@ class CodexMaterializer:
             return
         marker = f"codex:{tool_call_ref}"
         logical_id = str(payload.get("logical_tool_call_id") or marker)
+        # Codex item ids are only unique inside one thread/run (for example
+        # every run can contain ``item_1``).  The database primary key is
+        # global, so using ``codex:item_1`` directly makes the second run fail
+        # with a duplicate-key error while materializing its first tool call.
+        logical_record_id = str(uuid5(NAMESPACE_URL, f"ctf-agent:{run.id}:{logical_id}"))
         tool_call = await session.scalar(select(ToolCall).where(ToolCall.run_id == run.id, ToolCall.logical_tool_call_id == logical_id))
         if tool_call is None:
             tool_call = ToolCall(
@@ -128,7 +202,7 @@ class CodexMaterializer:
             session.add(tool_call)
             await session.flush()
             logical = LogicalToolCall(
-                id=logical_id,
+                id=logical_record_id,
                 run_id=run.id,
                 attempt_id=str(payload.get("attempt_id")) if payload.get("attempt_id") else None,
                 engine_type=run.engine_type,
@@ -138,10 +212,17 @@ class CodexMaterializer:
                 started_at=tool_call.started_at,
             )
             session.add(logical)
-        logical = await session.get(LogicalToolCall, logical_id)
+        # Keep finding legacy rows whose id was the unscoped Codex id, while
+        # all newly materialized rows use the run-scoped stable UUID above.
+        logical = await session.scalar(
+            select(LogicalToolCall).where(
+                LogicalToolCall.run_id == run.id,
+                LogicalToolCall.id.in_((logical_record_id, logical_id)),
+            )
+        )
         if logical is None:
             logical = LogicalToolCall(
-                id=logical_id,
+                id=logical_record_id,
                 run_id=run.id,
                 engine_type=run.engine_type,
                 tool_name=str(tool_name),
@@ -313,23 +394,34 @@ class CodexMaterializer:
                 artifact.summary = summary
             await session.flush()
 
-    def _refresh_run_metrics(self, run: SolveRun, events: list[RunEvent]) -> None:
-        seen_steps: set[str] = set()
-        seen_tools: set[str] = set()
+    def _refresh_run_metrics(
+        self,
+        run: SolveRun,
+        cursor: _MaterializationCursor,
+        events: list[RunEvent],
+    ) -> None:
         for event in events:
             payload = event.payload_json or {}
             if event.event_type == "agent.turn_completed":
-                seen_steps.add(str(event.sequence))
-            tool_ref = payload.get("logical_tool_call_id") or payload.get("tool_call_id")
-            if event.event_type.startswith("tool.") and isinstance(tool_ref, str) and tool_ref:
-                seen_tools.add(tool_ref)
-        run.agent_step_count = len(seen_steps)
-        run.tool_call_count = len(seen_tools)
-        run.run_total_agent_steps = len(seen_steps)
-        run.run_total_logical_tool_calls = len(seen_tools)
-        run.attempt_agent_steps = len(seen_steps)
-        run.attempt_logical_tool_calls = len(seen_tools)
-        run.checkpoint_segment_steps = len(seen_steps)
+                cursor.agent_steps.add(f"turn:{event.sequence}")
+            elif event.event_type == "agent.message":
+                # Codex SDK streams turn progress as agent.message items and
+                # does not emit the legacy agent.turn_completed event.  Use
+                # the stable item id so the UI does not remain at 0 steps.
+                item_id = payload.get("item_id")
+                if item_id:
+                    cursor.agent_steps.add(f"item:{item_id}")
+            if event.event_type.startswith("tool."):
+                tool_ref = logical_tool_budget_ref(payload)
+                if tool_ref:
+                    cursor.tool_calls.add(tool_ref)
+        run.agent_step_count = len(cursor.agent_steps)
+        run.tool_call_count = len(cursor.tool_calls)
+        run.run_total_agent_steps = len(cursor.agent_steps)
+        run.run_total_logical_tool_calls = len(cursor.tool_calls)
+        run.attempt_agent_steps = len(cursor.agent_steps)
+        run.attempt_logical_tool_calls = len(cursor.tool_calls)
+        run.checkpoint_segment_steps = len(cursor.agent_steps)
 
     @staticmethod
     def _tool_arguments(payload: dict) -> dict:
