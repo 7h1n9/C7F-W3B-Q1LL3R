@@ -48,6 +48,7 @@ from app.services.codex_materializer import codex_materializer
 from app.services.codex_preflight import codex_preflight_service
 from app.services.events import event_service
 from app.services.flags import flag_service
+from app.services.fresh_reproduction import fresh_reproduction_executor
 from app.services.role_loader import role_loader
 from app.services.run_attempts import run_attempt_service
 from app.services.run_diagnostics import run_diagnostics_service
@@ -769,6 +770,19 @@ async def review_flag_candidate(
             "pattern_matched": item.pattern_matched,
         }
     }
+
+
+@router.post("/runs/{run_id}/fresh-reproduction")
+async def fresh_reproduction(run_id: str, session: AsyncSession = Depends(get_session)) -> dict:
+    run = await require_run(run_id, session)
+    challenge = await session.get(Challenge, run.challenge_id)
+    if not challenge:
+        raise DomainError("CHALLENGE_NOT_FOUND", "Challenge not found.", status_code=404)
+    from app.services.reports import ReproductionPlanner
+
+    steps = await ReproductionPlanner().plan(session, run, challenge)
+    validation = await fresh_reproduction_executor.execute(session, run, challenge, steps)
+    return {"data": validation, "fresh_reproduction_verified": bool(run.fresh_reproduction_verified)}
 
 
 @router.get("/runs/{run_id}/report")

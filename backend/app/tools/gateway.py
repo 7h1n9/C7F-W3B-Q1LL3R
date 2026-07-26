@@ -19,13 +19,13 @@ from app.models.run import (
     ToolCall,
     ToolExecutionTrace,
 )
-from app.orchestration.state_machine import RunStatus
 from app.schemas.tool import ToolArtifactRef, ToolExecutionResult, ToolModelView
 from app.services.events import event_service
 from app.services.flags import flag_service
 from app.services.runner_client import runner_client
 from app.services.solver_state import solver_state_service
 from app.services.tool_argument_adapter import adapt_arguments
+from app.services.tool_invocation_coordinator import tool_invocation_coordinator
 from app.services.tool_permissions import effective_tools_for
 from app.services.workspace_sync import workspace_sync_service
 from app.tools.policy import enforce_tool_policy
@@ -56,16 +56,11 @@ class ToolGateway:
             raise DomainError(
                 "TOOL_NOT_AVAILABLE", "Requested tool is not enabled.", {"tool": name}, 404
             )
-        if RunStatus(run.status) not in {RunStatus.ANALYZING, RunStatus.PLANNING, RunStatus.EXECUTING, RunStatus.EVALUATING, RunStatus.RETRYING}:
-            raise DomainError(
-                "RUN_TOOL_NOT_ALLOWED",
-                "Tools require a non-terminal active solver state.",
-                {"current_state": run.status},
-                409,
-            )
-        lease = await session.scalar(select(RunExecutionLease).where(RunExecutionLease.run_id == run.id))
-        if not lease:
-            raise DomainError("RUN_TOOL_NOT_ALLOWED", "An active attempt lease is required for tool execution.", {"run_id": run.id}, 409)
+        # A model turn can arrive while the Run is moving through one of the
+        # short-lived execution stages.  Only terminal/explicit pause states
+        # are rejected here; attempt/lease freshness is checked in one place.
+        coordinated = await tool_invocation_coordinator.validate(session, run)
+        lease = coordinated["lease"]
         permitted_tools = await effective_tools_for(session, run, challenge)
         if name not in permitted_tools:
             raise DomainError(
@@ -74,6 +69,17 @@ class ToolGateway:
                 {"tool": name, "challenge_type": challenge.challenge_type},
                 422,
             )
+        if name == "http_request":
+            state = await solver_state_service.load(session, run.id)
+            ledger = state.capability_ledger_json if state else {}
+            confirmed = any(key in ledger for key in ("sql_injection_confirmed", "sqlmap_extraction_completed"))
+            if confirmed and not bool(arguments.get("final_verification")):
+                raise DomainError(
+                    "AUTOMATION_REQUIRED",
+                    "Confirmed SQL injection must use a bounded automation tool; HTTP is reserved for final verification.",
+                    {"recommended_tools": ["sql_boolean_compare", "sqlmap_run", "script_run"], "final_verification": True},
+                    422,
+                )
         arguments = adapt_arguments(name, arguments)
         try:
             arguments = definition.validate_arguments(arguments)
@@ -93,7 +99,7 @@ class ToolGateway:
                     "tool.read_deduplicated",
                     {"tool": name, "code": "FILE_RANGE_ALREADY_AVAILABLE", "path": arguments.get("path")},
                 )
-                return cached.model_dump()
+                return cached if isinstance(cached, dict) else cached.model_dump()
         call = ToolCall(
             run_id=run.id,
             tool_name=name,
@@ -282,7 +288,7 @@ class ToolGateway:
 
     async def _cached_file_read(
         self, session: AsyncSession, run: SolveRun, arguments: dict
-    ) -> ToolExecutionResult | None:
+    ) -> dict | None:
         """Return the original bounded view for an identical file range.
 
         The Runner is not contacted twice for content the model has already
@@ -312,7 +318,7 @@ class ToolGateway:
             if not isinstance(view, dict) or not view.get("content_excerpt"):
                 continue
             return ToolExecutionResult(
-                status="COMPLETED",
+                status="CACHED",
                 model_view=ToolModelView(
                     summary=str(view.get("summary") or "已返回此前读取的文件范围"),
                     content_excerpt=str(view.get("content_excerpt")),
@@ -323,6 +329,10 @@ class ToolGateway:
                 artifacts=[],
                 error_code=None,
                 error_message="The same file range was already returned to the model; Runner was not called.",
+                warning="FILE_RANGE_ALREADY_AVAILABLE",
+                content=str(view.get("content_excerpt")),
+                summary=str(view.get("summary") or "Cached file range returned"),
+                required_next_dimension="automation_or_new_experiment",
             )
         return None
 
@@ -344,7 +354,7 @@ class ToolGateway:
             status = "FAILED"
         structured = result.get("structured_result") if isinstance(result.get("structured_result"), dict) else result
         facts = dict(structured.get("extracted_facts") or result.get("extracted_facts") or {})
-        for key in ("status_code", "final_url", "redirect_history", "content_type", "selected_headers", "cookie_names", "body_length", "html_title", "html_comments", "forms", "form_actions", "parameter_names", "links", "script_urls", "json_keys", "suspected_credentials", "suspected_flags", "path", "start_line", "end_line", "content_sha256", "matching_paths", "match_snippets", "line_numbers", "generated_files", "stdout_excerpt", "stderr_excerpt", "network_targets", "runtime_ms"):
+        for key in ("status_code", "final_url", "redirect_history", "content_type", "selected_headers", "cookie_names", "body_length", "html_title", "html_comments", "forms", "form_actions", "parameter_names", "links", "script_urls", "json_keys", "suspected_credentials", "suspected_flags", "path", "start_line", "end_line", "content_sha256", "matching_paths", "match_snippets", "line_numbers", "generated_files", "stdout_excerpt", "stderr_excerpt", "network_targets", "runtime_ms", "injectable", "parameter", "technique", "dbms", "databases", "tables", "columns", "dumped_rows", "flag_candidates", "raw_output_path", "sqlmap_extraction_completed"):
             if key in structured and key not in facts:
                 facts[key] = structured[key]
         excerpt = structured.get("body_excerpt") or structured.get("content_excerpt") or structured.get("content") or structured.get("output")

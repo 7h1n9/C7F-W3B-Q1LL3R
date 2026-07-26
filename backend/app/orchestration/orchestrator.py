@@ -39,10 +39,18 @@ from app.models.run import (
 )
 from app.models.skill import RunSkillSnapshot, Skill
 from app.orchestration.state_machine import TERMINAL, RunStatus, transition
-from app.schemas.agent import ActionHypothesis, FinishAction, PlanAction, SkillAction, ToolAction
+from app.schemas.agent import (
+    ActionHypothesis,
+    AutomationAction,
+    FinishAction,
+    PlanAction,
+    SkillAction,
+    ToolAction,
+)
 from app.services.action_fingerprint import fingerprint_action
 from app.services.action_quality import action_quality_gate, recovery_planner
 from app.services.attack_chain import classify_rejection
+from app.services.automation_policy import automation_policy_engine
 from app.services.codex_materializer import codex_materializer, logical_tool_budget_ref
 from app.services.codex_preflight import codex_preflight_service
 from app.services.context_builder import context_builder
@@ -801,6 +809,9 @@ class SolveOrchestrator:
                     "skill_name": getattr(action, "skill_name", None),
                     "supporting_evidence": getattr(action, "supporting_evidence", None),
                     "expected_use": getattr(action, "expected_use", None),
+                    "automation_tool": getattr(action, "automation_tool", None),
+                    "plan_node_id": getattr(action, "plan_node_id", None),
+                    "experiment_id": getattr(action, "experiment_id", None),
                 },
             )
             decision_card = getattr(action, "decision_card", None)
@@ -848,6 +859,48 @@ class SolveOrchestrator:
                 )
                 await solver_state_service.record_progress(session, run.id, True)
                 continue
+            automation_context = None
+            if isinstance(action, AutomationAction):
+                # AutomationAction is a first-class request, not a telemetry
+                # event.  Convert it only after the controller has performed
+                # the bounded budget/permission gate; the normal ToolGateway
+                # path then records the Runner call, artifact and observation.
+                definitions = load_tool_definitions()
+                if action.automation_tool not in definitions:
+                    await event_service.append(
+                        session, run.id, "automation.failed",
+                        {"code": "TOOL_NOT_AVAILABLE", "tool": action.automation_tool, "experiment_id": action.experiment_id},
+                    )
+                    await solver_state_service.record_control_rejection(
+                        session, run.id, {"code": "TOOL_NOT_AVAILABLE", "tool": action.automation_tool}
+                    )
+                    await self._transition(session, run, RunStatus.EVALUATING)
+                    continue
+                automation_context = action
+                await event_service.append(
+                    session, run.id, "automation.started",
+                    {
+                        "phase": action.phase,
+                        "plan_node_id": action.plan_node_id,
+                        "experiment_id": action.experiment_id,
+                        "tool": action.automation_tool,
+                        "objective": action.objective,
+                        "stop_conditions": action.stop_conditions,
+                        "expected_artifacts": action.expected_artifacts,
+                    },
+                )
+                action = ToolAction(
+                    type="tool",
+                    phase=action.phase,
+                    objective=action.objective,
+                    hypothesis=ActionHypothesis(category=action.vulnerability_class.upper(), statement=action.objective, confidence=90),
+                    tool_name=action.automation_tool,
+                    arguments=action.arguments,
+                    reason="Controller-approved bounded automation experiment",
+                    expected_evidence=", ".join(action.expected_artifacts) or "A structured automation artifact",
+                    success_condition=action.decision_question,
+                    failure_pivot=action.failure_pivot,
+                )
             state = await solver_state_service.load(session, run.id)
             if isinstance(action, ToolAction):
                 quality = action_quality_gate.evaluate(
@@ -860,7 +913,11 @@ class SolveOrchestrator:
                         "degraded_action_streak": state.degraded_action_streak if state else 0,
                     },
                 )
-                if quality.quality != "ACCEPT":
+                # Once the controller has raised force_plan_action, the next
+                # ToolAction is the action that triggered recovery.  Let the
+                # deterministic controller repair it below; sending it back
+                # through this gate first creates the old quality/plan loop.
+                if quality.quality != "ACCEPT" and not (state and state.force_plan_action):
                     if state:
                         state.degraded_action_streak = quality.streak
                         if quality.action in {"PlanAction", "RecoveryPlanner"}:
@@ -882,23 +939,6 @@ class SolveOrchestrator:
                     {"code": "PLAN_REQUIRED", "tool": action.tool_name},
                 )
                 current_state = await solver_state_service.load(session, run.id)
-                rejection_streak = current_state.control_rejection_streak if current_state else 1
-                if rejection_streak >= 3:
-                    run.last_error_code = "PLAN_REQUIRED"
-                    run.last_error_message = "The agent repeatedly ignored the required recovery plan."
-                    await self._transition(session, run, RunStatus.PAUSED_RECOVERY)
-                    await event_service.append(
-                        session,
-                        run.id,
-                        "agent.recovery_checkpoint",
-                        {
-                            "code": "PLAN_REQUIRED",
-                            "rejection_streak": rejection_streak,
-                            "requires_user_input": True,
-                        },
-                    )
-                    return
-
                 # Do not let a provider that keeps returning ToolAction spin
                 # forever. Materialize a bounded recovery plan from the
                 # rejected action, then ask the model for the next action with
@@ -911,6 +951,11 @@ class SolveOrchestrator:
                 )
                 recovery_id = f"controller-recovery-{run.run_total_agent_steps}"
                 plan = dict(current_state.run_plan_json or {}) if current_state else {}
+                vulnerability_class = "sql_injection" if any(
+                    str(item).lower() in {"sql_injection_confirmed", "sql_syntax_signal"}
+                    for item in (current_state.capability_ledger_json or {}).keys()
+                ) else ""
+                recovery_tool = automation_policy_engine.recovery_tool(vulnerability_class, action.tool_name)
                 plan.update(
                     {
                         "current_node_id": recovery_id,
@@ -919,7 +964,7 @@ class SolveOrchestrator:
                             "experiment_id": f"{recovery_id}-experiment",
                             "hypothesis_id": action.hypothesis_id,
                             "decision_question": action.success_condition or action.reason,
-                            "next_tool": action.tool_name,
+                            "next_tool": recovery_tool,
                             "expected_evidence": action.expected_evidence,
                             "failure_pivot": action.failure_pivot,
                             "hypothesis": hypothesis,
@@ -936,12 +981,21 @@ class SolveOrchestrator:
                     {
                         "source": "controller_recovery",
                         "plan_node_id": recovery_id,
-                        "next_tool": action.tool_name,
+                        "next_tool": recovery_tool,
                         "decision_question": action.success_condition or action.reason,
+                        "automation_required": recovery_tool not in {"file_read", "http_request"},
                     },
                 )
-                await self._transition(session, run, RunStatus.PLANNING)
-                continue
+                await solver_state_service.record_result_classification(session, run.id, "CONTROL_REJECTION")
+                await solver_state_service.require_plan_action(session, run.id, False)
+                # The Controller has now supplied the missing plan. Repair
+                # the current model action in-place and execute it in this
+                # Attempt; a second model turn must not be required merely to
+                # repeat the same action with a different wrapper.
+                action.reason = "Controller-repaired action under a committed recovery plan"
+                action.retry_reason = "controller_recovery_plan"
+                action.objective = action.objective or "Continue the authorized investigation"
+                state = await solver_state_service.load(session, run.id)
             hypothesis_item = None
             if isinstance(action, SkillAction):
                 handled = await self._handle_skill_action(session, run, challenge, action)
@@ -1047,7 +1101,7 @@ class SolveOrchestrator:
                 fingerprint = fingerprint_action(action.tool_name, action.arguments)
                 state = await solver_state_service.load(session, run.id)
                 fingerprint_state = (state.action_fingerprints_json if state else {}).get(fingerprint)
-                if fingerprint_state and not action.retry_reason:
+                if fingerprint_state and not action.retry_reason and action.tool_name != "file_read":
                     await event_service.append(
                         session,
                         run.id,
@@ -1071,8 +1125,11 @@ class SolveOrchestrator:
                             "agent.replan_required",
                             {"reason": "Repeated no-progress actions"},
                         )
-                    if current_state and current_state.duplicate_action_streak >= 3:
-                        await event_service.append(session, run.id, "agent.automation_required", recovery_planner.plan(phase=run.current_phase, no_progress=no_progress_count, duplicate_streak=current_state.duplicate_action_streak))
+                    if current_state and current_state.duplicate_action_streak >= 2:
+                        recommendation = recovery_planner.plan(phase=run.current_phase, no_progress=no_progress_count, duplicate_streak=current_state.duplicate_action_streak)
+                        recommendation["recommended_tool"] = automation_policy_engine.recovery_tool("sql_injection" if "sql" in str(action.hypothesis).lower() else "", action.tool_name)
+                        await event_service.append(session, run.id, "agent.automation_required", recommendation)
+                        await solver_state_service.require_plan_action(session, run.id, False)
                     if await self._stop_if_no_progress(
                         session, run, challenge, no_progress_count
                     ):
@@ -1305,6 +1362,17 @@ class SolveOrchestrator:
                     "agent.action_completed",
                     {"type": "tool", "tool": action.tool_name, "status": result.get("status")},
                 )
+                if automation_context is not None:
+                    await event_service.append(
+                        session, run.id, "automation.completed",
+                        {
+                            "experiment_id": automation_context.experiment_id,
+                            "tool": action.tool_name,
+                            "status": result.get("status"),
+                            "artifact_id": artifact.id if artifact else None,
+                            "expected_artifacts": automation_context.expected_artifacts,
+                        },
+                    )
                 if progress["no_progress_count"] >= 2:
                     await event_service.append(
                         session,

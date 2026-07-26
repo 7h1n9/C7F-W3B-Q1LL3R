@@ -17,7 +17,7 @@ class EvidencePipeline:
     CAPABILITIES = {
         "baseline_confirmed", "entry_identified", "session_established",
         "object_reference_discovered", "authorization_boundary_tested", "idor_confirmed",
-        "sql_syntax_signal", "sql_injection_confirmed", "union_injection_confirmed", "has_flag_candidate",
+        "sql_syntax_signal", "sql_injection_confirmed", "union_injection_confirmed", "sqlmap_extraction_completed", "has_flag_candidate",
     }
 
     def infer_capabilities(self, view: ToolModelView) -> set[str]:
@@ -36,6 +36,8 @@ class EvidencePipeline:
             capabilities.add("sql_injection_confirmed")
         if structured.get("union_confirmed"):
             capabilities.add("union_injection_confirmed")
+        if view.tool == "sqlmap_run" and view.ok:
+            capabilities.add("sqlmap_extraction_completed")
         if structured.get("suspected_flags") or facts.get("flag_candidate_count"):
             capabilities.add("has_flag_candidate")
         return capabilities

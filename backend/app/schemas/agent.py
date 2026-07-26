@@ -57,6 +57,31 @@ class PlanAction(BaseModel):
     decision_card: DecisionCard | None = None
 
 
+class AutomationAction(BaseModel):
+    """A bounded, executable exploitation experiment.
+
+    This is deliberately separate from ToolAction.  A model may request an
+    automation experiment, but the orchestrator owns the actual runner call
+    and records the resulting artifacts/capabilities.
+    """
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    type: Literal["automation"]
+    phase: str = "EXPLOITATION"
+    plan_node_id: str = Field(min_length=1, max_length=80)
+    experiment_id: str = Field(min_length=1, max_length=120)
+    objective: str = Field(min_length=1, max_length=2000)
+    vulnerability_class: str = Field(min_length=1, max_length=120)
+    automation_tool: str = Field(min_length=1, max_length=100)
+    arguments: dict
+    stop_conditions: list[str] = Field(default_factory=list, max_length=20)
+    expected_artifacts: list[str] = Field(default_factory=list, max_length=20)
+    fallback_tool: str | None = Field(default=None, max_length=100)
+    failure_pivot: str = Field(min_length=1, max_length=2000)
+    decision_question: str = "Did the bounded automation produce the expected artifact?"
+
+
 class SkillAction(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
@@ -88,4 +113,7 @@ class FinishAction(BaseModel):
     decision_card: DecisionCard | None = None
 
 
-AgentAction = Annotated[PlanAction | ToolAction | SkillAction | FinishAction, Field(discriminator="type")]
+AgentAction = Annotated[
+    PlanAction | ToolAction | AutomationAction | SkillAction | FinishAction,
+    Field(discriminator="type"),
+]

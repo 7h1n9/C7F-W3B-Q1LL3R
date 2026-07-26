@@ -25,10 +25,14 @@ class ToolArtifactRef(BaseModel):
 
 
 class ToolExecutionResult(BaseModel):
-    status: Literal["COMPLETED", "FAILED", "TIMEOUT", "CANCELLED"]
+    status: Literal["COMPLETED", "CACHED", "FAILED", "TIMEOUT", "CANCELLED"]
     model_view: ToolModelView
     artifacts: list[ToolArtifactRef] = Field(default_factory=list)
     error_code: str | None = None
     error_message: str | None = None
+    warning: str | None = None
+    content: str | None = None
+    summary: str | None = None
+    required_next_dimension: str | None = None
     retryable: bool = False
     error_details: dict = Field(default_factory=dict)

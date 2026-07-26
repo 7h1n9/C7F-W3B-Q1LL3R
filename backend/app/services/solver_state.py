@@ -327,6 +327,9 @@ class SolverStateService:
         ledger, plan, _current_node = reduce_capability(
             state.capability_ledger_json or {}, state.attack_chain_plan_json or {}, capability, evidence
         )
+        if capability == "sql_injection_confirmed":
+            ledger["manual_probe_budget_exhausted"] = {"confirmed": True, "evidence": evidence or {}}
+            ledger["automation_required"] = {"confirmed": True, "evidence": evidence or {}}
         state.capability_ledger_json = ledger
         state.attack_chain_plan_json = plan
         state.no_progress_count = 0

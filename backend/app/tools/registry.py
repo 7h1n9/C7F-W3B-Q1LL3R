@@ -44,7 +44,20 @@ class ToolDefinition(BaseModel):
             f"{self.name.title()}Arguments", __config__=ConfigDict(extra="forbid"), **fields
         )
         try:
-            return argument_model.model_validate(arguments).model_dump(exclude_none=True)
+            validated = argument_model.model_validate(arguments).model_dump(exclude_none=True)
+            invalid_enum = {}
+            for name, value in validated.items():
+                specification = self.parameters.get(name) or {}
+                if specification.get("enum") and value not in specification["enum"]:
+                    invalid_enum[name] = value
+            if invalid_enum:
+                raise DomainError(
+                    "TOOL_INVALID_ARGUMENT",
+                    "Tool argument is outside the declared enum.",
+                    {"tool": self.name, "unknown": invalid_enum, "expected_schema": self.parameters},
+                    422,
+                )
+            return validated
         except ValidationError as error:
             raise DomainError(
                 "TOOL_INVALID_ARGUMENT",

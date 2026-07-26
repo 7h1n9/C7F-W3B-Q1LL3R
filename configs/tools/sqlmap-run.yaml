@@ -1,0 +1,21 @@
+name: sqlmap_run
+display_name: SQLMap Bounded Extraction
+category: web
+description: Execute a bounded SQLMap action against an authorized request file.
+risk_level: high
+enabled: true
+parameters:
+  request_file: {type: string, required: true}
+  parameter: {type: string, required: true}
+  action: {type: string, required: true, enum: [detect, dbs, tables, columns, dump_target, search_column]}
+  techniques: {type: array, required: false}
+  database: {type: string, required: false}
+  table: {type: string, required: false}
+  columns: {type: array, required: false}
+  search_term: {type: string, required: false}
+  level: {type: integer, required: false}
+  risk: {type: integer, required: false}
+  threads: {type: integer, required: false}
+  timeout_seconds: {type: integer, required: false}
+limits: {level: 3, risk: 2, threads: 3, timeout_seconds: 600}
+permissions: {target_allowlist_required: true, dump_forbidden: true, os_shell_forbidden: true, file_write_forbidden: true}

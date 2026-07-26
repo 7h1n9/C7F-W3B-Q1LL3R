@@ -37,10 +37,10 @@ async def capability_registry() -> dict:
         "http_request", "http_session_request", "http_extract", "whatweb_fingerprint", "js_asset_analyze", "source_map_analyze",
         "file_type", "strings_extract", "archive_list", "content_discovery", "jwt_inspect", "session_inspect", "session_list_secret_refs", "jwt_clone_claims", "jwt_sign", "http_session_set_cookie_ref", "file_read",
         "file_search", "python_run", "script_run", "sandbox_exec", "pcap_metadata", "pcap_protocols", "pcap_query", "pcap_tcp_stream",
-        "pcap_http_objects", "pcap_dns_summary", "pcap_credentials", "sqlmap_detect", "nmap_service_probe", "sql_injection_probe", "sql_boolean_compare", "sql_union_probe",
+        "pcap_http_objects", "pcap_dns_summary", "pcap_credentials", "sqlmap_detect", "sqlmap_run", "sql_injection_probe", "sql_boolean_compare", "sql_union_probe",
         "nikto_scan", "binwalk_scan", "exiftool_metadata",
     ]
-    placeholder_tools = {"pcap_tcp_stream", "pcap_http_objects", "pcap_dns_summary", "pcap_credentials", "sqlmap_detect", "nmap_service_probe", "nikto_scan", "binwalk_scan", "exiftool_metadata"}
+    placeholder_tools = {"pcap_tcp_stream", "pcap_http_objects", "pcap_dns_summary", "pcap_credentials", "nmap_service_probe", "nikto_scan", "binwalk_scan", "exiftool_metadata"}
     interpreter_installed = {"python_run": bool(shutil.which("python")), "script_run": any(bool(shutil.which(name)) for name in ("python", "node", "bash")), "sandbox_exec": any(bool(shutil.which(name)) for name in ("file", "strings", "grep", "sed", "awk", "jq", "xxd", "base64", "openssl", "unzip", "tar", "7z", "binwalk", "exiftool"))}
     return {
         "tools": [{"name": name, "implemented": name not in placeholder_tools, "installed": interpreter_installed.get(name, True), "enabled": name not in placeholder_tools and interpreter_installed.get(name, True), "available": name not in placeholder_tools and interpreter_installed.get(name, True), "version": "policy-wrapper", "self_test_ok": name not in placeholder_tools and interpreter_installed.get(name, True), "last_self_check": None} for name in tools],

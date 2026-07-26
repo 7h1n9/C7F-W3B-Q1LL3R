@@ -2,6 +2,7 @@ import asyncio
 import hashlib
 import json
 import re
+import shutil
 from pathlib import Path
 from typing import Any
 
@@ -21,6 +22,8 @@ from app.models.run import (
 )
 from app.orchestration.state_machine import TERMINAL, RunStatus
 from app.services.events import event_service
+from app.services.manual_writeup import ManualWriteupRenderer
+from app.services.reproduction_commands import reproduction_command_renderer
 
 
 class ReproductionStep(BaseModel):
@@ -376,11 +379,29 @@ class ReportService:
             json.dumps(verifier, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
+        minimal_path = {
+            "minimal_solution_path": [item.model_dump() for item in steps],
+            "confirmation_path": [item.model_dump() for item in steps if item.tool_name in {"http_request", "http_session_request", "sql_boolean_compare", "sql_injection_probe"}],
+            "automation_path": [item.model_dump() for item in steps if item.tool_name in {"sqlmap_detect", "sqlmap_run", "script_run", "python_run"}],
+            "verification_path": [item.model_dump() for item in steps if item.tool_name in {"http_request", "http_session_request"}][-1:],
+        }
+        (final / "minimal-solution-path.json").write_text(json.dumps(minimal_path, ensure_ascii=False, indent=2), encoding="utf-8")
+        (final / "reproduction-commands.sh").write_text(
+            "#!/usr/bin/env bash\nset -euo pipefail\n" + reproduction_command_renderer.render_steps([item.model_dump() for item in steps]) + "\n",
+            encoding="utf-8",
+        )
+        for directory in ("requests", "scripts", "sqlmap"):
+            source = root / directory
+            destination = final / directory
+            if source.is_dir():
+                shutil.copytree(source, destination, dirs_exist_ok=True)
+            else:
+                destination.mkdir(parents=True, exist_ok=True)
         (final / "evidence-manifest.json").write_text(
             json.dumps(manifest, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
-        raw = ChineseWriteupRenderer().render(
+        raw = ManualWriteupRenderer().render(
             challenge, run, result, calls, observations, hypotheses, flags, steps, failure_reason
         ).encode("utf-8")
         path = final / "writeup.zh-CN.md"

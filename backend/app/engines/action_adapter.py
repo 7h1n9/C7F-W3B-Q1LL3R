@@ -33,6 +33,10 @@ TYPE_ALIASES = {
     "plan_action": "plan",
     "PLAN_ACTION": "plan",
     "plan": "plan",
+    "AutomationAction": "automation",
+    "automation_action": "automation",
+    "AUTOMATION_ACTION": "automation",
+    "automation": "automation",
     "SkillAction": "skill",
     "skill_action": "skill",
     "SKILL_ACTION": "skill",
@@ -52,6 +56,8 @@ FIELD_ALIASES = {
     "tool_reason": "reason",
     "action_reason": "reason",
     "evidence": "supporting_evidence",
+    "automation": "automation_tool",
+    "automationTool": "automation_tool",
 }
 
 
@@ -91,6 +97,16 @@ def normalize_action_payload(raw_action: dict[str, Any]) -> tuple[dict[str, Any]
         nested.setdefault("type", "finish")
         normalized = {**nested, **normalized}
         trace.mark("finish-object->finish-action")
+    elif "automation_action" in normalized and isinstance(normalized["automation_action"], dict):
+        nested = dict(normalized.pop("automation_action"))
+        nested.setdefault("type", "automation")
+        normalized = {**nested, **normalized}
+        trace.mark("automation-object->automation-action")
+    elif "automation" in normalized and isinstance(normalized["automation"], dict):
+        nested = dict(normalized.pop("automation"))
+        nested.setdefault("type", "automation")
+        normalized = {**nested, **normalized}
+        trace.mark("automation-object->automation-action")
 
     action_type = normalized.get("type") or normalized.get("action_type")
     if action_type is None:
@@ -110,6 +126,9 @@ def normalize_action_payload(raw_action: dict[str, Any]) -> tuple[dict[str, Any]
         elif normalized.get("plan_node_id") or normalized.get("next_tool"):
             action_type = "plan"
             trace.mark("infer-type:plan")
+        elif normalized.get("automation_tool") or normalized.get("automationTool"):
+            action_type = "automation"
+            trace.mark("infer-type:automation")
     if isinstance(action_type, str):
         mapped = TYPE_ALIASES.get(action_type, TYPE_ALIASES.get(action_type.lower()))
         if mapped:
@@ -143,6 +162,29 @@ def normalize_action_payload(raw_action: dict[str, Any]) -> tuple[dict[str, Any]
         if not isinstance(normalized.get("hypothesis"), (str, dict)) or not normalized["hypothesis"]:
             normalized["hypothesis"] = "Initial investigation hypothesis"
             trace.mark("hypothesis:default", degraded=True)
+
+    if normalized.get("type") == "automation":
+        if not normalized.get("plan_node_id"):
+            normalized["plan_node_id"] = "automation-node"
+            trace.mark("plan_node_id:default", degraded=True)
+        if not normalized.get("experiment_id"):
+            normalized["experiment_id"] = "automation-experiment"
+            trace.mark("experiment_id:default", degraded=True)
+        if not normalized.get("objective"):
+            normalized["objective"] = "Execute the bounded exploitation experiment"
+            trace.mark("objective:default", degraded=True)
+        if not normalized.get("vulnerability_class"):
+            normalized["vulnerability_class"] = "unknown"
+            trace.mark("vulnerability_class:default", degraded=True)
+        if not normalized.get("automation_tool"):
+            normalized["automation_tool"] = normalized.get("tool_name", "script_run")
+            trace.mark("automation_tool:default", degraded=True)
+        if not isinstance(normalized.get("arguments"), dict):
+            normalized["arguments"] = {}
+            trace.mark("arguments:default", degraded=True)
+        if not normalized.get("failure_pivot"):
+            normalized["failure_pivot"] = "Use the bounded fallback tool and preserve the failure artifact."
+            trace.mark("failure_pivot:default", degraded=True)
 
     return normalized, trace
 

@@ -12,5 +12,6 @@ parameters:
   body: {type: string, required: false}
   follow_redirects: {type: boolean, required: false}
   timeout: {type: integer, required: false}
+  final_verification: {type: boolean, required: false}
 limits: {timeout_seconds: 30, max_output_bytes: 1048576}
 permissions: {target_allowlist_required: true}
