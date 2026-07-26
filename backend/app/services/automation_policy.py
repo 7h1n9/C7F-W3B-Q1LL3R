@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 METHOD_PHASES = (
+    "INFRASTRUCTURE_VALIDATION",
     "DISCOVERY",
     "CONFIRMATION",
     "EXPLOITATION_PLANNING",
@@ -15,6 +16,7 @@ METHOD_PHASES = (
 
 AUTOMATION_TOOLS_AFTER_SQL_CONFIRMATION = [
     "sql_boolean_compare",
+    "request_capture",
     "sqlmap_detect",
     "sqlmap_run",
     "workspace_write_file",
@@ -51,6 +53,14 @@ class AutomationPolicyEngine:
         vuln = vulnerability_class.lower().replace(" ", "_")
         stable = len(differences) >= 2 or any(bool(item.get("stable")) for item in differences)
         if vuln in {"sql", "sqli", "sql_injection", "boolean_sql_injection"} and stable:
+            session_state = session or {}
+            # Methodology 4.3 keeps the evidence chain explicit. Callers can
+            # advance it with these durable session markers; without markers
+            # the legacy recommendation remains SQLMap-compatible.
+            if not session_state.get("request_captured"):
+                return AutomationRecommendation("request_capture", dict(session_state.get("request_capture_arguments") or {}), ["preserve the successful request and its metadata"], "sqlmap_detect")
+            if not session_state.get("sqlmap_detected"):
+                return AutomationRecommendation("sqlmap_detect", dict(session_state.get("sqlmap_arguments") or {}), ["stop after DBMS and injection point are identified"], "sqlmap_run")
             args = dict((session or {}).get("sqlmap_arguments") or {})
             args.setdefault("action", "detect")
             if health.get("sqlmap_run", True):

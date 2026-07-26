@@ -61,13 +61,15 @@ def _validate(request: JobRequest, path: Path) -> dict:
     techniques = [str(item).upper() for item in (args.get("techniques") or [])]
     if any(item not in _TECHNIQUES for item in techniques):
         raise HTTPException(422, detail="techniques contains an unsupported SQLMap technique")
-    if action in {"tables", "columns", "dump_target"} and not str(args.get("database") or ""):
+    dbms = str(args.get("dbms") or "").lower()
+    sqlite = dbms in {"sqlite", "sqlite3"}
+    if action in {"tables", "columns", "dump_target"} and not sqlite and not str(args.get("database") or ""):
         raise HTTPException(422, detail=f"{action} requires database")
     if action in {"columns", "dump_target"} and not str(args.get("table") or ""):
         raise HTTPException(422, detail=f"{action} requires table")
     if action == "dump_target" and (not isinstance(args.get("columns"), list) or not args.get("columns") or len(args["columns"]) > 10):
         raise HTTPException(422, detail="dump_target requires one to ten columns")
-    return {"parameter": parameter, "action": action, "level": level, "risk": risk, "threads": threads, "timeout": timeout, "techniques": techniques}
+    return {"parameter": parameter, "action": action, "level": level, "risk": risk, "threads": threads, "timeout": timeout, "techniques": techniques, "dbms": dbms, "sqlite": sqlite}
 
 
 def build_sqlmap_argv(request: JobRequest, output_dir: Path) -> tuple[list[str], Path]:
@@ -81,15 +83,23 @@ def build_sqlmap_argv(request: JobRequest, output_dir: Path) -> tuple[list[str],
     if action == "dbs":
         argv.append("--dbs")
     elif action == "tables":
-        argv += ["--tables", "-D", str(request.arguments.get("database") or "")]
+        argv.append("--tables")
+        if not normalized["sqlite"]:
+            argv += ["-D", str(request.arguments.get("database") or "")]
     elif action == "columns":
-        argv += ["--columns", "-D", str(request.arguments.get("database") or ""), "-T", str(request.arguments.get("table") or "")]
+        argv += ["--columns"]
+        if not normalized["sqlite"]:
+            argv += ["-D", str(request.arguments.get("database") or "")]
+        argv += ["-T", str(request.arguments.get("table") or "")]
     elif action == "dump_target":
         database, table = str(request.arguments.get("database") or ""), str(request.arguments.get("table") or "")
         columns = request.arguments.get("columns") or []
-        if not database or not table or not isinstance(columns, list) or not columns:
+        if (not normalized["sqlite"] and not database) or not table or not isinstance(columns, list) or not columns:
             raise HTTPException(422, detail="dump_target requires database, table and columns")
-        argv += ["--dump", "-D", database, "-T", table, "-C", ",".join(str(item) for item in columns[:10])]
+        argv += ["--dump"]
+        if not normalized["sqlite"]:
+            argv += ["-D", database]
+        argv += ["-T", table, "-C", ",".join(str(item) for item in columns[:10])]
     elif action == "search_column":
         term = str(request.arguments.get("search_term") or "flag")
         argv += ["--search", "-C", term[:80]]
@@ -148,6 +158,13 @@ async def sqlmap_run(request: JobRequest) -> dict:
             process.kill()
             await process.wait()
             return {"status": "FAILED", "error_code": "SQLMAP_TIMEOUT", "summary": "SQLMap timed out"}
+        except asyncio.CancelledError:
+            process.terminate()
+            try:
+                await asyncio.wait_for(process.wait(), timeout=3)
+            except asyncio.TimeoutError:
+                process.kill(); await process.wait()
+            raise
     except FileNotFoundError:
         return {"status": "FAILED", "error_code": "TOOL_NOT_INSTALLED", "summary": "sqlmap is not installed"}
     raw = output.decode("utf-8", errors="replace")
@@ -157,7 +174,7 @@ async def sqlmap_run(request: JobRequest) -> dict:
     structured["raw_output_path"] = str(raw_path.relative_to(workspace)).replace("\\", "/")
     structured["command_redacted"] = " ".join(argv).replace(str(workspace), "<workspace>")
     result_path.write_text(json.dumps(structured, ensure_ascii=False, indent=2), encoding="utf-8")
-    return {"status": "COMPLETED" if process.returncode == 0 else "FAILED", "summary": "SQLMap completed", "exit_code": process.returncode, "artifact_path": str(result_path.relative_to(workspace)).replace("\\", "/"), "structured_result": structured}
+    return {"status": "COMPLETED" if process.returncode == 0 else "FAILED", "error_code": None if process.returncode == 0 else "SQLMAP_FAILED", "summary": "SQLMap completed" if process.returncode == 0 else "SQLMap reported failure", "exit_code": process.returncode, "artifact_path": str(result_path.relative_to(workspace)).replace("\\", "/"), "structured_result": structured}
 
 
 async def sqlmap_detect(request: JobRequest) -> dict:

@@ -131,7 +131,7 @@ def _request_kwargs(args: dict) -> dict:
     return kwargs
 
 
-async def execute_http(request: JobRequest) -> dict:
+async def _execute_http(request: JobRequest) -> dict:
     args = request.arguments
     url = str(args.get("url", ""))
     def validate(candidate: str) -> None:
@@ -210,3 +210,10 @@ async def execute_http(request: JobRequest) -> dict:
         "extracted_facts": extracted,
         "summary": f"HTTP {response.status_code} from {urlparse(str(response.url)).hostname}",
     }
+
+
+async def execute_http(request: JobRequest) -> dict:
+    try:
+        return await _execute_http(request)
+    except httpx.RequestError as error:
+        return {"status": "FAILED", "error_code": "TARGET_UNAVAILABLE", "retryable": True, "stage": "TARGET", "summary": "Target request could not be completed", "error": str(error)}

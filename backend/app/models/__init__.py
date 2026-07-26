@@ -14,6 +14,7 @@ from app.models.learned_skill import (
 from app.models.model_config import ModelConfig
 from app.models.run import (
     Artifact,
+    CompactionLease,
     EvidenceSnapshot,
     FlagCandidate,
     Hypothesis,
@@ -21,10 +22,10 @@ from app.models.run import (
     Observation,
     RunAttempt,
     RunCompactionCheckpoint,
-    ScriptRecord,
     RunEvent,
     RunExecutionLease,
     RunUserInput,
+    ScriptRecord,
     SolveRun,
     ToolCall,
     ToolExecutionTrace,
@@ -47,6 +48,7 @@ __all__ = [
     "RunCompactionCheckpoint",
     "ScriptRecord",
     "EvidenceSnapshot",
+    "CompactionLease",
     "RunExecutionLease",
     "RunUserInput",
     "Artifact",

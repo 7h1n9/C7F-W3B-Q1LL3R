@@ -2,7 +2,7 @@ import asyncio
 import contextlib
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -74,6 +74,19 @@ app.add_middleware(
 app.add_exception_handler(DomainError, domain_error_handler)
 
 
+def _error_payload(code: str, message: str, *, stage: str, status_code: int, details: object = None) -> dict:
+    from uuid import uuid4
+    return {
+        "code": code,
+        "message": message,
+        "stage": stage,
+        "retryable": status_code >= 500,
+        "diagnostic_id": str(uuid4()),
+        "tool_execution_completed": False,
+        "details": _json_safe(details or {}),
+    }
+
+
 def _json_safe(value: object) -> object:
     if value is None or isinstance(value, (str, int, float, bool)):
         return value
@@ -88,12 +101,21 @@ def _json_safe(value: object) -> object:
 async def validation_error(_: Request, error: RequestValidationError) -> JSONResponse:
     return JSONResponse(
         status_code=422,
-        content={
-            "code": "VALIDATION_ERROR",
-            "message": "Request validation failed.",
-            "details": {"errors": _json_safe(error.errors())},
-        },
+        content=_error_payload("MCP_VALIDATION_FAILED", "Request validation failed.", stage="VALIDATION", status_code=422, details={"errors": error.errors()}),
     )
+
+
+@app.exception_handler(HTTPException)
+async def http_error(_: Request, error: HTTPException) -> JSONResponse:
+    detail = error.detail if isinstance(error.detail, dict) else {"detail": error.detail}
+    code = str(detail.get("code") or "HTTP_ERROR") if isinstance(detail, dict) else "HTTP_ERROR"
+    message = str(detail.get("message") or detail.get("detail") or "Request failed") if isinstance(detail, dict) else str(detail)
+    return JSONResponse(status_code=error.status_code, content=_error_payload(code, message, stage="HTTP", status_code=error.status_code, details=detail))
+
+
+@app.exception_handler(Exception)
+async def unhandled_error(_: Request, error: Exception) -> JSONResponse:
+    return JSONResponse(status_code=500, content=_error_payload("BACKEND_UNAVAILABLE", "Backend request failed.", stage="BACKEND", status_code=500, details={"error": str(error)[:1000]}))
 
 
 app.include_router(router)

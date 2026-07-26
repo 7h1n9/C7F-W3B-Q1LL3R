@@ -41,6 +41,12 @@ class EffectiveLogicalToolCallService:
         started_at: datetime | None = None,
         attempt_id: str | None = None,
         deduplicate_by_arguments: bool = False,
+        counts_toward_budget: bool = True,
+        logical_kind: str = "TOOL",
+        provider_tool_name: str | None = None,
+        effective_tool_name: str | None = None,
+        turn_id: str | None = None,
+        turn_started_at: datetime | None = None,
     ) -> LogicalToolCall:
         """Get-or-create the one effective row for a provider action."""
         external_id = str(logical_tool_call_id)
@@ -81,6 +87,12 @@ class EffectiveLogicalToolCallService:
                 arguments_digest=self.arguments_digest(arguments or {}),
                 status=status,
                 started_at=started_at or datetime.now(UTC),
+                counts_toward_budget=counts_toward_budget,
+                logical_kind=logical_kind,
+                provider_tool_name=provider_tool_name or tool_name,
+                effective_tool_name=effective_tool_name or tool_name,
+                turn_id=turn_id,
+                turn_started_at=turn_started_at,
             )
             session.add(logical)
             try:
@@ -108,6 +120,12 @@ class EffectiveLogicalToolCallService:
                 logical.started_at = started_at
             if arguments is not None:
                 logical.arguments_digest = self.arguments_digest(arguments)
+            logical.counts_toward_budget = counts_toward_budget
+            logical.logical_kind = logical_kind
+            logical.provider_tool_name = provider_tool_name or logical.provider_tool_name or tool_name
+            logical.effective_tool_name = effective_tool_name or logical.effective_tool_name or tool_name
+            logical.turn_id = turn_id or logical.turn_id
+            logical.turn_started_at = turn_started_at or logical.turn_started_at
         return logical
 
     async def trace(

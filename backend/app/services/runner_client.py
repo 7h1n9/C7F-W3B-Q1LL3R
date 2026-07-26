@@ -1,5 +1,7 @@
 import asyncio
 import hashlib
+import json
+import time
 from pathlib import Path, PurePosixPath
 
 import httpx
@@ -15,6 +17,23 @@ class RunnerClient:
     @property
     def base_url(self) -> str:
         return get_settings().runner_url.rstrip("/")
+
+    @staticmethod
+    def _raise_response(response: httpx.Response, *, stage: str = "RUNNER") -> None:
+        if response.is_success:
+            return
+        try:
+            body = response.json()
+        except ValueError:
+            body = {}
+        raise DomainError(
+            str(body.get("code") or "RUNNER_UNAVAILABLE"),
+            str(body.get("message") or response.reason_phrase or "Runner request failed"),
+            body.get("details") if isinstance(body.get("details"), dict) else {"status_code": response.status_code},
+            503 if response.status_code >= 500 else response.status_code,
+            stage=stage,
+            retryable=response.status_code >= 500,
+        )
 
     async def health(self) -> dict:
         async with httpx.AsyncClient(timeout=5, trust_env=False) as client:
@@ -105,28 +124,60 @@ class RunnerClient:
             response.raise_for_status()
             return str(response.json()["job_id"])
 
-    async def wait_job(self, job_id: str, max_wait_seconds: int = 35) -> dict:
-        async with httpx.AsyncClient(timeout=10, trust_env=False) as client:
-            for _ in range(max_wait_seconds * 2):
-                response = await client.get(
-                    f"{self.base_url}/api/v1/jobs/{job_id}", headers=self._headers()
-                )
-                response.raise_for_status()
-                result = response.json()
-                if result["status"] in {"COMPLETED", "FAILED", "CANCELLED"}:
-                    return {
-                        **result.get("result", {}),
-                        "job_id": result.get("job_id"),
-                        "status": result["status"],
-                        "error": result.get("error"),
-                    }
-                await asyncio.sleep(0.5)
-        return {
-            "job_id": job_id,
-            "status": "FAILED",
-            "summary": "Runner polling timed out",
-            "error": "RUNNER_TIMEOUT",
-        }
+    async def wait_job(
+        self,
+        job_id: str,
+        max_wait_seconds: int | None = None,
+        *,
+        tool_timeout_seconds: int | None = None,
+    ) -> dict:
+        # The Runner owns the actual timeout. Backend waiting is the tool
+        # timeout plus a bounded delivery margin, never a fixed 35 seconds.
+        requested = int(tool_timeout_seconds or max_wait_seconds or 30)
+        deadline = time.monotonic() + min(630, max(1, requested) + 30)
+
+        def terminal(result: dict) -> dict | None:
+            if result.get("status") not in {"COMPLETED", "FAILED", "CANCELLED"}:
+                return None
+            return {**(result.get("result") or {}), "job_id": result.get("job_id"), "status": result["status"], "error": result.get("error")}
+
+        async with httpx.AsyncClient(timeout=None, trust_env=False) as client:
+            try:
+                async with client.stream(
+                    "GET", f"{self.base_url}/api/v1/jobs/{job_id}/events", headers=self._headers()
+                ) as response:
+                    self._raise_response(response, stage="RUNNER_EVENTS")
+                    async for line in response.aiter_lines():
+                        if time.monotonic() >= deadline:
+                            break
+                        if not line.startswith("data:"):
+                            continue
+                        try:
+                            status_payload = json.loads(line[5:].strip())
+                        except json.JSONDecodeError:
+                            continue
+                        if status_payload.get("status") in {"COMPLETED", "FAILED", "CANCELLED"}:
+                            current = await client.get(f"{self.base_url}/api/v1/jobs/{job_id}", headers=self._headers())
+                            self._raise_response(current, stage="RUNNER_EVENTS")
+                            done = terminal(current.json())
+                            if done:
+                                return done
+            except (httpx.HTTPError, DomainError):
+                # A Runner version may not expose SSE. Polling remains bounded
+                # by the same dynamic deadline and preserves the raw result.
+                pass
+
+            while time.monotonic() < deadline:
+                try:
+                    response = await client.get(f"{self.base_url}/api/v1/jobs/{job_id}", headers=self._headers())
+                    self._raise_response(response)
+                    done = terminal(response.json())
+                    if done:
+                        return done
+                except (httpx.HTTPError, DomainError) as error:
+                    return {"job_id": job_id, "status": "FAILED", "error_code": "RUNNER_UNAVAILABLE", "summary": "Runner became unavailable", "error": str(error), "stage": "RUNNER"}
+                await asyncio.sleep(min(0.5, max(0.05, deadline - time.monotonic())))
+        return {"job_id": job_id, "status": "FAILED", "error_code": "RUNNER_TIMEOUT", "summary": "Runner job wait timed out", "error": "RUNNER_TIMEOUT", "stage": "RUNNER_WAIT"}
 
     async def cancel_job(self, job_id: str) -> dict:
         async with httpx.AsyncClient(timeout=10, trust_env=False) as client:

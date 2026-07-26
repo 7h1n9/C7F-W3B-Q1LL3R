@@ -7,12 +7,23 @@ activation_mode: ALWAYS
 challenge_types: [WEB_TARGET, TRAFFIC_ANALYSIS]
 required_tools: [file_read, file_search, http_request, python_run, pcap_metadata, pcap_protocols, pcap_query]
 recommended_tools: [file_read, file_search, http_request, python_run, pcap_metadata, pcap_protocols, pcap_query]
-ctf_phases: [INTAKE, BASELINE, MAPPING, HYPOTHESIS, TESTING, CHAINING, FLAG_SEARCH, FLAG_VERIFICATION, REPORTING]
+ctf_phases: [INFRASTRUCTURE_VALIDATION, DISCOVERY, CONFIRMATION, EXPLOITATION_PLANNING, AUTOMATED_EXPLOITATION, EXTRACTION, VERIFICATION, REPORTING]
 ---
 
 # CTF Solver Core
 
 Use this skill for every authorized single-agent CTF run.
+
+## Methodology 4.3 stages
+
+Always validate the Backend, MCP bridge, Runner capabilities, workspace and
+target allowlist before target work. Discovery and Confirmation are bounded
+by three manual probes. Once a Boolean differential is confirmed, the fixed
+chain is `sql_boolean_compare -> request_capture -> sqlmap_detect ->
+sqlmap_run -> generated script`; ordinary HTTP extraction is not an allowed
+shortcut. Extraction stops at the smallest evidence set that proves the
+challenge result, then Verification and Reporting preserve request, result,
+provenance and artifact hashes.
 
 ## Method
 

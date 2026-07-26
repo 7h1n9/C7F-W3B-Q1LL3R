@@ -2,6 +2,7 @@ import asyncio
 import contextlib
 import hashlib
 import json
+import uuid
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from time import monotonic
@@ -60,6 +61,7 @@ from app.services.evidence_pipeline import evidence_pipeline
 from app.services.finish_gate import finish_gate
 from app.services.flags import flag_service
 from app.services.hypotheses import hypothesis_service
+from app.services.infrastructure import clear_failure, infrastructure_error, record_failure
 from app.services.progress_evaluator import progress_evaluator
 from app.services.reports import report_service
 from app.services.run_attempts import run_attempt_service
@@ -737,6 +739,10 @@ class SolveOrchestrator:
                 messages.append({"role": "user", "content": f"User supplied: {user_message}"})
                 user_message = None
             action_started = monotonic()
+            turn_id = str(uuid.uuid4())
+            turn_started_at = datetime.now(UTC)
+            run.active_turn_id = turn_id
+            await session.commit()
             try:
                 action = await engine.next_action(messages)
             except Exception:
@@ -746,6 +752,7 @@ class SolveOrchestrator:
                 trace = getattr(engine, "last_trace", {})
                 session.add(
                     AgentTurn(
+                        id=turn_id,
                         run_id=run.id,
                         step_number=run.run_total_agent_steps + 1,
                         model_config_id=run.model_config_id,
@@ -760,6 +767,8 @@ class SolveOrchestrator:
                         parse_error_code=trace.get("parse_error_code") or "ENGINE_ACTION_FAILED",
                         response_excerpt_redacted=trace.get("response_excerpt"),
                         action_json=trace.get("action") or {},
+                        turn_started_at=turn_started_at,
+                        turn_finished_at=datetime.now(UTC),
                     )
                 )
                 await session.commit()
@@ -767,6 +776,7 @@ class SolveOrchestrator:
             trace = getattr(engine, "last_trace", {})
             session.add(
                 AgentTurn(
+                    id=turn_id,
                     run_id=run.id,
                     step_number=run.run_total_agent_steps + 1,
                     model_config_id=run.model_config_id,
@@ -781,6 +791,8 @@ class SolveOrchestrator:
                     parse_error_code=trace.get("parse_error_code"),
                     response_excerpt_redacted=trace.get("response_excerpt"),
                     action_json=trace.get("action") or action.model_dump(),
+                    turn_started_at=turn_started_at,
+                    turn_finished_at=datetime.now(UTC),
                 )
             )
             run.agent_step_count += 1
@@ -1200,6 +1212,9 @@ class SolveOrchestrator:
                     result = await tool_gateway.invoke(
                         session, run, challenge, action.tool_name, action.arguments
                     )
+                    if isinstance(result, dict) and result.get("status") == "COMPLETED":
+                        clear_failure(run)
+                    await session.commit()
                 except DomainError as error:
                     await event_service.append(
                         session,
@@ -1222,6 +1237,9 @@ class SolveOrchestrator:
                     }
                     if classification == "CONTROL_REJECTION":
                         await solver_state_service.record_control_rejection(session, run.id, rejection)
+                    elif infrastructure_error(error.code, error.stage):
+                        record_failure(run, code=error.code, message=error.message, stage=error.stage)
+                        await session.commit()
                     else:
                         await solver_state_service.record_rejected_path(session, run.id, rejection)
                         await solver_state_service.record_progress(session, run.id, False)
@@ -1253,6 +1271,9 @@ class SolveOrchestrator:
                         session, run, challenge, no_progress_count
                     ):
                         return
+                    if infrastructure_error(error.code, error.stage) and int(run.infrastructure_error_streak or 0) >= 2:
+                        await session.commit()
+                        return
                     await self._transition(session, run, RunStatus.EVALUATING)
                     continue
                 call = await session.scalar(
@@ -1274,6 +1295,7 @@ class SolveOrchestrator:
                         .order_by(Artifact.created_at.desc())
                     )
                 progress = {"made_progress": False, "no_progress_count": 0, "recommended_skills": []}
+                infra_result = infrastructure_error(result.get("error_code"), result.get("stage"))
                 await solver_state_service.record_experiment(
                     session,
                     run.id,
@@ -1290,7 +1312,7 @@ class SolveOrchestrator:
                         "next_decision": action.failure_pivot if result.get("status") != "COMPLETED" else action.success_condition,
                     },
                 )
-                if call and observation and artifact:
+                if call and observation and artifact and not infra_result:
                     progress = await progress_evaluator.evaluate(
                         session,
                         run,
@@ -1369,6 +1391,9 @@ class SolveOrchestrator:
                         },
                     )
                 else:
+                    if infra_result:
+                        state = await solver_state_service.load(session, run.id)
+                        progress["no_progress_count"] = state.no_progress_count if state else 0
                     await event_service.append(
                         session,
                         run.id,
@@ -1395,14 +1420,17 @@ class SolveOrchestrator:
                             "expected_artifacts": automation_context.expected_artifacts,
                         },
                     )
-                if progress["no_progress_count"] >= 2:
+                if progress["no_progress_count"] >= 2 and not infra_result:
                     await event_service.append(
                         session,
                         run.id,
                         "agent.replan_required",
                         {"reason": "Repeated no-progress actions"},
                     )
-                if await self._stop_if_no_progress(session, run, challenge, progress["no_progress_count"]):
+                if not infra_result and await self._stop_if_no_progress(session, run, challenge, progress["no_progress_count"]):
+                    return
+                if infra_result and int(run.infrastructure_error_streak or 0) >= 2:
+                    await session.commit()
                     return
                 if result.get("status") == "COMPLETED":
                     consecutive_runner_failures = 0
@@ -1423,7 +1451,7 @@ class SolveOrchestrator:
                         await event_service.append(session, run.id, "tool.rejected", {"tool": action.tool_name, "code": result.get("error_code"), "error": failure[1], "retryable": True})
                         consecutive_runner_failures = 0
                         last_runner_failure = None
-                    elif consecutive_runner_failures >= 2:
+                    elif not infrastructure_error(result.get("error_code"), result.get("stage")) and consecutive_runner_failures >= 2:
                         run.last_error_code = "RUNNER_UNAVAILABLE"
                         run.last_error_message = failure[1][:4000]
                         await self._transition(session, run, RunStatus.FAILED_RUNNER)
@@ -1604,6 +1632,8 @@ class SolveOrchestrator:
         while True:
             await run_attempt_service.heartbeat(session, attempt, lease)
             auto_turns += 1
+            run.active_turn_id = str(uuid.uuid4())
+            await session.commit()
             before_progress = await self._codex_progress_snapshot(session, run.id)
             turn_tool_refs: set[str] = set()
             max_tools_per_turn = int((run.role_snapshot_json or {}).get("max_tools_per_turn") or 8)
@@ -1720,6 +1750,8 @@ class SolveOrchestrator:
                             },
                         )
                         return
+            run.active_turn_id = None
+            await session.commit()
             await codex_materializer.sync(session, run)
             interval = max(1, int(run.agent_checkpoint_interval or 30))
             if run.agent_step_count and run.agent_step_count % interval == 0:

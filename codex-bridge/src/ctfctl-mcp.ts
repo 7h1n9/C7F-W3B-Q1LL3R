@@ -4,10 +4,11 @@
  * the Backend Tool Gateway with an immutable run scope supplied by Bridge.
  */
 import { createInterface } from "node:readline";
+import { randomUUID } from "node:crypto";
 import { appendFileSync } from "node:fs";
 import { parametersToInputSchema, validateMcpInputSchema } from "./mcp-schema.js";
 
-type Scope = { run_id: string; challenge_id: string; workspace_root: string; allowed_hosts: string[]; attempt_id: string; lease_token: string; master_lease_token?: string; thread_id?: string; model_turn_id?: string };
+type Scope = { run_id: string; challenge_id: string; workspace_root: string; allowed_hosts: string[]; attempt_id: string; lease_token: string; master_lease_token?: string; thread_id?: string; model_turn_id?: string; turn_id?: string };
 let scope = JSON.parse(process.env.CTFCTL_SCOPE ?? "{}") as Scope;
 const masterScope = { ...scope, master_lease_token: scope.master_lease_token ?? scope.lease_token };
 const backendUrl = (process.env.CTFCTL_BACKEND_URL ?? "http://127.0.0.1:8000").replace(/\/$/, "");
@@ -25,6 +26,28 @@ function debug(event: string, detail: Record<string, unknown> = {}) {
 
 const compatibilityTools = new Set(["invoke_tool", "list_tools"]);
 let advertisedTools = new Set<string>();
+
+type ErrorEnvelope = { code: string; message: string; stage: string; retryable: boolean; diagnostic_id: string; tool_execution_completed: boolean; details?: unknown };
+class McpEnvelopeError extends Error {
+  envelope: ErrorEnvelope;
+  constructor(envelope: ErrorEnvelope) {
+    super(envelope.message);
+    this.envelope = envelope;
+  }
+}
+
+function responseEnvelope(body: unknown, fallbackCode: string, fallbackMessage: string): ErrorEnvelope {
+  const value = (body && typeof body === "object" ? body : {}) as Record<string, unknown>;
+  return {
+    code: String(value.code ?? fallbackCode),
+    message: String(value.message ?? fallbackMessage),
+    stage: String(value.stage ?? "MCP"),
+    retryable: Boolean(value.retryable ?? false),
+    diagnostic_id: String(value.diagnostic_id ?? randomUUID()),
+    tool_execution_completed: Boolean(value.tool_execution_completed ?? false),
+    details: value.details,
+  };
+}
 
 async function toolDefinitions() {
   const catalog = await backend("list_tools", {});
@@ -64,7 +87,7 @@ async function toolDefinitions() {
   return definitions;
 }
 
-async function backend(method: string, params: Record<string, unknown>) {
+async function backend(method: string, params: Record<string, unknown>, logicalToolCallId?: string) {
   const dedicatedMethods = new Set([
     "workspace_list", "workspace_tree", "workspace_stat", "workspace_read", "workspace_search",
     "workspace_write_file", "workspace_write_note", "workspace_patch_file", "workspace_mkdir",
@@ -82,25 +105,28 @@ async function backend(method: string, params: Record<string, unknown>) {
         run_id: masterScope.run_id,
         current_attempt_id: masterScope.attempt_id,
         thread_id: masterScope.thread_id ?? null,
-        model_turn_id: masterScope.model_turn_id ?? null,
+        model_turn_id: masterScope.model_turn_id ?? logicalToolCallId ?? null,
       }),
     });
     const ticketBody = await ticketResponse.json().catch(() => ({}));
-    if (!ticketResponse.ok) {
-      throw new Error(`${ticketBody.code ?? "CTFCTL_TICKET_ERROR"}: ${ticketBody.message ?? ticketResponse.statusText}`);
-    }
+    if (!ticketResponse.ok) throw new McpEnvelopeError(responseEnvelope(ticketBody, "MCP_VALIDATION_FAILED", ticketResponse.statusText));
     const ticket = ticketBody.data?.ticket;
     if (typeof ticket !== "string" || !ticket) throw new Error("CTFCTL_TICKET_INVALID");
     // Keep the master lease immutable. The one-shot ticket is sent as a
     // separate request field and never replaces the scope credential.
-    const requestScope = { ...masterScope, lease_token: masterScope.master_lease_token };
+    const requestScope = {
+      ...masterScope,
+      lease_token: masterScope.master_lease_token,
+      logical_tool_call_id: logicalToolCallId,
+      turn_id: masterScope.model_turn_id ?? logicalToolCallId,
+    };
     const response = await fetch(`${backendUrl}/api/v1/internal/ctfctl/${endpoint}`, {
       method: "POST",
       headers: { "content-type": "application/json", "x-ctfctl-access-key": accessKey },
       body: JSON.stringify({ scope: requestScope, tool_ticket: ticket, ...params }),
     });
     const body = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(`${body.code ?? "CTFCTL_ERROR"}: ${body.message ?? response.statusText}`);
+    if (!response.ok) throw new McpEnvelopeError(responseEnvelope(body, "MCP_VALIDATION_FAILED", response.statusText));
     return body.data ?? body;
   }
   const response = await fetch(`${backendUrl}/api/v1/internal/ctfctl/${endpoint}`, {
@@ -109,14 +135,15 @@ async function backend(method: string, params: Record<string, unknown>) {
     body: JSON.stringify({ scope: masterScope, ...params }),
   });
   const body = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(`${body.code ?? "CTFCTL_ERROR"}: ${body.message ?? response.statusText}`);
+  if (!response.ok) throw new McpEnvelopeError(responseEnvelope(body, "MCP_VALIDATION_FAILED", response.statusText));
   return body.data ?? body;
 }
 
-async function dispatch(name: string, args: Record<string, unknown>) {
+async function dispatch(name: string, args: Record<string, unknown>, requestId?: string | number) {
   const shortName = name.replace(/^ctfctl\./, "");
   if (!advertisedTools.has(shortName) && !compatibilityTools.has(shortName)) throw new Error("Unknown or unavailable ctfctl tool");
-  return backend(shortName, args);
+  const logicalToolCallId = `mcp:${masterScope.model_turn_id ?? "turn"}:${String(requestId ?? randomUUID())}`;
+  return backend(shortName, args, logicalToolCallId);
 }
 
 const input = createInterface({ input: process.stdin, crlfDelay: Infinity });
@@ -132,7 +159,7 @@ for await (const line of input) {
     else if (request.method === "tools/list") result = { tools: await toolDefinitions() };
     else if (request.method === "tools/call") {
       const params = request.params ?? {};
-      const value = await dispatch(String(params.name ?? ""), (params.arguments ?? {}) as Record<string, unknown>);
+      const value = await dispatch(String(params.name ?? ""), (params.arguments ?? {}) as Record<string, unknown>, request.id);
       result = { content: [{ type: "text", text: JSON.stringify(value) }] };
     } else throw new Error(`Unsupported MCP method: ${request.method}`);
     debug("response", { id: request.id ?? null, method: request.method ?? null, ok: true });
@@ -140,6 +167,11 @@ for await (const line of input) {
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     debug("response", { id: requestId ?? null, ok: false, error: message });
-    if (requestId !== undefined) process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id: requestId, error: { code: -32000, message } })}\n`);
+    if (requestId !== undefined) {
+      const envelope = error instanceof McpEnvelopeError
+        ? error.envelope
+        : responseEnvelope({}, "MCP_VALIDATION_FAILED", message);
+      process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id: requestId, error: { code: -32000, message: envelope.message, data: envelope } })}\n`);
+    }
   }
 }

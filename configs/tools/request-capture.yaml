@@ -1,0 +1,20 @@
+name: request_capture
+display_name: Request Capture
+category: web
+description: Capture a successful authorized request into requests/exploit.req for bounded replay.
+risk_level: low
+enabled: true
+parameters:
+  request_file: {type: string, required: false}
+  method: {type: string, required: false}
+  url: {type: string, required: false}
+  query: {type: object, required: false}
+  headers: {type: object, required: false}
+  body: {type: string, required: false}
+  json: {type: object, required: false}
+  form: {type: object, required: false}
+  cookie: {type: string, required: false}
+  cookie_secret_ref: {type: string, required: false}
+  secret_refs: {type: array, required: false}
+limits: {timeout_seconds: 10, max_output_bytes: 1048576}
+permissions: {target_allowlist_required: true}

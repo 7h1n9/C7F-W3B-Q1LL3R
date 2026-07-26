@@ -7,12 +7,15 @@ from sqlalchemy import select
 from app.core.exceptions import DomainError
 from app.models.run import RunAttempt, RunExecutionLease, SolveRun
 from app.orchestration.state_machine import TERMINAL, RunStatus
+from app.services.infrastructure import INFRASTRUCTURE_STATES, reject_infrastructure
 
 
 class ToolInvocationCoordinator:
     TRANSIENT_STAGES = {"ANALYZING", "PLANNING", "EXECUTING", "EVALUATING", "TESTING"}
 
     async def validate(self, session, run: SolveRun, *, attempt_id: str | None = None, lease_id: str | None = None) -> dict:
+        if str(getattr(run, "infrastructure_state", "HEALTHY")) in INFRASTRUCTURE_STATES:
+            reject_infrastructure(run)
         status = RunStatus(run.status)
         if status in TERMINAL or status in {RunStatus.WAITING_USER, RunStatus.PAUSED_RECOVERY, RunStatus.PAUSED_CHECKPOINT, RunStatus.PAUSED_DEPLOYMENT, RunStatus.PAUSED_BUDGET, RunStatus.WAITING_CONFIGURATION}:
             raise DomainError("RUN_TOOL_NOT_ALLOWED", "Tools are not allowed in a terminal or explicitly paused Run.", {"current_state": run.status}, 409)

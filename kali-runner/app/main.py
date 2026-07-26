@@ -1,13 +1,17 @@
 import asyncio
 import hashlib
 import json
+import os
 import secrets
 import shutil
+import subprocess
 from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import JSONResponse
 
 from app.config import settings
 from app.models import JobRequest
@@ -26,6 +30,25 @@ async def lifespan(_: FastAPI):
 app = FastAPI(title="CTF Kali Runner", version="0.2.0", lifespan=lifespan)
 
 
+def _error(code: str, message: str, status_code: int, stage: str, details: object = None) -> dict:
+    return {"code": code, "message": message, "stage": stage, "retryable": status_code >= 500, "diagnostic_id": secrets.token_hex(16), "tool_execution_completed": False, "details": details if isinstance(details, dict) else {"detail": details}}
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_error(_: Request, error: RequestValidationError) -> JSONResponse:
+    return JSONResponse(content=_error("MCP_VALIDATION_FAILED", "Runner request validation failed.", 422, "VALIDATION", {"errors": error.errors()}), status_code=422)
+
+
+@app.exception_handler(HTTPException)
+async def http_error(_: Request, error: HTTPException) -> JSONResponse:
+    return JSONResponse(content=_error("RUNNER_JOB_FAILED", str(error.detail), error.status_code, "EXECUTION", {"detail": error.detail}), status_code=error.status_code)
+
+
+@app.exception_handler(Exception)
+async def unhandled_error(_: Request, error: Exception) -> JSONResponse:
+    return JSONResponse(content=_error("RUNNER_UNAVAILABLE", "Runner request failed.", 503, "RUNNER", {"error": str(error)[:1000]}), status_code=503)
+
+
 @app.get("/health")
 async def health() -> dict:
     capabilities = await capability_registry()
@@ -37,16 +60,33 @@ async def capability_registry() -> dict:
         "http_request", "http_session_request", "http_extract", "whatweb_fingerprint", "js_asset_analyze", "source_map_analyze",
         "file_type", "strings_extract", "archive_list", "content_discovery", "jwt_inspect", "session_inspect", "session_list_secret_refs", "jwt_clone_claims", "jwt_sign", "http_session_set_cookie_ref", "file_read",
         "file_search", "python_run", "script_run", "sandbox_exec", "pcap_metadata", "pcap_protocols", "pcap_query", "pcap_tcp_stream",
-        "pcap_http_objects", "pcap_dns_summary", "pcap_credentials", "sqlmap_detect", "sqlmap_run", "sql_injection_probe", "sql_boolean_compare", "sql_union_probe",
+        "pcap_http_objects", "pcap_dns_summary", "pcap_credentials", "request_capture", "sqlmap_detect", "sqlmap_run", "sql_injection_probe", "sql_boolean_compare", "sql_union_probe",
         "nikto_scan", "binwalk_scan", "exiftool_metadata",
     ]
     placeholder_tools = {"pcap_tcp_stream", "pcap_http_objects", "pcap_dns_summary", "pcap_credentials", "nmap_service_probe", "nikto_scan", "binwalk_scan", "exiftool_metadata"}
-    interpreter_installed = {"python_run": bool(shutil.which("python")), "script_run": any(bool(shutil.which(name)) for name in ("python", "node", "bash")), "sandbox_exec": any(bool(shutil.which(name)) for name in ("file", "strings", "grep", "sed", "awk", "jq", "xxd", "base64", "openssl", "unzip", "tar", "7z", "binwalk", "exiftool"))}
+    command_map = {"python_run": ("python", "--version"), "script_run": ("python", "--version"), "sandbox_exec": ("file", "--version"), "sqlmap_detect": ("sqlmap", "--version"), "sqlmap_run": ("sqlmap", "--version")}
+    async def self_test(command: tuple[str, str] | None) -> tuple[bool, str | None]:
+        if command is None:
+            return True, None
+        executable = shutil.which(command[0])
+        if not executable:
+            return False, None
+        try:
+            completed = await asyncio.to_thread(subprocess.run, [executable, command[1]], capture_output=True, text=True, timeout=3, check=False)
+            return completed.returncode == 0, (completed.stdout or completed.stderr).strip()[:120]
+        except (OSError, subprocess.SubprocessError):
+            return False, None
+    tool_rows = []
+    for name in tools:
+        ok, version = await self_test(command_map.get(name))
+        implemented = name not in placeholder_tools
+        installed = ok if name in command_map else True
+        tool_rows.append({"name": name, "implemented": implemented, "installed": installed, "enabled": implemented and installed, "available": implemented and installed, "version": version or ("policy-wrapper" if implemented else None), "self_test_ok": ok and implemented, "last_self_check": None})
     return {
-        "tools": [{"name": name, "implemented": name not in placeholder_tools, "installed": interpreter_installed.get(name, True), "enabled": name not in placeholder_tools and interpreter_installed.get(name, True), "available": name not in placeholder_tools and interpreter_installed.get(name, True), "version": "policy-wrapper", "self_test_ok": name not in placeholder_tools and interpreter_installed.get(name, True), "last_self_check": None} for name in tools],
+        "tools": tool_rows,
         "binaries": {name: bool(shutil.which(name)) for name in ("tshark", "capinfos", "ffuf", "feroxbuster", "sqlmap", "nmap", "nikto", "binwalk", "exiftool")},
         "interpreters": {name: bool(shutil.which(name)) for name in ("python", "node", "bash")},
-        "network_enforcement": {"mode": "runner_policy", "os_level": False, "target_allowlist": False},
+        "network_enforcement": {"mode": "controlled_proxy" if os.environ.get("RUNNER_ENFORCED_PROXY_URL") else "none", "available": bool(os.environ.get("RUNNER_ENFORCED_PROXY_URL")), "enforced": bool(os.environ.get("RUNNER_ENFORCED_PROXY_URL")), "os_level": False, "target_allowlist": bool(os.environ.get("RUNNER_ENFORCED_PROXY_URL")), "reason": "Controlled proxy is configured." if os.environ.get("RUNNER_ENFORCED_PROXY_URL") else "No namespace/nftables/iptables/proxy enforcement is available on this host."},
     }
 
 

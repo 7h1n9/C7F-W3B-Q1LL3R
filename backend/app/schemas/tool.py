@@ -35,4 +35,7 @@ class ToolExecutionResult(BaseModel):
     summary: str | None = None
     required_next_dimension: str | None = None
     retryable: bool = False
+    stage: str = "EXECUTION"
+    diagnostic_id: str | None = None
+    tool_execution_completed: bool = False
     error_details: dict = Field(default_factory=dict)

@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.exceptions import DomainError
 from app.models.challenge import Challenge
 from app.models.run import (
+    AgentTurn,
     Artifact,
     Observation,
     RunExecutionLease,
@@ -19,12 +20,13 @@ from app.models.run import (
     ToolCall,
 )
 from app.schemas.tool import ToolArtifactRef, ToolExecutionResult, ToolModelView
+from app.services.assistance import assistance_level
+from app.services.compaction_scheduler import compaction_scheduler
 from app.services.effective_logical_tool_calls import effective_logical_tool_call_service
 from app.services.events import event_service
 from app.services.flags import flag_service
+from app.services.infrastructure import clear_failure, record_failure
 from app.services.run_budget_guard import run_budget_guard
-from app.services.compaction import compaction_service
-from app.services.assistance import assistance_level
 from app.services.runner_client import runner_client
 from app.services.solver_state import solver_state_service
 from app.services.tool_argument_adapter import adapt_arguments
@@ -52,7 +54,8 @@ class ToolGateway:
     async def invoke(
         self, session: AsyncSession, run: SolveRun, challenge: Challenge, name: str, arguments: dict,
         *, logical_tool_call_id: str | None = None, parent_tool_call_id: str | None = None,
-        execution_layer: str = "gateway",
+        execution_layer: str = "gateway", turn_id: str | None = None,
+        provider_tool_name: str | None = None, logical_kind: str = "TOOL",
     ) -> dict:
         definition = load_tool_definitions().get(name)
         if not definition or not definition.enabled:
@@ -95,11 +98,15 @@ class ToolGateway:
         enforce_tool_policy(name, arguments, challenge.allowed_hosts)
         # Reserve only after policy and argument validation.  Rejected model
         # requests must not consume a durable tool budget slot.
-        await run_budget_guard.enforce(session, run, attempt_id=lease.attempt_id)
+        turn_id = turn_id or run.active_turn_id
+        turn_started_at = None
+        if turn_id:
+            turn_started_at = await session.scalar(select(AgentTurn.turn_started_at).where(AgentTurn.id == turn_id, AgentTurn.run_id == run.id))
+        await run_budget_guard.enforce(session, run, attempt_id=lease.attempt_id, turn_id=turn_id)
         if name == "file_read":
             cached = await self._cached_file_read(session, run, arguments)
             if cached is not None:
-                await run_budget_guard.release(session, run)
+                await run_budget_guard.release(session, run, turn_id=turn_id)
                 await session.commit()
                 await event_service.append(
                     session,
@@ -117,6 +124,11 @@ class ToolGateway:
             logical_tool_call_id=logical_tool_call_id or str(uuid.uuid4()),
             parent_tool_call_id=parent_tool_call_id,
             execution_layer=execution_layer,
+            counts_toward_budget=True,
+            logical_kind=logical_kind,
+            provider_tool_name=provider_tool_name or name,
+            effective_tool_name=name,
+            turn_id=turn_id,
         )
         session.add(call)
         await session.commit()
@@ -132,8 +144,14 @@ class ToolGateway:
             status="REQUESTED",
             started_at=call.started_at,
             attempt_id=lease.attempt_id if lease else None,
+            counts_toward_budget=True,
+            logical_kind=logical_kind,
+            provider_tool_name=provider_tool_name or name,
+            effective_tool_name=name,
+            turn_id=turn_id,
+            turn_started_at=turn_started_at,
         )
-        await run_budget_guard.release(session, run)
+        await run_budget_guard.release(session, run, turn_id=turn_id)
         await effective_logical_tool_call_service.trace(
             session, logical, execution_layer=execution_layer, event_type="requested", external_id=call.id
         )
@@ -160,7 +178,15 @@ class ToolGateway:
             job_id = await runner_client.create_job(
                 run.id, challenge.allowed_hosts, name, arguments
             )
-            result = await runner_client.wait_job(job_id)
+            try:
+                result = await runner_client.wait_job(
+                    job_id,
+                    tool_timeout_seconds=min(600, int(arguments.get("timeout_seconds", 30))),
+                )
+            except TypeError as error:
+                if "tool_timeout_seconds" not in str(error):
+                    raise
+                result = await runner_client.wait_job(job_id)
             with contextlib.suppress(Exception):
                 await workspace_sync_service.sync_from_runner(run.id, Path(run.workspace_path))
             if result.get("status") != "COMPLETED" and not result.get("error_code"):
@@ -183,11 +209,33 @@ class ToolGateway:
                 retry_job_id = await runner_client.create_job(
                     run.id, challenge.allowed_hosts, name, arguments
                 )
-                result = await runner_client.wait_job(retry_job_id)
+                try:
+                    result = await runner_client.wait_job(
+                        retry_job_id,
+                        tool_timeout_seconds=min(600, int(arguments.get("timeout_seconds", 30))),
+                    )
+                except TypeError as error:
+                    if "tool_timeout_seconds" not in str(error):
+                        raise
+                    result = await runner_client.wait_job(retry_job_id)
                 if result.get("status") != "COMPLETED" and name == "file_read":
                     result["error_code"] = "FILE_NOT_FOUND"
+            if result.get("error_code") in {"TARGET_UNAVAILABLE", "BACKEND_UNAVAILABLE", "RUNNER_UNAVAILABLE", "TOOL_RESULT_DELIVERY_FAILED"}:
+                record_failure(run, code=str(result["error_code"]), message=str(result.get("error") or result.get("summary") or result["error_code"]), stage=str(result.get("stage") or "EXECUTION"))
+                await session.commit()
         except Exception as error:
-            result = {"status": "FAILED", "summary": "Runner request failed", "error": str(error)}
+            code = getattr(error, "code", None) or ("RUNNER_UNAVAILABLE" if isinstance(error, (ConnectionError, TimeoutError)) else "RUNNER_JOB_FAILED")
+            result = {
+                "status": "FAILED",
+                "error_code": code,
+                "summary": "Runner request failed",
+                "error": str(getattr(error, "message", None) or error),
+                "stage": getattr(error, "stage", "RUNNER"),
+                "retryable": code == "RUNNER_UNAVAILABLE",
+            }
+            if code == "RUNNER_UNAVAILABLE":
+                record_failure(run, code=code, message=result["error"], stage="RUNNER")
+            await session.commit()
         call.status, call.runner_job_id, call.finished_at = (
             ("COMPLETED" if result.get("status") == "COMPLETED" else "FAILED"),
             result.get("job_id"),
@@ -209,9 +257,14 @@ class ToolGateway:
                 result = {
                     **result,
                     "status": "FAILED",
+                    "error_code": "TOOL_RESULT_DELIVERY_FAILED",
+                    "stage": "ARTIFACT_DOWNLOAD",
+                    "tool_execution_completed": result.get("status") == "COMPLETED",
                     "summary": "Artifact download failed",
                     "error": str(error),
                 }
+                record_failure(run, code="TOOL_RESULT_DELIVERY_FAILED", message=str(error), stage="ARTIFACT_DOWNLOAD")
+                await session.commit()
                 relative = ""
         # file_read is an inspection operation. Its bounded content is already
         # carried by ToolModelView/Observation; do not create a new runner_error
@@ -300,15 +353,33 @@ class ToolGateway:
         session.add(observation)
         await session.commit()
         logical.result_observation_id = observation.id
-        await effective_logical_tool_call_service.trace(
-            session,
-            logical,
-            execution_layer=execution_layer,
-            event_type="completed" if unified.status == "COMPLETED" else "failed",
-            external_id=call.runner_job_id,
-            payload=result,
-        )
-        await session.commit()
+        try:
+            await effective_logical_tool_call_service.trace(
+                session,
+                logical,
+                execution_layer=execution_layer,
+                event_type="completed" if unified.status == "COMPLETED" else "failed",
+                external_id=call.runner_job_id,
+                payload=result,
+            )
+            await session.commit()
+            if unified.status == "COMPLETED":
+                clear_failure(run)
+                await session.commit()
+        except Exception as error:
+            await session.rollback()
+            result = {
+                **result,
+                "status": "FAILED",
+                "error_code": "BACKEND_PERSISTENCE_FAILED",
+                "stage": "TRACE_WRITE",
+                "tool_execution_completed": result.get("status") == "COMPLETED",
+                "summary": "Tool completed but trace persistence failed",
+                "error": str(error),
+            }
+            record_failure(run, code="BACKEND_PERSISTENCE_FAILED", message=str(error), stage="TRACE_WRITE")
+            await session.commit()
+            unified = self._unified_result(result, artifact, permitted_tools)
         if artifact_event_payload:
             await event_service.append(session, run.id, "artifact.created", artifact_event_payload)
         candidates = []
@@ -333,9 +404,10 @@ class ToolGateway:
         await event_service.append(
             session, run.id, event_type, {"tool_call_id": call.id, "logical_tool_call_id": call.logical_tool_call_id, "tool": name, "execution_layer": call.execution_layer, "result": unified.model_dump()}
         )
-        # Compaction is an online safety mechanism.  It is checked after the
-        # tool reaches an idle boundary so an in-flight call is never deleted.
-        await compaction_service.maybe_auto_compact(session, run)
+        # Enqueue only after the result is durably returned to the caller. The
+        # worker owns the lease and any compaction failure is isolated from
+        # this tool delivery path.
+        compaction_scheduler.enqueue(run.id)
         return unified.model_dump()
 
     async def _cached_file_read(
@@ -385,6 +457,8 @@ class ToolGateway:
                 content=str(view.get("content_excerpt")),
                 summary=str(view.get("summary") or "Cached file range returned"),
                 required_next_dimension="automation_or_new_experiment",
+                stage="CACHE",
+                tool_execution_completed=True,
             )
         return None
 
@@ -435,6 +509,9 @@ class ToolGateway:
             error_code=str(result.get("error_code") or "RUNNER_ERROR") if status != "COMPLETED" else None,
             error_message=str(result.get("error") or result.get("error_message")) if status != "COMPLETED" else None,
             retryable=status in {"FAILED", "TIMEOUT"},
+            stage=str(result.get("stage") or "EXECUTION"),
+            diagnostic_id=str(result.get("diagnostic_id")) if result.get("diagnostic_id") else None,
+            tool_execution_completed=bool(result.get("tool_execution_completed", status == "COMPLETED")),
             error_details={
                 "reason": str(result.get("error") or result.get("error_message") or result.get("summary") or ""),
                 "available_tools": sorted(permitted_tools),

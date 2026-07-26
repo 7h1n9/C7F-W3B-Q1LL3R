@@ -56,12 +56,16 @@ async def script_run(request: JobRequest) -> dict:
     script, command, args, network_mode, timeout = _validate_args(arguments)
     if network_mode == "target_allowlist" and not request.allowed_hosts:
         raise HTTPException(403, detail="target_allowlist requires challenge.allowed_hosts")
+    if network_mode == "target_allowlist" and not os.environ.get("RUNNER_ENFORCED_PROXY_URL"):
+        raise HTTPException(503, detail="RUNNER_UNAVAILABLE: target network enforcement is not available on this Runner")
     workspace = workspace_for(request.run_id)
     before = _snapshot(workspace)
     environment = os.environ.copy()
-    environment.update({"CTF_NETWORK_MODE": network_mode, "CTF_ALLOWED_HOSTS": ",".join(request.allowed_hosts)})
+    environment.update({"CTF_NETWORK_MODE": network_mode, "CTF_ALLOWED_HOSTS": ",".join(request.allowed_hosts), "CTF_JOB_ID": str(request.arguments.get("job_id") or "")})
     if network_mode == "none":
         environment.update({"HTTP_PROXY": "", "HTTPS_PROXY": "", "ALL_PROXY": "", "NO_PROXY": "*"})
+    elif os.environ.get("RUNNER_ENFORCED_PROXY_URL"):
+        environment.update({"HTTP_PROXY": os.environ["RUNNER_ENFORCED_PROXY_URL"], "HTTPS_PROXY": os.environ["RUNNER_ENFORCED_PROXY_URL"], "ALL_PROXY": os.environ["RUNNER_ENFORCED_PROXY_URL"]})
     started = time.perf_counter()
     try:
         process = await asyncio.create_subprocess_exec(command, str(script), *args, cwd=str(workspace), env=environment, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
@@ -70,6 +74,13 @@ async def script_run(request: JobRequest) -> dict:
         except TimeoutError:
             process.kill(); await process.wait()
             return {"exit_code": -1, "stdout_excerpt": "", "stderr_excerpt": "script timed out", "runtime_ms": round((time.perf_counter() - started) * 1000), "network_targets": request.allowed_hosts if network_mode == "target_allowlist" else [], "summary": "Script timed out", "error_code": "SCRIPT_TIMEOUT"}
+        except asyncio.CancelledError:
+            process.terminate()
+            try:
+                await asyncio.wait_for(process.wait(), timeout=3)
+            except asyncio.TimeoutError:
+                process.kill(); await process.wait()
+            raise
     except FileNotFoundError as error:
         raise HTTPException(503, detail=f"interpreter not installed: {command}") from error
     after = _snapshot(workspace)

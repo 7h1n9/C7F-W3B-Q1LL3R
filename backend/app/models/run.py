@@ -74,6 +74,7 @@ class SolveRun(UUIDTimestampMixin, Base):
     compacted_trace_count: Mapped[int] = mapped_column(Integer, default=0)
     last_compaction_snapshot_id: Mapped[str | None] = mapped_column(String(36), index=True)
     reserved_tool_calls: Mapped[int] = mapped_column(Integer, default=0)
+    reserved_tool_calls_by_turn_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
     assistance_level: Mapped[str] = mapped_column(String(30), default="AUTONOMOUS")
     assistance_sources_json: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
     last_compacted_event_id: Mapped[int] = mapped_column(BigInteger, default=0)
@@ -81,6 +82,10 @@ class SolveRun(UUIDTimestampMixin, Base):
     last_compacted_observation_created_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_compacted_artifact_created_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_compacted_trace_created_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    infrastructure_error_streak: Mapped[int] = mapped_column(Integer, default=0)
+    infrastructure_state: Mapped[str] = mapped_column(String(40), default="HEALTHY")
+    infrastructure_last_error_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    active_turn_id: Mapped[str | None] = mapped_column(String(36), index=True)
 
 
 class AgentTurn(UUIDTimestampMixin, Base):
@@ -99,6 +104,10 @@ class AgentTurn(UUIDTimestampMixin, Base):
     parse_error_code: Mapped[str | None] = mapped_column(String(100))
     response_excerpt_redacted: Mapped[str | None] = mapped_column(Text)
     action_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    turn_started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(UTC), nullable=False
+    )
+    turn_finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class RunAttempt(UUIDTimestampMixin, Base):
@@ -208,6 +217,11 @@ class ToolCall(UUIDTimestampMixin, Base):
     logical_tool_call_id: Mapped[str | None] = mapped_column(String(120), index=True)
     parent_tool_call_id: Mapped[str | None] = mapped_column(String(120))
     execution_layer: Mapped[str] = mapped_column(String(40), default="gateway")
+    counts_toward_budget: Mapped[bool] = mapped_column(Boolean, default=True)
+    logical_kind: Mapped[str] = mapped_column(String(40), default="TOOL")
+    provider_tool_name: Mapped[str | None] = mapped_column(String(120))
+    effective_tool_name: Mapped[str | None] = mapped_column(String(120))
+    turn_id: Mapped[str | None] = mapped_column(String(36), index=True)
 
 
 class LogicalToolCall(UUIDTimestampMixin, Base):
@@ -223,6 +237,12 @@ class LogicalToolCall(UUIDTimestampMixin, Base):
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     result_observation_id: Mapped[str | None] = mapped_column(ForeignKey("observations.id"))
+    counts_toward_budget: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    logical_kind: Mapped[str] = mapped_column(String(40), default="TOOL")
+    provider_tool_name: Mapped[str | None] = mapped_column(String(120))
+    effective_tool_name: Mapped[str | None] = mapped_column(String(120))
+    turn_id: Mapped[str | None] = mapped_column(String(36), index=True)
+    turn_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=lambda: datetime.now(UTC),
@@ -341,3 +361,17 @@ class EvidenceSnapshot(UUIDTimestampMixin, Base):
     sha256: Mapped[str] = mapped_column(String(64), nullable=False, default="")
     source_checkpoint_id: Mapped[str | None] = mapped_column(ForeignKey("run_compaction_checkpoints.id"))
     is_current: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+
+
+class CompactionLease(UUIDTimestampMixin, Base):
+    """Cross-process lease for asynchronous compaction workers."""
+
+    __tablename__ = "compaction_leases"
+    __table_args__ = (UniqueConstraint("run_id", name="uq_compaction_lease_run"),)
+
+    run_id: Mapped[str] = mapped_column(ForeignKey("solve_runs.id"), nullable=False, index=True)
+    worker_id: Mapped[str] = mapped_column(String(120), nullable=False)
+    lease_token: Mapped[str] = mapped_column(String(120), nullable=False, unique=True)
+    acquired_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    generation: Mapped[int] = mapped_column(Integer, default=0)

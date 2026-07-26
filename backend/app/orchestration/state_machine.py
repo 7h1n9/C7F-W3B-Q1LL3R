@@ -29,6 +29,7 @@ class RunStatus(StrEnum):
     PAUSED_DEPLOYMENT = "PAUSED_DEPLOYMENT"
     PAUSED_BUDGET = "PAUSED_BUDGET"
     WAITING_CONFIGURATION = "WAITING_CONFIGURATION"
+    INFRASTRUCTURE_VALIDATION = "INFRASTRUCTURE_VALIDATION"
 
 
 TERMINAL = {status for status in RunStatus if status.name.startswith(("COMPLETED", "FAILED"))} | {
@@ -71,6 +72,7 @@ ALLOWED: dict[RunStatus, set[RunStatus]] = {
         RunStatus.CANCELLED,
         RunStatus.POLICY_BLOCKED,
         RunStatus.WAITING_CONFIGURATION,
+        RunStatus.INFRASTRUCTURE_VALIDATION,
     },
     RunStatus.PREPARING: {
         RunStatus.ANALYZING,
@@ -133,7 +135,8 @@ ALLOWED: dict[RunStatus, set[RunStatus]] = {
     RunStatus.PAUSED_RECOVERY: {RunStatus.PLANNING, RunStatus.CANCELLED},
     RunStatus.PAUSED_DEPLOYMENT: {RunStatus.PLANNING, RunStatus.CANCELLED},
     RunStatus.PAUSED_BUDGET: {RunStatus.PLANNING, RunStatus.CANCELLED},
-    RunStatus.WAITING_CONFIGURATION: {RunStatus.PLANNING, RunStatus.CANCELLED},
+    RunStatus.WAITING_CONFIGURATION: {RunStatus.PLANNING, RunStatus.CANCELLED, RunStatus.INFRASTRUCTURE_VALIDATION},
+    RunStatus.INFRASTRUCTURE_VALIDATION: {RunStatus.PLANNING, RunStatus.WAITING_CONFIGURATION, RunStatus.CANCELLED},
     RunStatus.RETRYING: {RunStatus.PLANNING, RunStatus.WAITING_CONFIGURATION, RunStatus.CANCELLED},
 }
 

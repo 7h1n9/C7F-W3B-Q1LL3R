@@ -67,6 +67,7 @@ class CompactionService:
         logical_total = int(
             await session.scalar(
                 select(func.count(func.distinct(LogicalToolCall.id))).where(LogicalToolCall.run_id == run.id)
+                .where(LogicalToolCall.counts_toward_budget.is_(True))
             )
             or 0
         )
@@ -403,7 +404,7 @@ class CompactionService:
         ):
             if rows[key]:
                 setattr(run, attr, max(item.created_at for item in rows[key]))
-        total_logical = int(await session.scalar(select(func.count()).select_from(LogicalToolCall).where(LogicalToolCall.run_id == run.id)) or 0)
+        total_logical = int(await session.scalar(select(func.count()).select_from(LogicalToolCall).where(LogicalToolCall.run_id == run.id, LogicalToolCall.counts_toward_budget.is_(True))) or 0)
         run.last_compaction_effective_tool_count = total_logical
         run.compacted_event_count = int(run.compacted_event_count or 0) + len(event_rows)
         run.compacted_observation_count = int(run.compacted_observation_count or 0) + len(rows["observations.jsonl.gz"])

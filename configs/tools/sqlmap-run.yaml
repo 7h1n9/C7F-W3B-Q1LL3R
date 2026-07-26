@@ -17,5 +17,6 @@ parameters:
   risk: {type: integer, required: false}
   threads: {type: integer, required: false}
   timeout_seconds: {type: integer, required: false}
+  dbms: {type: string, required: false}
 limits: {level: 3, risk: 2, threads: 3, timeout_seconds: 600}
 permissions: {target_allowlist_required: true, dump_forbidden: true, os_shell_forbidden: true, file_write_forbidden: true}

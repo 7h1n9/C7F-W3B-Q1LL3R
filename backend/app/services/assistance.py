@@ -6,7 +6,6 @@ from typing import Any
 
 from pydantic import BaseModel, Field, field_validator
 
-
 ASSISTANCE_LEVELS = {"AUTONOMOUS", "EVIDENCE_GUIDED", "ANSWER_GUIDED"}
 ASSUMPTION_SOURCES = {"OBSERVATION", "MODEL_INFERENCE", "USER_HINT", "KNOWN_ANSWER"}
 

@@ -39,4 +39,11 @@ async def sandbox_exec(request: JobRequest) -> dict:
     except TimeoutError:
         process.kill(); await process.wait()
         raise HTTPException(408, detail="sandbox executable timed out")
+    except asyncio.CancelledError:
+        process.terminate()
+        try:
+            await asyncio.wait_for(process.wait(), timeout=3)
+        except asyncio.TimeoutError:
+            process.kill(); await process.wait()
+        raise
     return {"exit_code": process.returncode, "stdout_excerpt": stdout[: settings.max_output_bytes].decode(errors="replace"), "stderr_excerpt": stderr[: settings.max_output_bytes].decode(errors="replace"), "output": stdout[: settings.max_output_bytes].decode(errors="replace"), "truncated": len(stdout) > settings.max_output_bytes or len(stderr) > settings.max_output_bytes, "network_targets": [], "runtime_ms": round((time.perf_counter() - started) * 1000), "summary": f"{executable} exited with {process.returncode}"}

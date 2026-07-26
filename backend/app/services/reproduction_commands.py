@@ -39,12 +39,18 @@ class ReproductionCommandRenderer:
         if tool_name in {"sqlmap_detect", "sqlmap_run"}:
             command = ["sqlmap", "-r", str(args.get("request_file") or "requests/request.txt"), "-p", str(args.get("parameter") or "q"), "--batch"]
             action = args.get("action")
+            sqlite = str(args.get("dbms") or "").lower() in {"sqlite", "sqlite3"}
             if tool_name == "sqlmap_run" and action == "dbs": command.append("--dbs")
-            elif tool_name == "sqlmap_run" and action == "tables": command += ["--tables", "-D", str(args.get("database") or "")]
-            elif tool_name == "sqlmap_run" and action == "columns": command += ["--columns", "-D", str(args.get("database") or ""), "-T", str(args.get("table") or "")]
-            elif tool_name == "sqlmap_run" and action == "dump_target": command += ["--dump", "-D", str(args.get("database") or ""), "-T", str(args.get("table") or ""), "-C", ",".join(args.get("columns") or [])]
+            elif tool_name == "sqlmap_run" and action == "tables":
+                command += ["--tables", *([] if sqlite else ["-D", str(args.get("database") or "")])]
+            elif tool_name == "sqlmap_run" and action == "columns":
+                command += ["--columns", *([] if sqlite else ["-D", str(args.get("database") or "")]), "-T", str(args.get("table") or "")]
+            elif tool_name == "sqlmap_run" and action == "dump_target":
+                command += ["--dump", *([] if sqlite else ["-D", str(args.get("database") or "")]), "-T", str(args.get("table") or ""), "-C", ",".join(args.get("columns") or [])]
             if args.get("techniques"): command += ["--technique", "".join(args["techniques"])]
             return shlex.join(command)
+        if tool_name == "request_capture":
+            return "# Captured request: requests/exploit.req (see requests/exploit.req.meta.json)"
         if tool_name in {"script_run", "python_run"}:
             return shlex.join(["python", str(args.get("path") or "scripts/solve.py"), *[str(v) for v in args.get("args", [])]])
         if tool_name == "sandbox_exec":

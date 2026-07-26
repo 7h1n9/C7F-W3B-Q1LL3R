@@ -5,6 +5,7 @@ import hashlib
 import secrets
 import shutil
 import tarfile
+import uuid
 import zipfile
 from datetime import UTC, datetime, timedelta
 from pathlib import Path, PurePosixPath
@@ -18,7 +19,7 @@ from app.core.config import get_settings
 from app.core.database import get_session
 from app.core.exceptions import DomainError
 from app.models.challenge import Challenge
-from app.models.run import RunAttempt, RunExecutionLease, SolveRun, ToolInvocationTicket
+from app.models.run import AgentTurn, RunAttempt, RunExecutionLease, SolveRun, ToolInvocationTicket
 from app.orchestration.state_machine import RunStatus, transition
 from app.services.events import event_service
 from app.services.tool_permissions import effective_tools_for
@@ -45,6 +46,9 @@ class Scope(BaseModel):
     master_lease_token: str | None = None
     thread_id: str | None = None
     model_turn_id: str | None = None
+    logical_tool_call_id: str | None = None
+    turn_id: str | None = None
+    turn_started_at: str | None = None
 
 
 class Request(BaseModel):
@@ -105,6 +109,37 @@ class ExtractArchiveRequest(Request):
 class InvokeRequest(Request):
     tool: str
     arguments: dict
+
+
+async def _workspace_logical_call(session: AsyncSession, run: SolveRun, payload: Request, tool_name: str) -> None:
+    """Record a Workspace MCP action when no inner ToolGateway exists."""
+    from app.services.effective_logical_tool_calls import effective_logical_tool_call_service
+    from app.services.run_budget_guard import run_budget_guard
+
+    turn_id = run.active_turn_id or payload.scope.turn_id or payload.scope.model_turn_id
+    turn_started_at = await session.scalar(select(AgentTurn.turn_started_at).where(AgentTurn.id == turn_id, AgentTurn.run_id == run.id)) if turn_id else None
+    logical_id = payload.scope.logical_tool_call_id or f"workspace:{turn_id or 'legacy'}:{tool_name}:{uuid.uuid4()}"
+    await run_budget_guard.enforce(session, run, attempt_id=payload.scope.attempt_id, turn_id=turn_id)
+    logical = await effective_logical_tool_call_service.ensure(
+        session,
+        run,
+        logical_tool_call_id=logical_id,
+        tool_name=tool_name,
+        arguments={},
+        status="COMPLETED",
+        attempt_id=payload.scope.attempt_id,
+        counts_toward_budget=True,
+        logical_kind="WORKSPACE_MCP",
+        provider_tool_name=f"ctfctl.{tool_name}",
+        effective_tool_name=tool_name,
+        turn_id=turn_id,
+        turn_started_at=turn_started_at,
+    )
+    await run_budget_guard.release(session, run, turn_id=turn_id)
+    await effective_logical_tool_call_service.trace(
+        session, logical, execution_layer="ctfctl", event_type="completed", external_id=payload.scope.logical_tool_call_id or logical_id
+    )
+    await session.commit()
 
 
 class DirectToolRequest(Request):
@@ -227,19 +262,22 @@ def manifest(root: Path) -> list[dict]:
 
 @router.post("/workspace_list")
 async def workspace_list(payload: Request, x_ctfctl_access_key: str | None = Header(default=None), session: AsyncSession = Depends(get_session)) -> dict:
-    _, _, root = await scoped_run(payload, x_ctfctl_access_key, session)
+    run, _, root = await scoped_run(payload, x_ctfctl_access_key, session)
+    await _workspace_logical_call(session, run, payload, "workspace_list")
     return {"data": {"files": manifest(root)}}
 
 
 @router.post("/workspace_tree")
 async def workspace_tree(payload: Request, x_ctfctl_access_key: str | None = Header(default=None), session: AsyncSession = Depends(get_session)) -> dict:
-    _, _, root = await scoped_run(payload, x_ctfctl_access_key, session)
+    run, _, root = await scoped_run(payload, x_ctfctl_access_key, session)
+    await _workspace_logical_call(session, run, payload, "workspace_tree")
     return {"data": {"directories": sorted(READABLE_DIRECTORIES), "root_files": sorted(READABLE_ROOT_FILES), "files": manifest(root)}}
 
 
 @router.post("/workspace_stat")
 async def workspace_stat(payload: ReadRequest, x_ctfctl_access_key: str | None = Header(default=None), session: AsyncSession = Depends(get_session)) -> dict:
-    _, _, root = await scoped_run(payload, x_ctfctl_access_key, session)
+    run, _, root = await scoped_run(payload, x_ctfctl_access_key, session)
+    await _workspace_logical_call(session, run, payload, "workspace_stat")
     target, relative = policy_for(payload, root).readable(payload.path)
     stat = target.stat()
     raw = target.read_bytes() if target.is_file() else b""
@@ -248,7 +286,8 @@ async def workspace_stat(payload: ReadRequest, x_ctfctl_access_key: str | None =
 
 @router.post("/workspace_read")
 async def workspace_read(payload: ReadRequest, x_ctfctl_access_key: str | None = Header(default=None), session: AsyncSession = Depends(get_session)) -> dict:
-    _, _, root = await scoped_run(payload, x_ctfctl_access_key, session)
+    run, _, root = await scoped_run(payload, x_ctfctl_access_key, session)
+    await _workspace_logical_call(session, run, payload, "workspace_read")
     target, relative = policy_for(payload, root).readable(payload.path)
     if not target.is_file():
         raise DomainError("FILE_NOT_FOUND", "Requested workspace path is not a file.", {"path": relative}, 404)
@@ -260,7 +299,8 @@ async def workspace_read(payload: ReadRequest, x_ctfctl_access_key: str | None =
 
 @router.post("/workspace_search")
 async def workspace_search(payload: SearchRequest, x_ctfctl_access_key: str | None = Header(default=None), session: AsyncSession = Depends(get_session)) -> dict:
-    _, _, root = await scoped_run(payload, x_ctfctl_access_key, session)
+    run, _, root = await scoped_run(payload, x_ctfctl_access_key, session)
+    await _workspace_logical_call(session, run, payload, "workspace_search")
     matches = []
     policy = policy_for(payload, root)
     for item in manifest(root):
@@ -280,7 +320,8 @@ async def workspace_search(payload: SearchRequest, x_ctfctl_access_key: str | No
 
 @router.post("/workspace_write_note")
 async def workspace_write_note(payload: WriteRequest, x_ctfctl_access_key: str | None = Header(default=None), session: AsyncSession = Depends(get_session)) -> dict:
-    _, _, root = await scoped_run(payload, x_ctfctl_access_key, session)
+    run, _, root = await scoped_run(payload, x_ctfctl_access_key, session)
+    await _workspace_logical_call(session, run, payload, "workspace_write_note")
     target, relative = policy_for(payload, root).writable(payload.path)
     if target.exists() and not payload.overwrite:
         raise DomainError("FILE_EXISTS", "Destination exists and overwrite=false.", {"path": relative}, 409)
@@ -302,7 +343,8 @@ async def workspace_write_file(payload: WriteRequest, x_ctfctl_access_key: str |
 
 @router.post("/workspace_patch_file")
 async def workspace_patch_file(payload: PatchRequest, x_ctfctl_access_key: str | None = Header(default=None), session: AsyncSession = Depends(get_session)) -> dict:
-    _, _, root = await scoped_run(payload, x_ctfctl_access_key, session)
+    run, _, root = await scoped_run(payload, x_ctfctl_access_key, session)
+    await _workspace_logical_call(session, run, payload, "workspace_patch_file")
     policy = policy_for(payload, root)
     target, relative = policy.writable(payload.path)
     if not target.is_file():
@@ -327,7 +369,8 @@ async def workspace_patch_file(payload: PatchRequest, x_ctfctl_access_key: str |
 
 @router.post("/workspace_mkdir")
 async def workspace_mkdir(payload: MkdirRequest, x_ctfctl_access_key: str | None = Header(default=None), session: AsyncSession = Depends(get_session)) -> dict:
-    _, _, root = await scoped_run(payload, x_ctfctl_access_key, session)
+    run, _, root = await scoped_run(payload, x_ctfctl_access_key, session)
+    await _workspace_logical_call(session, run, payload, "workspace_mkdir")
     target, relative = policy_for(payload, root).writable(payload.path)
     target.mkdir(parents=True, exist_ok=True)
     return {"data": {"relative_path": relative, "created": True}}
@@ -335,7 +378,8 @@ async def workspace_mkdir(payload: MkdirRequest, x_ctfctl_access_key: str | None
 
 @router.post("/workspace_copy")
 async def workspace_copy(payload: CopyRequest, x_ctfctl_access_key: str | None = Header(default=None), session: AsyncSession = Depends(get_session)) -> dict:
-    _, _, root = await scoped_run(payload, x_ctfctl_access_key, session)
+    run, _, root = await scoped_run(payload, x_ctfctl_access_key, session)
+    await _workspace_logical_call(session, run, payload, "workspace_copy")
     policy = policy_for(payload, root)
     source, source_relative = policy.readable(payload.source)
     destination, destination_relative = policy.writable(payload.destination)
@@ -352,7 +396,8 @@ async def workspace_copy(payload: CopyRequest, x_ctfctl_access_key: str | None =
 
 @router.post("/workspace_move_generated")
 async def workspace_move_generated(payload: MoveGeneratedRequest, x_ctfctl_access_key: str | None = Header(default=None), session: AsyncSession = Depends(get_session)) -> dict:
-    _, _, root = await scoped_run(payload, x_ctfctl_access_key, session)
+    run, _, root = await scoped_run(payload, x_ctfctl_access_key, session)
+    await _workspace_logical_call(session, run, payload, "workspace_move_generated")
     policy = policy_for(payload, root)
     source, source_relative = policy.deletable(payload.source)
     destination_relative = str(payload.destination).replace("\\", "/")
@@ -367,7 +412,8 @@ async def workspace_move_generated(payload: MoveGeneratedRequest, x_ctfctl_acces
 
 @router.post("/workspace_delete_generated")
 async def workspace_delete_generated(payload: DeleteGeneratedRequest, x_ctfctl_access_key: str | None = Header(default=None), session: AsyncSession = Depends(get_session)) -> dict:
-    _, _, root = await scoped_run(payload, x_ctfctl_access_key, session)
+    run, _, root = await scoped_run(payload, x_ctfctl_access_key, session)
+    await _workspace_logical_call(session, run, payload, "workspace_delete_generated")
     target, relative = policy_for(payload, root).deletable(payload.path)
     if target.is_file():
         target.unlink()
@@ -381,7 +427,8 @@ async def workspace_delete_generated(payload: DeleteGeneratedRequest, x_ctfctl_a
 
 @router.post("/workspace_extract_archive")
 async def workspace_extract_archive(payload: ExtractArchiveRequest, x_ctfctl_access_key: str | None = Header(default=None), session: AsyncSession = Depends(get_session)) -> dict:
-    _, _, root = await scoped_run(payload, x_ctfctl_access_key, session)
+    run, _, root = await scoped_run(payload, x_ctfctl_access_key, session)
+    await _workspace_logical_call(session, run, payload, "workspace_extract_archive")
     policy = policy_for(payload, root)
     source, relative = policy.readable(payload.path)
     if not (relative.startswith("attachments/") or relative.startswith("scratch/")):
@@ -479,7 +526,16 @@ async def invoke_tool(payload: InvokeRequest, x_ctfctl_access_key: str | None = 
         raise DomainError("RUN_TOOL_NOT_ALLOWED", "Run is not ready for a tool invocation.", {"status": run.status}, 409)
     if run.current_phase == "REPORTING" and payload.tool not in {"workspace_read", "workspace_write_file", "workspace_patch_file", "workspace_stat", "workspace_list", "workspace_tree"}:
         raise DomainError("RUN_TOOL_NOT_ALLOWED", "Only evidence and final-workspace tools are allowed during reporting.", {"status": run.status, "phase": run.current_phase}, 409)
-    result = await tool_gateway.invoke(session, run, challenge, payload.tool, payload.arguments)
+    result = await tool_gateway.invoke(
+        session,
+        run,
+        challenge,
+        payload.tool,
+        payload.arguments,
+        logical_tool_call_id=payload.scope.logical_tool_call_id,
+        turn_id=run.active_turn_id or payload.scope.turn_id or payload.scope.model_turn_id,
+        provider_tool_name=f"ctfctl.{payload.tool}",
+    )
     if RunStatus(run.status) == RunStatus.EXECUTING:
         transition(run, RunStatus.EVALUATING)
         await session.commit()

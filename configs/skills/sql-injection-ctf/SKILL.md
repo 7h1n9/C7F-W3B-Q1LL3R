@@ -10,7 +10,7 @@ negative_triggers: []
 required_tools: [http_extract, http_request]
 recommended_tools: [sqlmap_detect]
 forbidden_tools: [nmap_service_probe, nikto_scan]
-ctf_phases: [HYPOTHESIS, TESTING, FLAG_SEARCH]
+ctf_phases: [INFRASTRUCTURE_VALIDATION, DISCOVERY, CONFIRMATION, EXPLOITATION_PLANNING, AUTOMATED_EXPLOITATION, EXTRACTION, VERIFICATION, REPORTING]
 priority: 76
 risk_level: high
 version: 1

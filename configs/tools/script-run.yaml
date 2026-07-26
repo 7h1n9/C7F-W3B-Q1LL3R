@@ -10,5 +10,7 @@ parameters:
   args: {type: array, required: false}
   network_mode: {type: string, required: false}
   timeout_seconds: {type: integer, required: false}
+  design_card: {type: object, required: false}
+  assumption_provenance: {type: array, required: false}
 limits: {timeout_seconds: 60, max_output_bytes: 1048576}
 permissions: {workspace_only: true, shell_forbidden: true, target_network_allowlist: true}
