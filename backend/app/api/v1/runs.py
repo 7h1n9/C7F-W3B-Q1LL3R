@@ -41,11 +41,13 @@ from app.models.solver_state import SolverState
 from app.orchestration.orchestrator import orchestrator
 from app.orchestration.state_machine import TERMINAL, RunStatus, transition
 from app.orchestration.state_machine import restart as restart_state
+from app.schemas.compaction import CompactionDecisionAction
 from app.schemas.flag import FlagReviewUpdate
 from app.schemas.run import RunCreate, RunRead
 from app.schemas.solver_state import SolverStateRead
 from app.services.codex_materializer import codex_materializer
 from app.services.codex_preflight import codex_preflight_service
+from app.services.compaction import compaction_service
 from app.services.events import event_service
 from app.services.flags import flag_service
 from app.services.fresh_reproduction import fresh_reproduction_executor
@@ -800,6 +802,19 @@ async def get_report(run_id: str, session: AsyncSession = Depends(get_session)) 
             "REPORT_NOT_FOUND", "No report has been generated for this run.", status_code=404
         )
     return {"data": {"content": path.read_text(encoding="utf-8"), "path": "final/writeup.md"}}
+
+
+@router.get("/runs/{run_id}/compaction/status")
+async def compaction_status(run_id: str, session: AsyncSession = Depends(get_session)) -> dict:
+    run = await require_run(run_id, session)
+    triggered, metrics = await compaction_service.should_compact(session, run)
+    return {"data": {"triggered": triggered, "metrics": metrics, "status": run.compaction_status, "generation": run.compaction_generation, "snapshot_id": run.last_compaction_snapshot_id}}
+
+
+@router.post("/runs/{run_id}/compaction")
+async def apply_compaction(run_id: str, payload: CompactionDecisionAction, session: AsyncSession = Depends(get_session)) -> dict:
+    run = await require_run(run_id, session)
+    return {"data": await compaction_service.apply(session, run, payload)}
 
 
 @router.get("/runs/{run_id}/diagnostics")

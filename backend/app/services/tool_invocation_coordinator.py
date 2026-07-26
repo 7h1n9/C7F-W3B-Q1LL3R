@@ -14,7 +14,7 @@ class ToolInvocationCoordinator:
 
     async def validate(self, session, run: SolveRun, *, attempt_id: str | None = None, lease_id: str | None = None) -> dict:
         status = RunStatus(run.status)
-        if status in TERMINAL or status in {RunStatus.WAITING_USER, RunStatus.PAUSED_RECOVERY, RunStatus.PAUSED_CHECKPOINT, RunStatus.PAUSED_DEPLOYMENT, RunStatus.WAITING_CONFIGURATION}:
+        if status in TERMINAL or status in {RunStatus.WAITING_USER, RunStatus.PAUSED_RECOVERY, RunStatus.PAUSED_CHECKPOINT, RunStatus.PAUSED_DEPLOYMENT, RunStatus.PAUSED_BUDGET, RunStatus.WAITING_CONFIGURATION}:
             raise DomainError("RUN_TOOL_NOT_ALLOWED", "Tools are not allowed in a terminal or explicitly paused Run.", {"current_state": run.status}, 409)
         lease = await session.scalar(select(RunExecutionLease).where(RunExecutionLease.run_id == run.id))
         if not lease:

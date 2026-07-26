@@ -26,46 +26,34 @@ app.post<{ Params: { thread_id: string }; Body: { prompt: string } }>("/threads/
   if (!service.hasThread(request.params.thread_id)) {
     return reply.code(404).send({ code: "THREAD_NOT_FOUND", message: "Thread not found", details: {} });
   }
-  let hijacked = false;
   try {
-    reply.hijack();
-    hijacked = true;
-    reply.raw.setHeader("Content-Type", "application/x-ndjson; charset=utf-8");
-    for await (const event of service.stream(request.params.thread_id, request.body.prompt)) {
-      reply.raw.write(`${JSON.stringify(event)}\n`);
-    }
-    reply.raw.end();
+    // Return a complete, length-delimited NDJSON turn. The backend consumes
+    // the whole Codex turn before advancing the durable state machine; a
+    // hijacked keep-alive stream could leave its client socket in CLOSE_WAIT
+    // after the SDK ended, making the Run appear permanently stuck.
+    const events = await service.run(request.params.thread_id, request.body.prompt);
+    return reply
+      .header("Content-Type", "application/x-ndjson; charset=utf-8")
+      .header("Connection", "close")
+      .send(events.map((event) => `${JSON.stringify(event)}\n`).join(""));
   } catch (error) {
     const response = bridgeError(error, request.params.thread_id);
-    if (hijacked) {
-      reply.raw.write(`${JSON.stringify({ type: "run.failed", status: "FAILED_ENGINE", payload: { code: response.body.code, message: response.body.message, ...response.body.details } })}\n`);
-      reply.raw.end();
-    } else {
-      return reply.code(response.status).send(response.body);
-    }
+    return reply.code(response.status).send(response.body);
   }
 });
 app.post<{ Params: { thread_id: string }; Body: { prompt: string } }>("/threads/:thread_id/resume", async (request, reply) => {
   if (!service.hasThread(request.params.thread_id)) {
     return reply.code(404).send({ code: "THREAD_NOT_FOUND", message: "Thread not found", details: {} });
   }
-  let hijacked = false;
   try {
-    reply.hijack();
-    hijacked = true;
-    reply.raw.setHeader("Content-Type", "application/x-ndjson; charset=utf-8");
-    for await (const event of service.streamResume(request.params.thread_id, request.body.prompt)) {
-      reply.raw.write(`${JSON.stringify(event)}\n`);
-    }
-    reply.raw.end();
+    const events = await service.resume(request.params.thread_id, request.body.prompt);
+    return reply
+      .header("Content-Type", "application/x-ndjson; charset=utf-8")
+      .header("Connection", "close")
+      .send(events.map((event) => `${JSON.stringify(event)}\n`).join(""));
   } catch (error) {
     const response = bridgeError(error, request.params.thread_id);
-    if (hijacked) {
-      reply.raw.write(`${JSON.stringify({ type: "run.failed", status: "FAILED_ENGINE", payload: { code: response.body.code, message: response.body.message, ...response.body.details } })}\n`);
-      reply.raw.end();
-    } else {
-      return reply.code(response.status).send(response.body);
-    }
+    return reply.code(response.status).send(response.body);
   }
 });
 app.post<{ Params: { thread_id: string } }>("/threads/:thread_id/cancel", async (request, reply) => {

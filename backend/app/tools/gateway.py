@@ -12,16 +12,16 @@ from app.core.exceptions import DomainError
 from app.models.challenge import Challenge
 from app.models.run import (
     Artifact,
-    LogicalToolCall,
     Observation,
     RunExecutionLease,
     SolveRun,
     ToolCall,
-    ToolExecutionTrace,
 )
 from app.schemas.tool import ToolArtifactRef, ToolExecutionResult, ToolModelView
+from app.services.effective_logical_tool_calls import effective_logical_tool_call_service
 from app.services.events import event_service
 from app.services.flags import flag_service
+from app.services.run_budget_guard import run_budget_guard
 from app.services.runner_client import runner_client
 from app.services.solver_state import solver_state_service
 from app.services.tool_argument_adapter import adapt_arguments
@@ -61,6 +61,7 @@ class ToolGateway:
         # are rejected here; attempt/lease freshness is checked in one place.
         coordinated = await tool_invocation_coordinator.validate(session, run)
         lease = coordinated["lease"]
+        await run_budget_guard.enforce(session, run, attempt_id=lease.attempt_id)
         permitted_tools = await effective_tools_for(session, run, challenge)
         if name not in permitted_tools:
             raise DomainError(
@@ -115,25 +116,28 @@ class ToolGateway:
         await session.refresh(call)
         lease = await session.scalar(select(RunExecutionLease).where(RunExecutionLease.run_id == run.id))
         logical_id = str(call.logical_tool_call_id)
-        logical = LogicalToolCall(
-            id=logical_id,
-            run_id=run.id,
-            attempt_id=lease.attempt_id if lease else None,
-            engine_type=run.engine_type,
+        logical = await effective_logical_tool_call_service.ensure(
+            session,
+            run,
+            logical_tool_call_id=logical_id,
             tool_name=name,
-            arguments_digest=hashlib.sha256(json.dumps(arguments, ensure_ascii=False, sort_keys=True, default=str).encode()).hexdigest(),
+            arguments=arguments,
             status="REQUESTED",
             started_at=call.started_at,
+            attempt_id=lease.attempt_id if lease else None,
         )
-        session.add(logical)
-        session.add(ToolExecutionTrace(logical_tool_call_id=logical_id, execution_layer=execution_layer, event_type="requested", external_id=call.id, payload_digest=""))
+        await effective_logical_tool_call_service.trace(
+            session, logical, execution_layer=execution_layer, event_type="requested", external_id=call.id
+        )
         await session.commit()
         await event_service.append(
             session, run.id, "tool.requested", {"tool_call_id": call.id, "logical_tool_call_id": call.logical_tool_call_id, "tool": name, "execution_layer": call.execution_layer}
         )
         call.status = "STARTED"
         logical.status = "STARTED"
-        session.add(ToolExecutionTrace(logical_tool_call_id=logical_id, execution_layer=execution_layer, event_type="started", external_id=call.id, payload_digest=""))
+        await effective_logical_tool_call_service.trace(
+            session, logical, execution_layer=execution_layer, event_type="started", external_id=call.id
+        )
         await session.commit()
         await event_service.append(
             session, run.id, "tool.started", {"tool_call_id": call.id, "logical_tool_call_id": call.logical_tool_call_id, "tool": name, "execution_layer": call.execution_layer}
@@ -258,7 +262,14 @@ class ToolGateway:
         session.add(observation)
         await session.commit()
         logical.result_observation_id = observation.id
-        session.add(ToolExecutionTrace(logical_tool_call_id=logical_id, execution_layer=execution_layer, event_type="completed" if unified.status == "COMPLETED" else "failed", external_id=call.runner_job_id, payload_digest=hashlib.sha256(json.dumps(result, ensure_ascii=False, sort_keys=True, default=str).encode()).hexdigest()))
+        await effective_logical_tool_call_service.trace(
+            session,
+            logical,
+            execution_layer=execution_layer,
+            event_type="completed" if unified.status == "COMPLETED" else "failed",
+            external_id=call.runner_job_id,
+            payload=result,
+        )
         await session.commit()
         if artifact_event_payload:
             await event_service.append(session, run.id, "artifact.created", artifact_event_payload)

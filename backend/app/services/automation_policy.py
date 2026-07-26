@@ -3,7 +3,25 @@
 from dataclasses import dataclass, field
 from typing import Any
 
-METHOD_PHASES = ("DISCOVERY", "CONFIRMATION", "EXPLOITATION", "EXTRACTION", "VERIFICATION", "REPORTING")
+METHOD_PHASES = (
+    "DISCOVERY",
+    "CONFIRMATION",
+    "EXPLOITATION_PLANNING",
+    "AUTOMATED_EXPLOITATION",
+    "EXTRACTION",
+    "VERIFICATION",
+    "REPORTING",
+)
+
+AUTOMATION_TOOLS_AFTER_SQL_CONFIRMATION = [
+    "sql_boolean_compare",
+    "sqlmap_detect",
+    "sqlmap_run",
+    "workspace_write_file",
+    "sandbox_exec",
+    "script_run",
+    "python_run",
+]
 
 
 @dataclass(frozen=True)
@@ -53,5 +71,41 @@ class AutomationPolicyEngine:
             return "file_read"
         return "script_run"
 
+    @staticmethod
+    def automation_required_response() -> dict:
+        return {
+            "code": "AUTOMATION_REQUIRED",
+            "required_stage": "EXPLOITATION_PLANNING",
+            "allowed_next_tools": list(AUTOMATION_TOOLS_AFTER_SQL_CONFIRMATION),
+        }
+
+    def manual_probe_gate(
+        self,
+        *,
+        vulnerability_confirmed: bool,
+        manual_probe_count: int,
+        requested_tool: str,
+        final_verification: bool = False,
+    ) -> dict | None:
+        """Return a structured pivot instead of counting a policy rejection as no progress."""
+        if vulnerability_confirmed and requested_tool == "http_request" and not final_verification:
+            return self.automation_required_response()
+        if vulnerability_confirmed and manual_probe_count >= 3 and requested_tool == "http_request":
+            return self.automation_required_response()
+        return None
+
+
+class ExploitationPolicyEngine(AutomationPolicyEngine):
+    """Provider-neutral policy facade used by OpenAI-compatible and Codex SDK engines."""
+
+    def validate_action(self, *, vulnerability_confirmed: bool, manual_probe_count: int, tool_name: str, final_verification: bool = False) -> dict | None:
+        return self.manual_probe_gate(
+            vulnerability_confirmed=vulnerability_confirmed,
+            manual_probe_count=manual_probe_count,
+            requested_tool=tool_name,
+            final_verification=final_verification,
+        )
+
 
 automation_policy_engine = AutomationPolicyEngine()
+exploitation_policy_engine = ExploitationPolicyEngine()

@@ -479,8 +479,6 @@ async def invoke_tool(payload: InvokeRequest, x_ctfctl_access_key: str | None = 
         raise DomainError("RUN_TOOL_NOT_ALLOWED", "Run is not ready for a tool invocation.", {"status": run.status}, 409)
     if run.current_phase == "REPORTING" and payload.tool not in {"workspace_read", "workspace_write_file", "workspace_patch_file", "workspace_stat", "workspace_list", "workspace_tree"}:
         raise DomainError("RUN_TOOL_NOT_ALLOWED", "Only evidence and final-workspace tools are allowed during reporting.", {"status": run.status, "phase": run.current_phase}, 409)
-    run.tool_call_count += 1
-    await session.commit()
     result = await tool_gateway.invoke(session, run, challenge, payload.tool, payload.arguments)
     if RunStatus(run.status) == RunStatus.EXECUTING:
         transition(run, RunStatus.EVALUATING)

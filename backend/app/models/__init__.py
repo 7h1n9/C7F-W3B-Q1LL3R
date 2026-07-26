@@ -14,11 +14,13 @@ from app.models.learned_skill import (
 from app.models.model_config import ModelConfig
 from app.models.run import (
     Artifact,
+    EvidenceSnapshot,
     FlagCandidate,
     Hypothesis,
     LogicalToolCall,
     Observation,
     RunAttempt,
+    RunCompactionCheckpoint,
     RunEvent,
     RunExecutionLease,
     RunUserInput,
@@ -41,6 +43,8 @@ __all__ = [
     "ToolExecutionTrace",
     "ToolInvocationTicket",
     "RunAttempt",
+    "RunCompactionCheckpoint",
+    "EvidenceSnapshot",
     "RunExecutionLease",
     "RunUserInput",
     "Artifact",

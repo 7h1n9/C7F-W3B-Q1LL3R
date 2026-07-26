@@ -83,6 +83,28 @@ CTF_PHASE_ORDER = (
 CTF_PHASE_INDEX = {phase: index for index, phase in enumerate(CTF_PHASE_ORDER)}
 
 
+def _tool_rate_limit_status(payload: dict) -> int | None:
+    """Return an HTTP status exposed by a tool result, if it is a rate limit."""
+    result = payload.get("result") if isinstance(payload, dict) else None
+    if not isinstance(result, dict):
+        result = {}
+    model_view = result.get("model_view")
+    if not isinstance(model_view, dict):
+        model_view = {}
+    facts = model_view.get("extracted_facts")
+    if not isinstance(facts, dict):
+        facts = {}
+    candidates = (facts.get("status_code"), result.get("status_code"), payload.get("status_code"))
+    for candidate in candidates:
+        try:
+            status = int(candidate)
+        except (TypeError, ValueError):
+            continue
+        if status == 429:
+            return status
+    return None
+
+
 class SolveOrchestrator:
     def __init__(self, engine_factory=None) -> None:
         self.engine_factory = engine_factory
@@ -1583,11 +1605,41 @@ class SolveOrchestrator:
             await run_attempt_service.heartbeat(session, attempt, lease)
             auto_turns += 1
             before_progress = await self._codex_progress_snapshot(session, run.id)
+            turn_tool_refs: set[str] = set()
+            max_tools_per_turn = int((run.role_snapshot_json or {}).get("max_tools_per_turn") or 8)
             async for item in iterator:
                 if item.event_type in {"tool.requested", "tool.started", "tool.completed", "tool.failed"}:
                     tool_ref = logical_tool_budget_ref(item.payload)
                     if tool_ref:
                         if tool_ref not in seen_tool_refs:
+                            if len(turn_tool_refs) >= max_tools_per_turn:
+                                run.last_error_code = "TURN_TOOL_BUDGET_EXHAUSTED"
+                                run.last_error_message = (
+                                    f"Turn tool-call limit reached ({max_tools_per_turn}); execution paused."
+                                )
+                                with contextlib.suppress(Exception):
+                                    await engine.cancel(run.id)
+                                await self._transition(session, run, RunStatus.PAUSED_BUDGET)
+                                if attempt is not None:
+                                    attempt.status = "PAUSED_BUDGET"
+                                    attempt.finished_at = datetime.now(UTC)
+                                    attempt.error_code = "TURN_TOOL_BUDGET_EXHAUSTED"
+                                if lease is not None:
+                                    current_lease = await session.get(RunExecutionLease, lease.id)
+                                    if current_lease is not None:
+                                        await session.delete(current_lease)
+                                await session.commit()
+                                await event_service.append(
+                                    session,
+                                    run.id,
+                                    "run.budget_exhausted",
+                                    {
+                                        "reason": "TURN_TOOL_BUDGET_EXHAUSTED",
+                                        "max_tools_per_turn": max_tools_per_turn,
+                                    },
+                                )
+                                return
+                            turn_tool_refs.add(tool_ref)
                             current_tool_count = max(
                                 len(seen_tool_refs),
                                 int(run.run_total_logical_tool_calls or 0),
@@ -1646,6 +1698,28 @@ class SolveOrchestrator:
                     ):
                         await self._transition(session, run, incoming_status)
                 await event_service.append(session, run.id, item.event_type, item.payload)
+                if item.event_type == "tool.completed":
+                    rate_limit_status = _tool_rate_limit_status(item.payload)
+                    if rate_limit_status is not None:
+                        run.last_error_code = "TARGET_RATE_LIMITED"
+                        run.last_error_message = (
+                            "Target returned HTTP 429; execution paused to avoid repeated requests."
+                        )
+                        with contextlib.suppress(Exception):
+                            await engine.cancel(run.id)
+                        await self._transition(session, run, RunStatus.PAUSED_RATE_LIMIT)
+                        await session.commit()
+                        await event_service.append(
+                            session,
+                            run.id,
+                            "run.paused_rate_limit",
+                            {
+                                "code": "TARGET_RATE_LIMITED",
+                                "status_code": rate_limit_status,
+                                "message": run.last_error_message,
+                            },
+                        )
+                        return
             await codex_materializer.sync(session, run)
             interval = max(1, int(run.agent_checkpoint_interval or 30))
             if run.agent_step_count and run.agent_step_count % interval == 0:
@@ -1765,11 +1839,17 @@ class SolveOrchestrator:
 
     async def cancel(self, run_id: str) -> None:
         engine = self.active_engines.get(run_id)
-        if isinstance(engine, SolveEngine):
-            await engine.cancel(run_id)
         task = self.active_tasks.get(run_id)
-        if task and task is not asyncio.current_task():
-            task.cancel()
+        try:
+            if isinstance(engine, SolveEngine):
+                await engine.cancel(run_id)
+        except Exception:
+            # Bridge cancellation is optional. The local orchestrator task
+            # must still be cancelled when the Bridge returns 501 or fails.
+            pass
+        finally:
+            if task and task is not asyncio.current_task():
+                task.cancel()
 
 
 orchestrator = SolveOrchestrator()

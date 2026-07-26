@@ -1,6 +1,8 @@
 import asyncio
+import random
 
-from sqlalchemy import select, text
+from sqlalchemy import func, select
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.run import RunEvent
@@ -18,41 +20,44 @@ class EventService:
         # and the row lock/counter remains durable for production database sessions.
         lock = self._run_locks.setdefault(run_id, asyncio.Lock())
         async with lock:
-            from app.models.run import SolveRun
+            body = payload or {}
+            # Lifecycle events are intentionally separate from internal phase
+            # transitions.  This keeps status history useful and prevents a
+            # PLANNING/EXECUTING loop from looking like a Run restart.
+            if event_type == "run.status_changed" and str(body.get("status", "")) in {
+                "PLANNING", "EXECUTING", "EVALUATING"
+            }:
+                event_type = "run.phase_changed"
 
-            # A Codex stream and an incoming ctfctl HTTP request can append
-            # events concurrently. The in-process lock covers the ordinary
-            # case, but a restart can briefly overlap backend processes. Use a
-            # connection-local MySQL counter increment so the sequence remains
-            # unique across processes as well.
-            if session.bind and session.bind.dialect.name in {"mysql", "mariadb"}:
-                result = await session.execute(
-                    text(
-                        "UPDATE solve_runs "
-                        "SET event_sequence = LAST_INSERT_ID(event_sequence + 1) "
-                        "WHERE id = :run_id"
-                    ),
-                    {"run_id": run_id},
-                )
-                if not result.rowcount:
-                    raise ValueError("run not found")
-                sequence = int(
-                    (await session.execute(text("SELECT LAST_INSERT_ID()"))).scalar_one()
-                )
-            else:
-                run = await session.scalar(
-                    select(SolveRun).where(SolveRun.id == run_id).with_for_update()
-                )
-                if run is None:
-                    raise ValueError("run not found")
-                run.event_sequence += 1
-                sequence = run.event_sequence
+            # ``solve_runs.event_sequence`` is a legacy compatibility field;
+            # it is no longer updated for every event.  Ordering is owned by
+            # RunEvent.event_id, while sequence remains a per-run API cursor.
+            sequence = int(
+                await session.scalar(select(func.max(RunEvent.sequence)).where(RunEvent.run_id == run_id)) or 0
+            ) + 1
+            # MySQL assigns the global BIGINT AUTO_INCREMENT event_id.  The
+            # SQLite/dev schema keeps the field nullable and uses a durable
+            # per-run fallback so old dumps remain insertable.
+            event_id = None
+            if not (session.bind and session.bind.dialect.name in {"mysql", "mariadb"}):
+                event_id = int(
+                    await session.scalar(select(func.max(RunEvent.event_id)).where(RunEvent.run_id == run_id)) or 0
+                ) + 1
             event = RunEvent(
-                run_id=run_id, sequence=sequence, event_type=event_type, payload_json=payload or {}
+                run_id=run_id, event_id=event_id, sequence=sequence, event_type=event_type, payload_json=body
             )
             session.add(event)
             await session.flush()
-            await session.commit()
+            for retry in range(3):
+                try:
+                    await session.commit()
+                    break
+                except OperationalError as error:
+                    code = error.orig.args[0] if getattr(error, "orig", None) and error.orig.args else None
+                    if code not in {1205, 1213} or retry == 2:
+                        raise
+                    await session.rollback()
+                    await asyncio.sleep(0.03 * (2**retry) + random.random() * 0.02)
             await session.refresh(event)
         await event_bus.publish(run_id, self.serialize(event))
         return event
@@ -63,7 +68,10 @@ class EventService:
                 await session.scalars(
                     select(RunEvent)
                     .where(RunEvent.run_id == run_id, RunEvent.sequence > after)
-                    .order_by(RunEvent.sequence)
+                    # MySQL does not support PostgreSQL's ``NULLS LAST``
+                    # syntax.  Old SQLite rows can have a null event_id, so
+                    # use the per-run sequence as a portable fallback.
+                    .order_by(func.coalesce(RunEvent.event_id, RunEvent.sequence), RunEvent.sequence)
                 )
             ).all()
         )

@@ -8,7 +8,15 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.challenge import Challenge
-from app.models.run import Artifact, FlagCandidate, Hypothesis, Observation, SolveRun, ToolCall
+from app.models.run import (
+    Artifact,
+    EvidenceSnapshot,
+    FlagCandidate,
+    Hypothesis,
+    Observation,
+    SolveRun,
+    ToolCall,
+)
 from app.models.skill import RunSkillSnapshot, Skill
 from app.services.challenge_lessons import challenge_lesson_service
 from app.services.skill_selection import specialist_skill_catalog
@@ -58,12 +66,22 @@ class ContextBuilder:
 
     async def build(self, session: AsyncSession, run: SolveRun, challenge: Challenge) -> list[dict]:
         state = await solver_state_service.load(session, run.id)
+        # A compacted run starts from the semantic snapshot.  Only records
+        # created after the snapshot boundary are eligible for the live tail;
+        # this prevents re-injecting the archived event stream into context.
+        latest_snapshot = await session.scalar(
+            select(EvidenceSnapshot)
+            .where(EvidenceSnapshot.run_id == run.id)
+            .order_by(EvidenceSnapshot.generation.desc())
+        )
+        snapshot_data = latest_snapshot.snapshot_json if latest_snapshot else {}
+        tail_boundary = latest_snapshot.created_at if latest_snapshot else None
         limit = run.max_context_observations
         observations = list(
             (
                 await session.scalars(
                     select(Observation)
-                    .where(Observation.run_id == run.id)
+                    .where(Observation.run_id == run.id, *( [Observation.created_at > tail_boundary] if tail_boundary else []))
                     .order_by(Observation.created_at.desc())
                     .limit(limit)
                 )
@@ -82,7 +100,7 @@ class ContextBuilder:
             (
                 await session.scalars(
                     select(Artifact)
-                    .where(Artifact.run_id == run.id)
+                    .where(Artifact.run_id == run.id, *( [Artifact.created_at > tail_boundary] if tail_boundary else []))
                     .order_by(Artifact.created_at.desc())
                     .limit(limit)
                 )
@@ -92,7 +110,7 @@ class ContextBuilder:
             (
                 await session.scalars(
                     select(Hypothesis)
-                    .where(Hypothesis.run_id == run.id)
+                    .where(Hypothesis.run_id == run.id, *( [Hypothesis.created_at > tail_boundary] if tail_boundary else []))
                     .order_by(Hypothesis.updated_at.desc())
                     .limit(limit)
                 )
@@ -102,7 +120,7 @@ class ContextBuilder:
             (
                 await session.scalars(
                     select(ToolCall)
-                    .where(ToolCall.run_id == run.id)
+                    .where(ToolCall.run_id == run.id, *( [ToolCall.created_at > tail_boundary] if tail_boundary else []))
                     .order_by(ToolCall.created_at.desc())
                     .limit(limit)
                 )
@@ -204,14 +222,15 @@ class ContextBuilder:
                     and skills[snapshot.skill_id].skill_kind == "METHODOLOGY"
                 ],
             },
-            "RunPlan": (state.run_plan_json if state else {}),
-            "AttackChainPlan": (state.attack_chain_plan_json if state else {}),
-            "Capability Ledger": (state.capability_ledger_json if state else {}),
+            "Evidence Snapshot": snapshot_data or None,
+            "RunPlan": (snapshot_data.get("current_exploit_plan") if snapshot_data else None) or (state.run_plan_json if state else {}),
+            "AttackChainPlan": (snapshot_data.get("attack_chain") if snapshot_data else None) or (state.attack_chain_plan_json if state else {}),
+            "Capability Ledger": (snapshot_data.get("confirmed_capabilities") if snapshot_data else None) or (state.capability_ledger_json if state else {}),
             "Solver State": {
                 "current_phase": state.current_phase if state else run.current_phase,
-                "confirmed_facts": state.confirmed_facts_json if state else [],
-                "rejected_paths": state.rejected_paths_json if state else [],
-                "active_hypotheses": state.active_hypotheses_json if state else [],
+                "confirmed_facts": (snapshot_data.get("canonical_facts") if snapshot_data else None) or (state.confirmed_facts_json if state else []),
+                "rejected_paths": (snapshot_data.get("rejected_paths") if snapshot_data else None) or (state.rejected_paths_json if state else []),
+                "active_hypotheses": (snapshot_data.get("active_hypotheses") if snapshot_data else None) or (state.active_hypotheses_json if state else []),
                 "previous_action_fingerprints": dict(list((state.action_fingerprints_json if state else {}).items())[-5:]),
                 "active_skill_ids": sorted(active_skill_ids),
                 "no_progress_count": state.no_progress_count if state else 0,

@@ -50,6 +50,11 @@ class RunAttemptService:
                     attempt.error_code = "PROCESS_INTERRUPTED"
                     attempt.finished_at = now
                     attempt.heartbeat_at = ensure_aware(attempt.heartbeat_at) or now
+                # Invocation tickets reference the lease, so remove them
+                # first or MySQL rejects the lease delete with FK 1451.
+                await session.execute(
+                    delete(ToolInvocationTicket).where(ToolInvocationTicket.lease_id == lease.id)
+                )
                 await session.delete(lease)
         if leases:
             await session.commit()
@@ -185,6 +190,9 @@ class RunAttemptService:
         if lease is not None:
             current = await session.get(RunExecutionLease, lease.id)
             if current is not None:
+                await session.execute(
+                    delete(ToolInvocationTicket).where(ToolInvocationTicket.lease_id == current.id)
+                )
                 await session.delete(current)
         await session.commit()
 

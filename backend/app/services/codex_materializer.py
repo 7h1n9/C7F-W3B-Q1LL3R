@@ -1,11 +1,9 @@
 import asyncio
 import contextlib
 import hashlib
-import json
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from uuid import NAMESPACE_URL, uuid5
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -13,14 +11,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.challenge import Challenge
 from app.models.run import (
     Artifact,
-    LogicalToolCall,
     Observation,
     RunEvent,
     SolveRun,
     ToolCall,
-    ToolExecutionTrace,
 )
 from app.orchestration.state_machine import TERMINAL, RunStatus
+from app.services.effective_logical_tool_calls import effective_logical_tool_call_service
 from app.services.flags import flag_service
 from app.services.reports import report_service
 from app.services.run_diagnostics import run_diagnostics_service
@@ -180,11 +177,6 @@ class CodexMaterializer:
             return
         marker = f"codex:{tool_call_ref}"
         logical_id = str(payload.get("logical_tool_call_id") or marker)
-        # Codex item ids are only unique inside one thread/run (for example
-        # every run can contain ``item_1``).  The database primary key is
-        # global, so using ``codex:item_1`` directly makes the second run fail
-        # with a duplicate-key error while materializing its first tool call.
-        logical_record_id = str(uuid5(NAMESPACE_URL, f"ctf-agent:{run.id}:{logical_id}"))
         tool_call = await session.scalar(select(ToolCall).where(ToolCall.run_id == run.id, ToolCall.logical_tool_call_id == logical_id))
         if tool_call is None:
             tool_call = ToolCall(
@@ -201,55 +193,27 @@ class CodexMaterializer:
             )
             session.add(tool_call)
             await session.flush()
-            logical = LogicalToolCall(
-                id=logical_record_id,
-                run_id=run.id,
-                attempt_id=str(payload.get("attempt_id")) if payload.get("attempt_id") else None,
-                engine_type=run.engine_type,
-                tool_name=str(tool_name),
-                arguments_digest=hashlib.sha256(json.dumps(self._tool_arguments(payload), sort_keys=True, default=str).encode()).hexdigest(),
-                status=tool_call.status,
-                started_at=tool_call.started_at,
-            )
-            session.add(logical)
-        # Keep finding legacy rows whose id was the unscoped Codex id, while
-        # all newly materialized rows use the run-scoped stable UUID above.
-        logical = await session.scalar(
-            select(LogicalToolCall).where(
-                LogicalToolCall.run_id == run.id,
-                LogicalToolCall.id.in_((logical_record_id, logical_id)),
-            )
+        logical = await effective_logical_tool_call_service.ensure(
+            session,
+            run,
+            logical_tool_call_id=logical_id,
+            tool_name=str(tool_name),
+            arguments=self._tool_arguments(payload),
+            status=tool_call.status,
+            started_at=tool_call.started_at,
+            attempt_id=str(payload.get("attempt_id")) if payload.get("attempt_id") else None,
+            deduplicate_by_arguments=not bool(payload.get("logical_tool_call_id")),
         )
-        if logical is None:
-            logical = LogicalToolCall(
-                id=logical_record_id,
-                run_id=run.id,
-                engine_type=run.engine_type,
-                tool_name=str(tool_name),
-                arguments_digest=hashlib.sha256(json.dumps(self._tool_arguments(payload), sort_keys=True, default=str).encode()).hexdigest(),
-                status=tool_call.status,
-                started_at=tool_call.started_at,
-            )
-            session.add(logical)
-            await session.flush()
-        if logical:
-            logical.status = tool_call.status
-            logical.finished_at = tool_call.finished_at
-            payload_digest = hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str).encode()).hexdigest()
-            trace = await session.scalar(select(ToolExecutionTrace).where(
-                ToolExecutionTrace.logical_tool_call_id == logical.id,
-                ToolExecutionTrace.event_type == event.event_type,
-                ToolExecutionTrace.external_id == tool_call.runner_job_id,
-                ToolExecutionTrace.payload_digest == payload_digest,
-            ))
-            if trace is None:
-                session.add(ToolExecutionTrace(
-                    logical_tool_call_id=logical.id,
-                    execution_layer=str(payload.get("execution_layer") or "codex_mcp"),
-                    event_type=event.event_type,
-                    external_id=tool_call.runner_job_id,
-                    payload_digest=payload_digest,
-                ))
+        logical.status = tool_call.status
+        logical.finished_at = tool_call.finished_at
+        await effective_logical_tool_call_service.trace(
+            session,
+            logical,
+            execution_layer=str(payload.get("execution_layer") or "codex_mcp"),
+            event_type=event.event_type,
+            external_id=tool_call.runner_job_id,
+            payload=payload,
+        )
         tool_call.tool_name = str(tool_name)
         tool_call.arguments_json = self._tool_arguments(payload)
         tool_call.status = "STARTED" if event.event_type == "tool.started" else self._tool_status(event)

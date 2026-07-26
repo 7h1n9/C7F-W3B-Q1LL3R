@@ -1,6 +1,16 @@
 from datetime import UTC, datetime
 
-from sqlalchemy import JSON, Boolean, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy import (
+    JSON,
+    BigInteger,
+    Boolean,
+    DateTime,
+    ForeignKey,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+)
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import Base, UUIDTimestampMixin
@@ -50,6 +60,19 @@ class SolveRun(UUIDTimestampMixin, Base):
     thread_invalidated: Mapped[bool] = mapped_column(Boolean, default=False)
     post_terminal_events_json: Mapped[list[dict]] = mapped_column(JSON, nullable=False, default=list)
     fresh_reproduction_verified: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Compaction is a first-class checkpoint in the run lifecycle.  These
+    # counters are denormalized for cheap trigger checks; the archive and
+    # snapshot tables remain the source of truth for recovery.
+    last_compaction_effective_tool_count: Mapped[int] = mapped_column(Integer, default=0)
+    compaction_generation: Mapped[int] = mapped_column(Integer, default=0)
+    compaction_status: Mapped[str] = mapped_column(String(30), default="IDLE")
+    compaction_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    compaction_finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    compacted_event_count: Mapped[int] = mapped_column(Integer, default=0)
+    compacted_observation_count: Mapped[int] = mapped_column(Integer, default=0)
+    compacted_artifact_count: Mapped[int] = mapped_column(Integer, default=0)
+    compacted_trace_count: Mapped[int] = mapped_column(Integer, default=0)
+    last_compaction_snapshot_id: Mapped[str | None] = mapped_column(String(36), index=True)
 
 
 class AgentTurn(UUIDTimestampMixin, Base):
@@ -155,6 +178,9 @@ class RunEvent(UUIDTimestampMixin, Base):
     __tablename__ = "run_events"
     __table_args__ = (UniqueConstraint("run_id", "sequence", name="uq_run_event_sequence"),)
     run_id: Mapped[str] = mapped_column(ForeignKey("solve_runs.id"), nullable=False, index=True)
+    # Monotonic database-side ordering key.  ``sequence`` is retained for
+    # backwards compatibility with the SSE contract and old dumps.
+    event_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True, index=True, autoincrement=True)
     sequence: Mapped[int] = mapped_column(Integer, nullable=False)
     event_type: Mapped[str] = mapped_column(String(100), nullable=False)
     payload_json: Mapped[dict] = mapped_column(JSON, default=dict)
@@ -257,3 +283,32 @@ class FlagCandidate(UUIDTimestampMixin, Base):
     pattern_matched: Mapped[bool] = mapped_column(Boolean, default=False)
     verified: Mapped[bool] = mapped_column(Boolean, default=False)
     review_state: Mapped[str] = mapped_column(String(20), default="OPEN")
+
+
+class RunCompactionCheckpoint(UUIDTimestampMixin, Base):
+    """Durable state machine row for one review/apply/archive operation."""
+
+    __tablename__ = "run_compaction_checkpoints"
+    __table_args__ = (UniqueConstraint("run_id", "generation", name="uq_compaction_run_generation"),)
+
+    run_id: Mapped[str] = mapped_column(ForeignKey("solve_runs.id"), nullable=False, index=True)
+    generation: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(String(30), nullable=False, default="COMPACTION_REVIEW")
+    reason: Mapped[str] = mapped_column(Text, default="")
+    decision_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    archive_path: Mapped[str | None] = mapped_column(String(1024))
+    archive_manifest_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    deleted_row_counts_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    error_code: Mapped[str | None] = mapped_column(String(100))
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class EvidenceSnapshot(UUIDTimestampMixin, Base):
+    __tablename__ = "run_evidence_snapshots"
+
+    run_id: Mapped[str] = mapped_column(ForeignKey("solve_runs.id"), nullable=False, index=True)
+    generation: Mapped[int] = mapped_column(Integer, nullable=False)
+    snapshot_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    sha256: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    source_checkpoint_id: Mapped[str | None] = mapped_column(ForeignKey("run_compaction_checkpoints.id"))
+    is_current: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)

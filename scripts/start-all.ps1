@@ -20,7 +20,8 @@ $backendDir = Join-Path $repoRoot "backend"
 $frontendDir = Join-Path $repoRoot "frontend"
 $bridgeDir = Join-Path $repoRoot "codex-bridge"
 $runnerDir = Join-Path $repoRoot "kali-runner"
-$logsRoot = Join-Path $repoRoot "data\runtime-logs\start-all"
+$logsRoot = Join-Path $repoRoot "logs\services"
+$pidsRoot = Join-Path $repoRoot "data\pids"
 
 if (-not (Test-Path -LiteralPath $activateScript)) {
     throw "Python virtual environment activation script not found: $activateScript"
@@ -32,6 +33,9 @@ if (-not (Test-Path -LiteralPath $pythonExe)) {
 . $activateScript
 
 New-Item -ItemType Directory -Force -Path $logsRoot | Out-Null
+New-Item -ItemType Directory -Force -Path $pidsRoot | Out-Null
+$startAllTranscript = Join-Path $logsRoot "start-all.log"
+Start-Transcript -Path $startAllTranscript -Append | Out-Null
 
 function Set-EnvValue {
     param(
@@ -70,7 +74,6 @@ function Stop-ProjectService {
     )
 
     $listeners = @(Get-ListeningProcessInfo -Port $Port)
-    if ($listeners.Count -eq 0) { return }
     $foreign = @($listeners | Where-Object { $_.CommandLine -notmatch $ProcessPattern })
     if ($foreign.Count -gt 0) {
         $details = ($foreign | ForEach-Object { "$($_.ProcessId): $($_.CommandLine)" }) -join "; "
@@ -79,6 +82,13 @@ function Stop-ProjectService {
     $allProcesses = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue)
     $processIds = [System.Collections.Generic.HashSet[int]]::new()
     foreach ($listener in $listeners) { [void]$processIds.Add([int]$listener.ProcessId) }
+    $pidFile = Join-Path $pidsRoot "$Name.pid"
+    if (Test-Path -LiteralPath $pidFile) {
+        $recordedPid = 0
+        if ([int]::TryParse((Get-Content -LiteralPath $pidFile -Raw), [ref]$recordedPid)) {
+            [void]$processIds.Add($recordedPid)
+        }
+    }
     foreach ($process in $allProcesses) {
         if ([string]$process.CommandLine -match $ProcessPattern) {
             [void]$processIds.Add([int]$process.ProcessId)
@@ -117,13 +127,14 @@ function Stop-ProjectService {
     if (Test-PortListening -Port $Port) {
         throw "$Name port $Port did not become free after stopping the project process."
     }
+    if (Test-Path -LiteralPath $pidFile) { Remove-Item -LiteralPath $pidFile -Force -ErrorAction SilentlyContinue }
 }
 
 function Wait-PortListening {
     param(
         [Parameter(Mandatory = $true)][int]$Port,
         [Parameter(Mandatory = $true)][string]$Name,
-        [int]$TimeoutSeconds = 180
+        [int]$TimeoutSeconds = 60
     )
 
     $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
@@ -141,7 +152,7 @@ function Wait-HttpOk {
     param(
         [Parameter(Mandatory = $true)][string]$Uri,
         [Parameter(Mandatory = $true)][string]$Name,
-        [int]$TimeoutSeconds = 180
+        [int]$TimeoutSeconds = 60
     )
 
     $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
@@ -205,6 +216,9 @@ function Start-BackgroundService {
         [Parameter(Mandatory = $true)][string]$ProcessPattern
     )
 
+    # Start-All is intentionally idempotent: every invocation reconciles old
+    # PID files, listeners, wrappers and Codex/MCP descendants first.
+    Stop-ProjectService -Name $Name -Port $Port -ProcessPattern $ProcessPattern
     if (Test-PortListening -Port $Port) {
         $listeners = @(Get-ListeningProcessInfo -Port $Port)
         $foreign = @($listeners | Where-Object { $_.CommandLine -notmatch $ProcessPattern })
@@ -212,29 +226,27 @@ function Start-BackgroundService {
             $details = ($foreign | ForEach-Object { "$($_.ProcessId): $($_.CommandLine)" }) -join "; "
             throw "$Name port $Port is occupied by an unrelated process: $details"
         }
-        if ($Restart) {
-            Stop-ProjectService -Name $Name -Port $Port -ProcessPattern $ProcessPattern
-        } else {
-            try {
-                Wait-HttpOk -Uri $HealthyUri -Name $Name -TimeoutSeconds 10 | Out-Null
-                Write-Host "[$Name] already healthy on port $Port, reusing it."
-                return
-            } catch {
-                throw "$Name is listening on port $Port but is not healthy. Re-run with -Restart after checking ownership."
-            }
-        }
+        Stop-ProjectService -Name $Name -Port $Port -ProcessPattern $ProcessPattern
     }
 
-    $stdout = Join-Path $logsRoot "$Name.out.log"
+    $stdout = Join-Path $logsRoot "$Name.log"
     $stderr = Join-Path $logsRoot "$Name.err.log"
-    if (Test-Path $stdout) { Remove-Item $stdout -Force }
-    if (Test-Path $stderr) { Remove-Item $stderr -Force }
-
-    Write-Host "[$Name] starting on port $Port..."
-    Start-Process -FilePath $Command -ArgumentList $Arguments -WorkingDirectory $WorkingDirectory -RedirectStandardOutput $stdout -RedirectStandardError $stderr -WindowStyle Hidden | Out-Null
-    Wait-PortListening -Port $Port -Name $Name
-    Wait-HttpOk -Uri $HealthyUri -Name $Name | Out-Null
-    Write-Host "[$Name] healthy."
+    for ($attempt = 1; $attempt -le 3; $attempt++) {
+        Write-Host "[$Name] starting on port $Port (attempt $attempt/3)..."
+        $started = Start-Process -FilePath $Command -ArgumentList $Arguments -WorkingDirectory $WorkingDirectory -RedirectStandardOutput $stdout -RedirectStandardError $stderr -WindowStyle Hidden -PassThru
+        Set-Content -LiteralPath (Join-Path $pidsRoot "$Name.pid") -Value $started.Id -Encoding ascii
+        try {
+            Wait-PortListening -Port $Port -Name $Name -TimeoutSeconds 60
+            Wait-HttpOk -Uri $HealthyUri -Name $Name -TimeoutSeconds 60 | Out-Null
+            Write-Host "[$Name] healthy."
+            return
+        } catch {
+            Write-Warning "[$Name] health check failed on attempt ${attempt}: $($_.Exception.Message)"
+            Stop-ProjectService -Name $Name -Port $Port -ProcessPattern $ProcessPattern
+            if ($attempt -eq 3) { throw }
+            Start-Sleep -Seconds 1
+        }
+    }
 }
 
 $runnerToken = "development-runner-token"
@@ -297,6 +309,10 @@ Set-EnvValue -Name "APP_ENCRYPTION_KEY" -Value $backendEncryptionKey
 Set-EnvValue -Name "APP_CTFCTL_INTERNAL_ACCESS_KEY" -Value $ctfctlAccessKey
 Set-EnvValue -Name "APP_ALLOWED_SERVICE_CIDRS" -Value $backendAllowedCidrs
 Set-EnvValue -Name "APP_ENVIRONMENT" -Value "development"
+Set-EnvValue -Name "CTFCTL_BACKEND_URL" -Value "http://127.0.0.1:$BackendPort"
+Set-EnvValue -Name "CODEX_BRIDGE_URL" -Value "http://127.0.0.1:$BridgePort"
+Set-EnvValue -Name "BACKEND_HOST" -Value "127.0.0.1"
+Set-EnvValue -Name "BACKEND_PORT" -Value "$BackendPort"
 
 Set-EnvValue -Name "RUNNER_WORKSPACE_ROOT" -Value "../data/workspaces"
 Set-EnvValue -Name "RUNNER_MAX_OUTPUT_BYTES" -Value "1048576"
@@ -307,7 +323,6 @@ Set-EnvValue -Name "RUNNER_ENVIRONMENT" -Value "development"
 Set-EnvValue -Name "CODEX_BRIDGE_PORT" -Value "$BridgePort"
 Set-EnvValue -Name "CODEX_MODEL" -Value "gpt-5.6-luna"
 Set-EnvValue -Name "CODEX_MOCK_MODE" -Value ($(if ($UseMockCodex) { "true" } else { "false" }))
-Set-EnvValue -Name "CTFCTL_BACKEND_URL" -Value "http://127.0.0.1:$BackendPort"
 Set-EnvValue -Name "CTFCTL_ACCESS_KEY" -Value $ctfctlAccessKey
 Set-EnvValue -Name "VITE_API_BASE_URL" -Value $frontendApiBase
 
@@ -344,7 +359,7 @@ Write-Host "[migrate] applying backend migrations..."
 Invoke-CommandInDirectory -Name "backend migrate" -WorkingDirectory $backendDir -Command $pythonExe -Arguments @("-m", "alembic", "upgrade", "head")
 
 Start-BackgroundService -Name "runner" -Port $RunnerPort -WorkingDirectory $runnerDir -Command $pythonExe -Arguments @("-m", "uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", "$RunnerPort") -HealthyUri "http://127.0.0.1:$RunnerPort/health" -ProcessPattern "app\.main:app.*--port\s+$RunnerPort"
-Start-BackgroundService -Name "backend" -Port $BackendPort -WorkingDirectory $backendDir -Command $pythonExe -Arguments @("-m", "uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", "$BackendPort") -HealthyUri "http://127.0.0.1:$BackendPort/api/v1/health" -ProcessPattern "app\.main:app.*--port\s+$BackendPort"
+Start-BackgroundService -Name "backend" -Port $BackendPort -WorkingDirectory $backendDir -Command $pythonExe -Arguments @("-m", "uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", "$BackendPort") -HealthyUri "http://127.0.0.1:$BackendPort/api/v1/health/ready" -ProcessPattern "app\.main:app.*--port\s+$BackendPort"
 Start-BackgroundService -Name "bridge" -Port $BridgePort -WorkingDirectory $bridgeDir -Command $npmExe -Arguments @("run", "dev") -HealthyUri "http://127.0.0.1:$BridgePort/health" -ProcessPattern "codex-bridge.*(dist[\\/]server\.js|src[\\/]server\.ts)"
 
 Write-Host "[preflight] checking Codex SDK, Bridge and ctfctl MCP..."
@@ -364,8 +379,9 @@ Start-BackgroundService -Name "frontend" -Port $FrontendPort -WorkingDirectory $
 Write-Host ""
 Write-Host "[state]"
 Write-Host "  docker mysql : $([bool]$dockerUsed)"
-Write-Host "  backend      : http://127.0.0.1:$BackendPort/api/v1/health"
+Write-Host "  backend      : http://127.0.0.1:$BackendPort/api/v1/health/ready"
 Write-Host "  runner       : http://127.0.0.1:$RunnerPort/health"
 Write-Host "  bridge       : http://127.0.0.1:$BridgePort/health"
 Write-Host "  frontend     : http://127.0.0.1:$FrontendPort"
 Write-Host "  logs         : $logsRoot"
+Stop-Transcript | Out-Null
