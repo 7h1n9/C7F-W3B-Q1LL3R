@@ -73,6 +73,14 @@ class SolveRun(UUIDTimestampMixin, Base):
     compacted_artifact_count: Mapped[int] = mapped_column(Integer, default=0)
     compacted_trace_count: Mapped[int] = mapped_column(Integer, default=0)
     last_compaction_snapshot_id: Mapped[str | None] = mapped_column(String(36), index=True)
+    reserved_tool_calls: Mapped[int] = mapped_column(Integer, default=0)
+    assistance_level: Mapped[str] = mapped_column(String(30), default="AUTONOMOUS")
+    assistance_sources_json: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    last_compacted_event_id: Mapped[int] = mapped_column(BigInteger, default=0)
+    last_compacted_tool_created_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_compacted_observation_created_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_compacted_artifact_created_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_compacted_trace_created_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class AgentTurn(UUIDTimestampMixin, Base):
@@ -184,6 +192,8 @@ class RunEvent(UUIDTimestampMixin, Base):
     sequence: Mapped[int] = mapped_column(Integer, nullable=False)
     event_type: Mapped[str] = mapped_column(String(100), nullable=False)
     payload_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    payload_size: Mapped[int] = mapped_column(Integer, default=0)
+    payload_digest: Mapped[str] = mapped_column(String(64), default="")
 
 
 class ToolCall(UUIDTimestampMixin, Base):
@@ -222,6 +232,10 @@ class LogicalToolCall(UUIDTimestampMixin, Base):
 
 class ToolExecutionTrace(UUIDTimestampMixin, Base):
     __tablename__ = "tool_execution_traces"
+    __table_args__ = (UniqueConstraint(
+        "logical_tool_call_id", "execution_layer", "event_type", "external_id", "payload_digest",
+        name="uq_tool_trace_identity",
+    ),)
     logical_tool_call_id: Mapped[str] = mapped_column(ForeignKey("logical_tool_calls.id"), nullable=False, index=True)
     execution_layer: Mapped[str] = mapped_column(String(40), nullable=False)
     event_type: Mapped[str] = mapped_column(String(80), nullable=False)
@@ -244,6 +258,21 @@ class Artifact(UUIDTimestampMixin, Base):
     size: Mapped[int] = mapped_column(Integer, default=0)
     sha256: Mapped[str] = mapped_column(String(64), default="")
     summary: Mapped[str] = mapped_column(Text, default="")
+    status: Mapped[str] = mapped_column(String(20), default="ACTIVE", nullable=False)
+
+
+class ScriptRecord(UUIDTimestampMixin, Base):
+    """Provenance for generated exploit scripts, separate from execution output."""
+
+    __tablename__ = "scripts"
+    run_id: Mapped[str] = mapped_column(ForeignKey("solve_runs.id"), nullable=False, index=True)
+    artifact_id: Mapped[str | None] = mapped_column(ForeignKey("artifacts.id"))
+    path: Mapped[str] = mapped_column(String(1024), nullable=False)
+    sha256: Mapped[str] = mapped_column(String(64), default="")
+    source: Mapped[str] = mapped_column(String(30), default="MODEL_GENERATED")
+    assistance_level: Mapped[str] = mapped_column(String(30), default="AUTONOMOUS")
+    assumption_provenance_json: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    design_card_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
     status: Mapped[str] = mapped_column(String(20), default="ACTIVE", nullable=False)
 
 

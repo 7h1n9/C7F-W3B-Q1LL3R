@@ -13,6 +13,7 @@ from datetime import UTC, datetime
 from uuid import NAMESPACE_URL, uuid5
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 
 from app.models.run import LogicalToolCall, RunExecutionLease, SolveRun, ToolExecutionTrace
 
@@ -82,7 +83,24 @@ class EffectiveLogicalToolCallService:
                 started_at=started_at or datetime.now(UTC),
             )
             session.add(logical)
-            await session.flush()
+            try:
+                # A deterministic UUID plus a database uniqueness constraint
+                # is the real idempotency boundary.  The nested transaction
+                # lets a losing concurrent writer re-read the winner without
+                # rolling back the caller's transaction.
+                async with session.begin_nested():
+                    await session.flush()
+            except IntegrityError:
+                logical = await session.get(LogicalToolCall, record_id)
+                if logical is None:
+                    logical = await session.scalar(
+                        select(LogicalToolCall).where(
+                            LogicalToolCall.run_id == run.id,
+                            LogicalToolCall.id == external_id,
+                        )
+                    )
+                if logical is None:
+                    raise
         else:
             logical.tool_name = tool_name
             logical.status = status
@@ -102,6 +120,7 @@ class EffectiveLogicalToolCallService:
         external_id: str | None = None,
         payload: object | None = None,
     ) -> ToolExecutionTrace:
+        normalized_external_id = external_id or ""
         digest = hashlib.sha256(
             json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str).encode()
         ).hexdigest() if payload is not None else ""
@@ -110,7 +129,7 @@ class EffectiveLogicalToolCallService:
                 ToolExecutionTrace.logical_tool_call_id == logical.id,
                 ToolExecutionTrace.execution_layer == execution_layer,
                 ToolExecutionTrace.event_type == event_type,
-                ToolExecutionTrace.external_id == external_id,
+                ToolExecutionTrace.external_id == normalized_external_id,
                 ToolExecutionTrace.payload_digest == digest,
             )
         )
@@ -120,11 +139,26 @@ class EffectiveLogicalToolCallService:
             logical_tool_call_id=logical.id,
             execution_layer=execution_layer,
             event_type=event_type,
-            external_id=external_id,
+            external_id=normalized_external_id,
             payload_digest=digest,
         )
         session.add(item)
-        await session.flush()
+        try:
+            async with session.begin_nested():
+                await session.flush()
+        except IntegrityError:
+            existing = await session.scalar(
+                select(ToolExecutionTrace).where(
+                    ToolExecutionTrace.logical_tool_call_id == logical.id,
+                    ToolExecutionTrace.execution_layer == execution_layer,
+                    ToolExecutionTrace.event_type == event_type,
+                    ToolExecutionTrace.external_id == normalized_external_id,
+                    ToolExecutionTrace.payload_digest == digest,
+                )
+            )
+            if existing is None:
+                raise
+            return existing
         return item
 
 

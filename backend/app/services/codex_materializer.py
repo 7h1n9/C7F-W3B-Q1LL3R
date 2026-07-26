@@ -8,6 +8,7 @@ from pathlib import Path
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.exceptions import DomainError
 from app.models.challenge import Challenge
 from app.models.run import (
     Artifact,
@@ -18,6 +19,7 @@ from app.models.run import (
 )
 from app.orchestration.state_machine import TERMINAL, RunStatus
 from app.services.effective_logical_tool_calls import effective_logical_tool_call_service
+from app.services.compaction import compaction_service
 from app.services.flags import flag_service
 from app.services.reports import report_service
 from app.services.run_diagnostics import run_diagnostics_service
@@ -133,6 +135,10 @@ class CodexMaterializer:
             cursor.sequence = max(cursor.sequence, max(event.sequence for event in events))
             self._cursors[run.id] = cursor
             await session.commit()
+            # Bridge-originated calls bypass ToolGateway, so the materializer
+            # is also an online compaction boundary for Codex SDK Runs.
+            with contextlib.suppress(DomainError):
+                await compaction_service.maybe_auto_compact(session, run)
 
             if RunStatus(run.status) in {RunStatus.COMPLETED_SOLVED, RunStatus.COMPLETED_UNSOLVED}:
                 report = await session.scalar(select(Artifact).where(Artifact.run_id == run.id, Artifact.artifact_type == "report", Artifact.status == "ACTIVE"))

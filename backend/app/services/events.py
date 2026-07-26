@@ -1,4 +1,6 @@
 import asyncio
+import hashlib
+import json
 import random
 
 from sqlalchemy import func, select
@@ -21,6 +23,7 @@ class EventService:
         lock = self._run_locks.setdefault(run_id, asyncio.Lock())
         async with lock:
             body = payload or {}
+            encoded_body = json.dumps(body, ensure_ascii=False, sort_keys=True, default=str).encode()
             # Lifecycle events are intentionally separate from internal phase
             # transitions.  This keeps status history useful and prevents a
             # PLANNING/EXECUTING loop from looking like a Run restart.
@@ -44,7 +47,13 @@ class EventService:
                     await session.scalar(select(func.max(RunEvent.event_id)).where(RunEvent.run_id == run_id)) or 0
                 ) + 1
             event = RunEvent(
-                run_id=run_id, event_id=event_id, sequence=sequence, event_type=event_type, payload_json=body
+                run_id=run_id,
+                event_id=event_id,
+                sequence=sequence,
+                event_type=event_type,
+                payload_json=body,
+                payload_size=len(encoded_body),
+                payload_digest=hashlib.sha256(encoded_body).hexdigest(),
             )
             session.add(event)
             await session.flush()

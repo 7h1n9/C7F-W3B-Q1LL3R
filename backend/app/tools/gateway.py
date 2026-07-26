@@ -14,6 +14,7 @@ from app.models.run import (
     Artifact,
     Observation,
     RunExecutionLease,
+    ScriptRecord,
     SolveRun,
     ToolCall,
 )
@@ -22,6 +23,8 @@ from app.services.effective_logical_tool_calls import effective_logical_tool_cal
 from app.services.events import event_service
 from app.services.flags import flag_service
 from app.services.run_budget_guard import run_budget_guard
+from app.services.compaction import compaction_service
+from app.services.assistance import assistance_level
 from app.services.runner_client import runner_client
 from app.services.solver_state import solver_state_service
 from app.services.tool_argument_adapter import adapt_arguments
@@ -61,7 +64,6 @@ class ToolGateway:
         # are rejected here; attempt/lease freshness is checked in one place.
         coordinated = await tool_invocation_coordinator.validate(session, run)
         lease = coordinated["lease"]
-        await run_budget_guard.enforce(session, run, attempt_id=lease.attempt_id)
         permitted_tools = await effective_tools_for(session, run, challenge)
         if name not in permitted_tools:
             raise DomainError(
@@ -91,9 +93,14 @@ class ToolGateway:
                 raise DomainError(error.code, error.message, details, error.status_code) from error
             raise
         enforce_tool_policy(name, arguments, challenge.allowed_hosts)
+        # Reserve only after policy and argument validation.  Rejected model
+        # requests must not consume a durable tool budget slot.
+        await run_budget_guard.enforce(session, run, attempt_id=lease.attempt_id)
         if name == "file_read":
             cached = await self._cached_file_read(session, run, arguments)
             if cached is not None:
+                await run_budget_guard.release(session, run)
+                await session.commit()
                 await event_service.append(
                     session,
                     run.id,
@@ -126,6 +133,7 @@ class ToolGateway:
             started_at=call.started_at,
             attempt_id=lease.attempt_id if lease else None,
         )
+        await run_budget_guard.release(session, run)
         await effective_logical_tool_call_service.trace(
             session, logical, execution_layer=execution_layer, event_type="requested", external_id=call.id
         )
@@ -248,6 +256,36 @@ class ToolGateway:
                 "size": artifact.size,
                 "sha256": artifact.sha256,
             }
+        if name in {"script_run", "python_run"} and artifact is not None:
+            provenance = arguments.get("assumption_provenance") or []
+            level = assistance_level(provenance)
+            existing_script = await session.scalar(
+                select(ScriptRecord).where(
+                    ScriptRecord.run_id == run.id,
+                    ScriptRecord.path == artifact.file_path,
+                    ScriptRecord.sha256 == artifact.sha256,
+                )
+            )
+            if existing_script is None:
+                session.add(
+                    ScriptRecord(
+                        run_id=run.id,
+                        artifact_id=artifact.id,
+                        path=artifact.file_path,
+                        sha256=artifact.sha256,
+                        source="MODEL_GENERATED",
+                        assistance_level=level,
+                        assumption_provenance_json=provenance,
+                        design_card_json=arguments.get("design_card") or {},
+                    )
+                )
+            if level == "ANSWER_GUIDED" or (level == "EVIDENCE_GUIDED" and run.assistance_level == "AUTONOMOUS"):
+                run.assistance_level = level
+            current_sources = list(run.assistance_sources_json or [])
+            for source in provenance:
+                if source not in current_sources:
+                    current_sources.append(source)
+            run.assistance_sources_json = current_sources
         unified = self._unified_result(result, artifact, permitted_tools)
         facts = self._facts(name, result, relative.replace("\\", "/"))
         facts["tool_model_view"] = unified.model_view.model_dump()
@@ -295,6 +333,9 @@ class ToolGateway:
         await event_service.append(
             session, run.id, event_type, {"tool_call_id": call.id, "logical_tool_call_id": call.logical_tool_call_id, "tool": name, "execution_layer": call.execution_layer, "result": unified.model_dump()}
         )
+        # Compaction is an online safety mechanism.  It is checked after the
+        # tool reaches an idle boundary so an in-flight call is never deleted.
+        await compaction_service.maybe_auto_compact(session, run)
         return unified.model_dump()
 
     async def _cached_file_read(
