@@ -86,7 +86,7 @@ class ToolGateway:
                     {"recommended_tools": ["sql_boolean_compare", "sqlmap_run", "script_run"], "final_verification": True},
                     422,
                 )
-        arguments = adapt_arguments(name, arguments)
+        arguments = adapt_arguments(name, arguments, challenge)
         try:
             arguments = definition.validate_arguments(arguments)
         except DomainError as error:

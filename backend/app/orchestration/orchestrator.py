@@ -2,6 +2,7 @@ import asyncio
 import contextlib
 import hashlib
 import json
+import re
 import uuid
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -60,10 +61,11 @@ from app.services.events import event_service
 from app.services.evidence_pipeline import evidence_pipeline
 from app.services.finish_gate import finish_gate
 from app.services.flags import flag_service
+from app.services.fresh_reproduction import fresh_reproduction_executor
 from app.services.hypotheses import hypothesis_service
 from app.services.infrastructure import clear_failure, infrastructure_error, record_failure
 from app.services.progress_evaluator import progress_evaluator
-from app.services.reports import report_service
+from app.services.reports import ReproductionPlanner, report_service
 from app.services.run_attempts import run_attempt_service
 from app.services.runner_client import runner_client
 from app.services.solver_state import solver_state_service
@@ -1728,6 +1730,40 @@ class SolveOrchestrator:
                     ):
                         await self._transition(session, run, incoming_status)
                 await event_service.append(session, run.id, item.event_type, item.payload)
+                if item.event_type == "agent.message":
+                    # Codex SDK turns do not expose the legacy structured
+                    # FinishAction channel.  When the model reports a
+                    # displayable flag after the bounded evidence already
+                    # exists, complete the same verification gate used by the
+                    # structured engine and perform fresh reproduction.
+                    message = str(item.payload.get("message") or "")
+                    match = re.search(r"(?i)flag\{[^{}\r\n\"\\]{1,256}\}", message)
+                    if match and RunStatus(run.status) not in TERMINAL:
+                        try:
+                            challenge = await session.get(Challenge, run.challenge_id)
+                            steps = await ReproductionPlanner().plan(session, run, challenge)
+                            validation = await fresh_reproduction_executor.execute(session, run, challenge, steps)
+                            if validation.get("verified"):
+                                finished = await self._finish(
+                                    session,
+                                    run,
+                                    challenge,
+                                    FinishAction(
+                                        type="finish",
+                                        result="solved",
+                                        summary="Codex SDK reported a dynamically extracted candidate and fresh reproduction verified it.",
+                                        flag_candidate=match.group(0),
+                                    ),
+                                    attempt,
+                                    lease,
+                                )
+                                if finished:
+                                    return
+                        except Exception:
+                            # A normal SDK message must never become an engine
+                            # error solely because finalization needs another
+                            # bounded attempt; the next turn can retry it.
+                            pass
                 if item.event_type == "tool.completed":
                     rate_limit_status = _tool_rate_limit_status(item.payload)
                     if rate_limit_status is not None:

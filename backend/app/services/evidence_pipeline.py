@@ -18,6 +18,9 @@ class EvidencePipeline:
         "baseline_confirmed", "entry_identified", "session_established",
         "object_reference_discovered", "authorization_boundary_tested", "idor_confirmed",
         "sql_syntax_signal", "sql_injection_confirmed", "union_injection_confirmed", "sqlmap_extraction_completed", "has_flag_candidate",
+        "baseline_exists_confirmed", "baseline_absent_confirmed", "input_fields_identified", "asset_field_tested",
+        "department_field_tested", "vulnerable_field_identified", "boolean_oracle_confirmed",
+        "automated_extraction_started", "config_value_extracted", "flag_candidate_found", "flag_verified",
     }
 
     def infer_capabilities(self, view: ToolModelView) -> set[str]:
@@ -34,6 +37,17 @@ class EvidencePipeline:
             capabilities.add("sql_syntax_signal")
         if structured.get("sql_injection_confirmed"):
             capabilities.add("sql_injection_confirmed")
+        for name in self.CAPABILITIES:
+            if structured.get(name):
+                capabilities.add(name)
+        if structured.get("subrequest_count"):
+            capabilities.add("input_fields_identified" if structured.get("field_names") else "baseline_exists_confirmed")
+        if structured.get("test_field") in {"asset_no", "department"}:
+            capabilities.add(f"{structured['test_field']}_field_tested")
+        if structured.get("boolean_oracle_confirmed") or structured.get("true_false_differential"):
+            capabilities.add("boolean_oracle_confirmed")
+        if structured.get("extracted_value") is not None:
+            capabilities.update({"automated_extraction_started", "config_value_extracted"})
         if structured.get("union_confirmed"):
             capabilities.add("union_injection_confirmed")
         if view.tool == "sqlmap_run" and view.ok:

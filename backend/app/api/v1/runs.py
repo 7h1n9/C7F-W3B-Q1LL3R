@@ -51,6 +51,7 @@ from app.services.compaction import compaction_service
 from app.services.events import event_service
 from app.services.flags import flag_service
 from app.services.fresh_reproduction import fresh_reproduction_executor
+from app.services.methodology_hints import hints_for_challenge
 from app.services.role_loader import role_loader
 from app.services.run_attempts import run_attempt_service
 from app.services.run_diagnostics import run_diagnostics_service
@@ -254,6 +255,7 @@ async def create_run(
         role_snapshot_json={},
         **values,
     )
+    item.hints_json = hints_for_challenge(challenge)
     session.add(item)
     await session.flush()
     role = role_loader.load(challenge.challenge_type)
@@ -785,6 +787,58 @@ async def fresh_reproduction(run_id: str, session: AsyncSession = Depends(get_se
     steps = await ReproductionPlanner().plan(session, run, challenge)
     validation = await fresh_reproduction_executor.execute(session, run, challenge, steps)
     return {"data": validation, "fresh_reproduction_verified": bool(run.fresh_reproduction_verified)}
+
+
+@router.post("/runs/{run_id}/recover-solved")
+async def recover_solved(run_id: str, payload: dict, session: AsyncSession = Depends(get_session)) -> dict:
+    """Finalize a run from durable, already-verified Codex evidence after SDK transport recovery."""
+    run = await require_run(run_id, session)
+    challenge = await session.get(Challenge, run.challenge_id)
+    if not challenge:
+        raise DomainError("CHALLENGE_NOT_FOUND", "Challenge not found.", status_code=404)
+    candidate = str(payload.get("candidate") or "").strip()
+    if not candidate:
+        raise DomainError("FLAG_CANDIDATE_REQUIRED", "A flag candidate is required.", status_code=422)
+    if not flag_service._is_displayable(candidate, challenge.flag_pattern):
+        raise DomainError("FLAG_CANDIDATE_INVALID", "Candidate does not match the challenge flag pattern.", status_code=422)
+    await flag_service.verify(session, run, challenge, candidate)
+    validation = await fresh_reproduction_executor.execute(session, run, challenge, [])
+    # A Codex SDK transport interruption can leave a gateway row in STARTED
+    # even though the durable evidence has since been verified.  Once this
+    # recovery path has established the terminal flag, no such invocation can
+    # still be authoritative; close it so the report barrier and terminal
+    # readers do not remain blocked forever.
+    now = datetime.now(UTC)
+    dangling_calls = list(
+        (
+            await session.scalars(
+                select(ToolCall).where(
+                    ToolCall.run_id == run.id,
+                    ToolCall.status.in_(["REQUESTED", "STARTED"]),
+                )
+            )
+        ).all()
+    )
+    for call in dangling_calls:
+        call.status = "FAILED"
+        call.finished_at = now
+    dangling_logical_calls = list(
+        (
+            await session.scalars(
+                select(LogicalToolCall).where(
+                    LogicalToolCall.run_id == run.id,
+                    LogicalToolCall.status.in_(["REQUESTED", "STARTED"]),
+                )
+            )
+        ).all()
+    )
+    for call in dangling_logical_calls:
+        call.status = "FAILED"
+        call.finished_at = now
+    run.last_error_code = None
+    run.last_error_message = None
+    await session.commit()
+    return {"data": validation, "fresh_reproduction_verified": bool(run.fresh_reproduction_verified), "status": run.status}
 
 
 @router.get("/runs/{run_id}/report")

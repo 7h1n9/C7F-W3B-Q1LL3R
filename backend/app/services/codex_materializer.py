@@ -1,8 +1,10 @@
 import asyncio
 import contextlib
 import hashlib
+import json
 import re
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 
 from sqlalchemy import func, select
@@ -11,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.challenge import Challenge
 from app.models.run import (
     Artifact,
+    LogicalToolCall,
     Observation,
     RunEvent,
     SolveRun,
@@ -20,6 +23,7 @@ from app.orchestration.state_machine import TERMINAL, RunStatus
 from app.services.compaction_scheduler import compaction_scheduler
 from app.services.effective_logical_tool_calls import effective_logical_tool_call_service
 from app.services.flags import flag_service
+from app.services.progress_evaluator import progress_evaluator
 from app.services.reports import report_service
 from app.services.run_diagnostics import run_diagnostics_service
 from app.services.runner_client import runner_client
@@ -129,6 +133,40 @@ class CodexMaterializer:
                     run.post_terminal_events_json = existing[-200:]
                     continue
                 await self._apply_event(session, run, challenge, event)
+
+            # Replaying the event stream after a backend restart can
+            # reconstruct a pre-interruption STARTED row even though a later
+            # flag.verified event has made the run terminal.  Verification is
+            # authoritative, so close those stale rows before the report gate
+            # evaluates the materialized state.
+            if run.thread_invalidated:
+                now = datetime.now(UTC)
+                pending_calls = list(
+                    (
+                        await session.scalars(
+                            select(ToolCall).where(
+                                ToolCall.run_id == run.id,
+                                ToolCall.status.in_(["REQUESTED", "STARTED"]),
+                            )
+                        )
+                    ).all()
+                )
+                for call in pending_calls:
+                    call.status = "FAILED"
+                    call.finished_at = now
+                pending_logical_calls = list(
+                    (
+                        await session.scalars(
+                            select(LogicalToolCall).where(
+                                LogicalToolCall.run_id == run.id,
+                                LogicalToolCall.status.in_(["REQUESTED", "STARTED"]),
+                            )
+                        )
+                    ).all()
+                )
+                for call in pending_logical_calls:
+                    call.status = "FAILED"
+                    call.finished_at = now
 
             self._refresh_run_metrics(run, cursor, events)
             cursor.sequence = max(cursor.sequence, max(event.sequence for event in events))
@@ -256,7 +294,13 @@ class CodexMaterializer:
         event: RunEvent,
     ) -> None:
         payload = event.payload_json or {}
-        output = str(payload.get("output") or payload.get("result") or "")
+        raw_result = payload.get("result") if isinstance(payload.get("result"), dict) else None
+        raw_output = payload.get("output")
+        if raw_output is None and payload.get("result") is not None:
+            raw_output = payload.get("result")
+        if raw_output is None and raw_result is not None:
+            raw_output = raw_result
+        output = raw_output if isinstance(raw_output, str) else json.dumps(raw_output, ensure_ascii=False, default=str) if raw_output is not None else ""
         if not output:
             return
         root = Path(run.workspace_path).resolve()
@@ -297,6 +341,11 @@ class CodexMaterializer:
         observation = await session.scalar(
             select(Observation).where(Observation.tool_call_id == tool_call.id)
         )
+        structured = raw_result or {}
+        if isinstance(structured.get("data"), dict):
+            structured = structured["data"]
+        if isinstance(structured.get("structured_result"), dict):
+            structured = structured["structured_result"]
         facts = {
             "tool": tool_call.tool_name,
             "ok": event.event_type == "tool.completed",
@@ -308,7 +357,7 @@ class CodexMaterializer:
             "tool_model_view": {
                 "summary": summary,
                 "content_excerpt": re.sub(r"(?i)(authorization|cookie|token|password)(\s*[:=]\s*)([^;\s,]+)", r"\1\2<redacted>", content[:8192]),
-                "extracted_facts": {"tool": tool_call.tool_name, "exit_code": payload.get("exit_code"), "output_length": len(content)},
+                "extracted_facts": {"tool": tool_call.tool_name, "exit_code": payload.get("exit_code"), "output_length": len(content), **structured},
                 "warnings": [],
                 "suggested_next_dimensions": [],
             },
@@ -328,6 +377,11 @@ class CodexMaterializer:
             observation.summary = summary
             observation.facts_json = facts
         await session.flush()
+        # Bridge-originated MCP results do not pass through ToolGateway's
+        # normal reducer. Apply the same evidence pipeline here so a Codex SDK
+        # Run gets durable capabilities and automation recommendations too.
+        result_for_progress = {"status": "COMPLETED" if event.event_type == "tool.completed" else "FAILED", **structured, "structured_result": structured, "model_view": facts.get("tool_model_view")}
+        await progress_evaluator.evaluate(session, run, challenge, tool_call.arguments_json or {}, tool_call.effective_tool_name or tool_call.tool_name, result_for_progress, observation, artifact)
         await flag_service.extract_candidates(session, run, challenge, artifact, content)
 
     async def _materialize_artifact_event(

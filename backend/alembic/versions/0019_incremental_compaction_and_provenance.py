@@ -1,8 +1,8 @@
 """Add incremental compaction watermarks, reservations and provenance."""
 
 import sqlalchemy as sa
-from alembic import op
 
+from alembic import op
 
 revision = "0019_incremental_compaction_and_provenance"
 down_revision = "0018_compaction_checkpoints"

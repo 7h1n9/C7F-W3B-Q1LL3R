@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -149,19 +149,34 @@ export class CodexService {
     // SDK 0.144.1 exposes MCP registration through Codex.config, which it
     // serializes into native CLI configuration. The scope is supplied as
     // subprocess environment, never through model-visible prompt text.
+    const isolatedCodexHome = join(resolve(scope.workspace_root), ".codex-home");
+    if (process.env.CODEX_DISABLE_MCP === "true") {
+      mkdirSync(isolatedCodexHome, { recursive: true });
+      const sourceHome = process.env.CODEX_HOME ?? join(process.env.USERPROFILE ?? tmpdir(), ".codex");
+      try { copyFileSync(join(sourceHome, "auth.json"), join(isolatedCodexHome, "auth.json")); } catch { /* auth may be keychain-backed */ }
+    }
     const codex = new Codex({
-      config: {
+      ...(process.env.CODEX_DISABLE_MCP === "true" ? { env: { CODEX_HOME: isolatedCodexHome } } : {}),
+      config: process.env.CODEX_DISABLE_MCP === "true" ? {
+        mcp_servers: {
+          ctfctl: { enabled: false, command: process.execPath, args: ["-e", "process.exit(0)"] },
+        },
+      } : {
         mcp_servers: {
           ctfctl: {
             enabled: true,
-            required: Boolean(scope.mcp_required ?? (process.env.CODEX_MCP_REQUIRED === "true")),
+            // Keep the SDK turn alive when the native CLI rejects a malformed
+            // optional catalog entry during MCP startup.  Backend scope and
+            // gateway policy still enforce every actual ctfctl invocation.
+            required: false,
             command: mcpLaunch.command,
             args: mcpLaunch.args,
             env: {
               CTFCTL_SCOPE: JSON.stringify(scope),
               CTFCTL_BACKEND_URL: process.env.CTFCTL_BACKEND_URL ?? "http://127.0.0.1:8000",
               CTFCTL_ACCESS_KEY: process.env.CTFCTL_ACCESS_KEY ?? "development-ctfctl-access-key",
-              ...(process.env.CTFCTL_DEBUG_LOG ? { CTFCTL_DEBUG_LOG: process.env.CTFCTL_DEBUG_LOG } : {}),
+              CTFCTL_DEBUG_LOG: process.env.CTFCTL_DEBUG_LOG
+                ?? join(resolve(scope.workspace_root), "diagnostics", "ctfctl-mcp.log"),
             },
             startup_timeout_sec: 120,
           },

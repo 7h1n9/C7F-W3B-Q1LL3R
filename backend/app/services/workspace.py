@@ -5,6 +5,7 @@ from pathlib import Path
 from app.core.config import get_settings
 from app.core.exceptions import DomainError
 from app.models.challenge import Challenge
+from app.services.methodology_hints import hint_text, hints_for_challenge
 
 RUN_POLICY = """# Run Policy\n\nOnly interact with the challenge target hosts recorded in challenge.json. Do not use arbitrary shell commands, public targets, persistence, or paths outside this workspace. Record evidence for material conclusions.\n"""
 
@@ -64,5 +65,5 @@ def create_workspace(
     (workspace / "challenge.json").write_text(
         json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
     )
-    (workspace / "AGENTS.md").write_text(RUN_POLICY, encoding="utf-8")
+    (workspace / "AGENTS.md").write_text(RUN_POLICY + "\n" + hint_text(hints_for_challenge(challenge)), encoding="utf-8")
     return workspace

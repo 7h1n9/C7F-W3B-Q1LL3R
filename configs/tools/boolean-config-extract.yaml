@@ -1,9 +1,8 @@
-name: sql_boolean_compare
-display_name: SQL Boolean Compare
+name: boolean_config_extract
+display_name: Boolean Configuration Extract
 category: web
-description: Compare bounded TRUE and FALSE SQL conditions on an authorized challenge endpoint.
-risk_level: medium
-enabled: true
+description: Bounded resumable extraction through a confirmed boolean oracle.
+risk_level: high
 parameters:
   request:
     type: object
@@ -16,18 +15,18 @@ parameters:
       json: {type: object, additionalProperties: true}
       form: {type: object, additionalProperties: true}
   test_field: {type: string, required: true}
-  control_fields: {type: object, required: false, additionalProperties: true}
+  baseline_value: {type: string, required: true}
+  target_expression: {type: string, required: true}
   oracle:
     type: object
-    required: false
+    required: true
     additionalProperties: true
     properties:
       json_field: {type: string, default: matched}
       true_value: {type: boolean, default: true}
       false_value: {type: boolean, default: false}
-  baseline_value: {type: string, required: false}
-  true_condition: {type: string, required: false}
-  false_condition: {type: string, required: false}
+  control_fields: {type: object, required: false, additionalProperties: true}
   max_requests: {type: integer, required: false}
-limits: {max_requests: 5, concurrency: 2}
+  max_length: {type: integer, required: false}
+limits: {max_requests: 1024, timeout_seconds: 30, concurrency: 2}
 permissions: {target_allowlist_required: true}

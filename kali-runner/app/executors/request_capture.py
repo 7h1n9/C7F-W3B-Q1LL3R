@@ -62,7 +62,7 @@ async def request_capture(request: JobRequest) -> dict:
         if body_text:
             headers.setdefault("Content-Length", str(len(body_text.encode())))
         raw = f"{method} {path} HTTP/1.1\r\n" + "\r\n".join(f"{key}: {value}" for key, value in headers.items()) + "\r\n\r\n" + body_text
-        metadata = {"method": method, "url": url, "host": host, "query": query, "headers": _redact(headers), "body": _redact(body), "secret_refs": [*list(args.get("secret_refs") or []), *([str(cookie_secret_ref)] if cookie_secret_ref else [])]}
+        metadata = {"method": method, "url": url, "host": host, "query": query, "headers": _redact(headers), "body": _redact(body), "body_type": "json" if args.get("json") is not None else "form" if args.get("form") is not None else "raw", "injection_field": args.get("test_field") or args.get("parameter"), "control_fields": _redact(args.get("control_fields") or {}), "control_field_values": _redact(args.get("control_fields") or {}), "cookie_secret_ref": cookie_secret_ref, "secret_refs": [*list(args.get("secret_refs") or []), *([str(cookie_secret_ref)] if cookie_secret_ref else [])]}
     out = workspace / "requests"
     out.mkdir(parents=True, exist_ok=True)
     req_path, meta_path = out / "exploit.req", out / "exploit.req.meta.json"

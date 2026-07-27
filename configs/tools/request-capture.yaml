@@ -15,6 +15,6 @@ parameters:
   form: {type: object, required: false}
   cookie: {type: string, required: false}
   cookie_secret_ref: {type: string, required: false}
-  secret_refs: {type: array, required: false}
+  secret_refs: {type: array, items: {type: string}, required: false}
 limits: {timeout_seconds: 10, max_output_bytes: 1048576}
 permissions: {target_allowlist_required: true}

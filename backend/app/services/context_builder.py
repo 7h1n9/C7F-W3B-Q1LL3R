@@ -223,6 +223,7 @@ class ContextBuilder:
                 ],
             },
             "Evidence Snapshot": snapshot_data or None,
+            "Authorized Methodology Hints": run.hints_json or {},
             "RunPlan": (snapshot_data.get("current_exploit_plan") if snapshot_data else None) or (state.run_plan_json if state else {}),
             "AttackChainPlan": (snapshot_data.get("attack_chain") if snapshot_data else None) or (state.attack_chain_plan_json if state else {}),
             "Capability Ledger": (snapshot_data.get("confirmed_capabilities") if snapshot_data else None) or (state.capability_ledger_json if state else {}),

@@ -114,8 +114,23 @@ class SolutionPathExtractor:
         steps: list[ReproductionStep] = []
         seen: set[str] = set()
         for call in calls:
-            if call.status != "COMPLETED" or call.tool_name in self._EXCLUDED_TOOLS:
+            if (
+                call.status != "COMPLETED"
+                or call.tool_name in self._EXCLUDED_TOOLS
+                or call.tool_name.startswith("ctfctl.")
+            ):
                 continue
+            raw_arguments = call.arguments_json or {}
+            if call.tool_name in {"http_request", "http_session_request"}:
+                # Do not turn an incomplete legacy trace into a literal
+                # {{target_url}} GET reproduction when a later complete
+                # authorized RequestSpec exists in the same run.
+                if not raw_arguments.get("url"):
+                    continue
+                if str(raw_arguments.get("method") or "GET").upper() == "GET" and not (
+                    raw_arguments.get("query") or raw_arguments.get("json") or raw_arguments.get("form") or raw_arguments.get("body")
+                ):
+                    continue
             observation = await session.scalar(
                 select(Observation)
                 .where(Observation.tool_call_id == call.id)
@@ -129,7 +144,7 @@ class SolutionPathExtractor:
                 "http_session_request",
             }:
                 continue
-            normalized = self._normalize(call.arguments_json or {})
+            normalized = self._normalize(raw_arguments)
             signature = json.dumps([call.tool_name, normalized], ensure_ascii=False, sort_keys=True)
             if signature in seen:
                 continue

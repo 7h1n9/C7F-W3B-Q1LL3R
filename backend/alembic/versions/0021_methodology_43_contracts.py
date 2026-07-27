@@ -1,8 +1,8 @@
 """Add explicit turn, logical-tool, infrastructure and compaction contracts."""
 
 import sqlalchemy as sa
-from alembic import op
 
+from alembic import op
 
 revision = "0021_methodology_43_contracts"
 down_revision = "0020_script_provenance"

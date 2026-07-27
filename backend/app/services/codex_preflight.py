@@ -39,6 +39,11 @@ def _schema_from_parameters(parameters: Any, name: str) -> dict:
     for key, raw in parameters.items():
         spec = raw if isinstance(raw, dict) else {"type": raw}
         schema = {item: value for item, value in spec.items() if item != "required"}
+        if schema.get("type") == "array" and "items" not in schema:
+            # The YAML tool catalog uses the compact ``{type: array}`` form.
+            # MCP JSON Schema requires an item schema; default to strings for
+            # legacy list arguments while preserving explicit schemas.
+            schema["items"] = {"type": "string"}
         properties[key] = schema
         if isinstance(raw, dict) and raw.get("required") is True:
             required.append(key)

@@ -1,0 +1,14 @@
+name: oracle_probe_matrix
+display_name: Oracle Probe Matrix
+category: web
+description: Run bounded repeated baseline and TRUE/FALSE probes for each supplied request field.
+risk_level: medium
+parameters:
+  request: {type: object, required: true}
+  baseline_field: {type: string, required: true}
+  baseline_exists: {type: string, required: true}
+  baseline_absent: {type: string, required: true}
+  fields: {type: object, required: true}
+  control_fields: {type: object, required: false}
+limits: {max_subrequests: 16, concurrency: 2, timeout_seconds: 30}
+permissions: {target_allowlist_required: true}

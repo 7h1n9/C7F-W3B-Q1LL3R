@@ -5,11 +5,21 @@ description: Determine a small column count and reflected columns with a bounded
 risk_level: medium
 enabled: true
 parameters:
-  endpoint: {type: string, required: true}
-  parameter: {type: string, required: true}
+  request:
+    type: object
+    required: true
+    additionalProperties: true
+    properties:
+      method: {type: string, default: POST}
+      url: {type: string}
+      headers: {type: object, additionalProperties: true}
+      json: {type: object, additionalProperties: true}
+      form: {type: object, additionalProperties: true}
+  test_field: {type: string, required: true}
+  control_fields: {type: object, required: false, additionalProperties: true}
   baseline_value: {type: string, required: false}
   max_columns: {type: integer, required: false}
   max_requests: {type: integer, required: false}
-  candidate_comment_styles: {type: array, required: false}
+  candidate_comment_styles: {type: array, items: {type: string}, required: false}
 limits: {max_columns: 10, max_requests: 40, concurrency: 2}
 permissions: {target_allowlist_required: true}

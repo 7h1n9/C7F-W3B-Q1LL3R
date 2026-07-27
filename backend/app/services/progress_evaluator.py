@@ -225,6 +225,8 @@ class ProgressEvaluator:
             recommendations.append({"tool_name": "sql_injection_probe", "reason": "SQL syntax signal requires a bounded boolean probe."})
         if extracted.get("sql_injection_confirmed"):
             recommendations.append({"tool_name": "sqlmap_run", "reason": "Confirmed boolean differential requires bounded SQLMap extraction."})
+        if extracted.get("boolean_oracle_confirmed"):
+            recommendations.append({"tool_name": "boolean_config_extract", "reason": "Confirmed oracle requires bounded automated extraction."})
         await solver_state_service.sync_hypotheses(session, run.id)
         made_progress = confirmed
         no_progress_count = await solver_state_service.record_progress(

@@ -24,6 +24,7 @@ class SolveRun(UUIDTimestampMixin, Base):
     role_name: Mapped[str | None] = mapped_column(String(120))
     role_version: Mapped[str | None] = mapped_column(String(40))
     role_snapshot_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    hints_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
     status: Mapped[str] = mapped_column(String(40), default="CREATED")
     current_phase: Mapped[str] = mapped_column(String(80), default="CREATED")
     workspace_path: Mapped[str] = mapped_column(String(1024), nullable=False)
@@ -116,6 +117,7 @@ class RunAttempt(UUIDTimestampMixin, Base):
     attempt_number: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     engine_type: Mapped[str] = mapped_column(String(40), nullable=False)
     model_config_id: Mapped[str | None] = mapped_column(ForeignKey("model_configs.id"))
+    hints_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     status: Mapped[str] = mapped_column(String(40), default="RUNNING")
@@ -350,6 +352,11 @@ class RunCompactionCheckpoint(UUIDTimestampMixin, Base):
     deleted_row_counts_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
     error_code: Mapped[str | None] = mapped_column(String(100))
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(UTC),
+        onupdate=lambda: datetime.now(UTC),
+    )
 
 
 class EvidenceSnapshot(UUIDTimestampMixin, Base):
@@ -361,6 +368,11 @@ class EvidenceSnapshot(UUIDTimestampMixin, Base):
     sha256: Mapped[str] = mapped_column(String(64), nullable=False, default="")
     source_checkpoint_id: Mapped[str | None] = mapped_column(ForeignKey("run_compaction_checkpoints.id"))
     is_current: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(UTC),
+        onupdate=lambda: datetime.now(UTC),
+    )
 
 
 class CompactionLease(UUIDTimestampMixin, Base):
@@ -375,3 +387,8 @@ class CompactionLease(UUIDTimestampMixin, Base):
     acquired_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     generation: Mapped[int] = mapped_column(Integer, default=0)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(UTC),
+        onupdate=lambda: datetime.now(UTC),
+    )

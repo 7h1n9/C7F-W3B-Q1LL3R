@@ -304,6 +304,12 @@ async def workspace_search(payload: SearchRequest, x_ctfctl_access_key: str | No
     matches = []
     policy = policy_for(payload, root)
     for item in manifest(root):
+        # Generated response/runner logs are already available through their
+        # explicit artifact paths. Excluding them from broad searches keeps a
+        # Codex context bounded and prevents repeated flag-pattern matches from
+        # causing compaction churn during unattended runs.
+        if item["relative_path"].split("/", 1)[0] in {"responses", "outputs"}:
+            continue
         if len(matches) >= payload.max_results:
             break
         path, _ = policy.readable(item["relative_path"])

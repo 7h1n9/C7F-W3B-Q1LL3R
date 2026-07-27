@@ -1,10 +1,10 @@
 name: web-ctf-solver
 display_name: Web CTF 解题智能体
-version: 2
+version: 3
 description: Solver for explicitly authorized CTF Web challenges.
 challenge_types: [WEB_TARGET]
 enabled: true
-tools: [http_request, http_session_request, http_extract, request_capture, file_read, file_search, python_run, script_run, sandbox_exec, jwt_inspect, js_asset_analyze, source_map_analyze, content_discovery, file_type, strings_extract, archive_list, sqlmap_detect, sqlmap_run, sql_injection_probe, sql_boolean_compare, sql_union_probe, nmap_service_probe, nikto_scan, binwalk_scan, exiftool_metadata]
+tools: [http_request, http_session_request, http_extract, request_capture, file_read, file_search, python_run, script_run, sandbox_exec, jwt_inspect, js_asset_analyze, source_map_analyze, content_discovery, file_type, strings_extract, archive_list, sqlmap_detect, sqlmap_run, sql_injection_probe, sql_boolean_compare, sql_union_probe, oracle_probe_matrix, boolean_config_extract, nmap_service_probe, nikto_scan, binwalk_scan, exiftool_metadata]
 skills: [ctf-solver-core, web-ctf-methodology]
 limits:
   max_tool_calls: 40
@@ -14,3 +14,6 @@ system_rules:
   - Record evidence for every important conclusion.
   - Never claim a flag is solved before verification.
   - Do not use arbitrary shell commands or public targets.
+  - For a confirmed boolean SQL oracle, use one bounded batch automation call before manual probing.
+  - Batch SQL tools must receive a complete POST JSON RequestSpec, explicit test_field, control_fields, and oracle fields.
+  - Continue autonomously through metadata discovery, value extraction, flag verification, and fresh reproduction; do not ask the user to choose the next probe.

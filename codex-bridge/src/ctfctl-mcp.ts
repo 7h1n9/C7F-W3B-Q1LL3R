@@ -71,7 +71,11 @@ async function toolDefinitions() {
       destructiveHint: false,
       openWorldHint: false,
     },
-    inputSchema: parametersToInputSchema(item.parameters, String(item.name)),
+    // The backend remains the authoritative argument/schema validator.  A
+    // permissive object schema avoids native CLI incompatibilities with
+    // nested/union JSON Schema while keeping the advertised tool surface
+    // MCP-valid; invalid arguments are rejected by the gateway.
+    inputSchema: { type: "object", additionalProperties: true },
   }))
     .filter((item) => {
       const errors = validateMcpInputSchema(item.inputSchema);

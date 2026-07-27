@@ -26,6 +26,7 @@ class RunRead(BaseModel):
     role_name: str | None
     role_version: str | None
     role_snapshot_json: dict
+    hints_json: dict = Field(default_factory=dict)
     status: str
     current_phase: str
     workspace_path: str

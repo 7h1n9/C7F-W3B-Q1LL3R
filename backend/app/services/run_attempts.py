@@ -101,6 +101,7 @@ class RunAttemptService:
             started_at=now,
             heartbeat_at=now,
             status="RUNNING",
+            hints_json=dict(run.hints_json or {}),
             initial_agent_steps=run.run_total_agent_steps,
             initial_tool_calls=run.run_total_logical_tool_calls,
             initial_input_tokens=int(input_tokens or 0),

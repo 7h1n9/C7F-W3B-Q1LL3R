@@ -1,8 +1,8 @@
 """Persist generated-script provenance separately from execution artifacts."""
 
 import sqlalchemy as sa
-from alembic import op
 
+from alembic import op
 
 revision = "0020_script_provenance"
 down_revision = "0019_incremental_compaction_and_provenance"

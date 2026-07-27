@@ -1,6 +1,7 @@
 """Persist terminal-generation guards, logical calls, traces and tool tickets."""
 
 import sqlalchemy as sa
+
 from alembic import op
 
 revision = "0017_terminal_tool_tickets"
