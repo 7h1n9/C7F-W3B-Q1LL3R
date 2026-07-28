@@ -156,7 +156,8 @@ class JobService:
                         normalized["artifact_paths"] = sorted(set([*(normalized.get("artifact_paths") or []), normalized["result_json_path"]]))
                     except (OSError, ValueError, json.JSONDecodeError) as error:
                         normalized.update(status="FAILED", error_code="SCRIPT_RESULT_INVALID", retryable=False, stage="RESULT_VALIDATION", summary=f"Script result.json is invalid: {error}")
-            self._persist_standard_script_artifacts(job, normalized)
+            if job.request.tool == "script_run":
+                self._persist_standard_script_artifacts(job, normalized)
             job.result = self._persist_artifact(job, normalized)
             job.status = JobStatus(normalized["status"])
             job.error = normalized.get("error") or normalized.get("error_message")

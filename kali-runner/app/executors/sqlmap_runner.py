@@ -48,6 +48,12 @@ def _validate(request: JobRequest, path: Path) -> dict:
         raise HTTPException(422, detail="parameter is required")
     if action not in _ACTIONS:
         raise HTTPException(422, detail=f"action must be one of {sorted(_ACTIONS)}")
+    if action != "detect":
+        required = ("target_expression", "expression_type", "supporting_evidence_ids", "supporting_fact_ids", "source_hypothesis_id", "approved_analysis_review_id", "assumption_status")
+        if any(key not in args for key in required) or not args.get("supporting_evidence_ids") or not args.get("supporting_fact_ids") or args.get("assumption_status") not in {"VERIFIED", "HYPOTHESIS"}:
+            raise HTTPException(422, detail="SQL_EXPRESSION_PROVENANCE_REQUIRED: SQLMap extraction needs sourced expression provenance")
+        if "select value from config" in str(args.get("target_expression") or "").lower():
+            raise HTTPException(422, detail="SQL_EXPRESSION_PROVENANCE_REQUIRED: config.value requires verified schema promotion")
     host = _request_host(path)
     allowed = {str(item).lower() for item in request.allowed_hosts}
     if host and host not in allowed:

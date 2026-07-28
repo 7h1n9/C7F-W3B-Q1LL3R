@@ -113,6 +113,8 @@ class RunnerClient:
     async def create_job(
         self, run_id: str, allowed_hosts: list[str], tool: str, arguments: dict
     ) -> str:
+        if tool == "python_run" and arguments.get("network_mode") not in (None, "none"):
+            raise DomainError("PYTHON_RUN_NETWORK_FORBIDDEN", "python_run is an offline-only tool.", status_code=422)
         payload = {
             "run_id": run_id,
             "allowed_hosts": allowed_hosts,

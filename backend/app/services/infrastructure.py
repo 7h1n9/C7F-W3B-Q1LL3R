@@ -39,7 +39,8 @@ def record_failure(run, *, code: str, message: str, stage: str = "INFRASTRUCTURE
     }
     if streak >= 2 and str(run.status) not in {"COMPLETED_SOLVED", "CANCELLED"}:
         run.status = "WAITING_CONFIGURATION" if streak >= 3 else "INFRASTRUCTURE_VALIDATION"
-        run.current_phase = run.status
+        # Deployment/recovery/configuration is lifecycle state only.  Keep the
+        # solver phase so a resumed run continues from the same method stage.
         run.last_error_code = code
         run.last_error_message = message[:2000]
     return streak

@@ -208,6 +208,14 @@ class CodexMaterializer:
         if not tool_call_ref or not tool_name:
             return
         normalized_tool = str(tool_name)
+        # Controller-owned multi-agent calls already create the canonical
+        # ToolCall/LogicalToolCall/Artifact rows in the gateway.  Their
+        # lifecycle events are audit events only; materializing them again
+        # from payloads that do not carry the original arguments can mutate
+        # the argument digest and raise LOGICAL_TOOL_ID_COLLISION on every
+        # subsequent Run detail poll.
+        if str(payload.get("execution_layer") or "") == "multi_agent":
+            return
         if (
             normalized_tool in self._FORBIDDEN_DIRECT_TOOLS
             or payload.get("error_code") == "CODEX_DIRECT_TOOL_FORBIDDEN"
@@ -217,8 +225,40 @@ class CodexMaterializer:
             # prevents reports and learned-skill candidates from treating
             # forbidden host-side execution as a valid solving step.
             return
+        # ctfctl.* is an outer MCP/provider trace.  Once it carries the
+        # canonical logical id, the inner gateway event owns the sole ToolCall
+        # row and this event must not create a second one.
+        if normalized_tool.startswith("ctfctl.") and payload.get("logical_tool_call_id"):
+            logical = await effective_logical_tool_call_service.ensure(
+                session,
+                run,
+                logical_tool_call_id=str(payload["logical_tool_call_id"]),
+                tool_name=normalized_tool.removeprefix("ctfctl."),
+                arguments=self._tool_arguments(payload),
+                status=self._tool_status(event),
+                attempt_id=str(payload.get("attempt_id")) if payload.get("attempt_id") else None,
+                counts_toward_budget=False,
+                logical_kind="OUTER_TRACE",
+                provider_tool_name=normalized_tool,
+                effective_tool_name=normalized_tool.removeprefix("ctfctl."),
+                turn_id=str(payload.get("turn_id") or run.active_turn_id) if (payload.get("turn_id") or run.active_turn_id) else None,
+            )
+            await effective_logical_tool_call_service.trace(
+                session, logical, execution_layer="codex_mcp", event_type=event.event_type,
+                external_id=str(payload.get("tool_call_id") or ""), payload=payload,
+            )
+            return
         marker = f"codex:{tool_call_ref}"
         logical_id = str(payload.get("logical_tool_call_id") or marker)
+        derived_logical_id = False
+        if not payload.get("logical_tool_call_id") and payload.get("attempt_id") and (payload.get("turn_id") or run.active_turn_id):
+            derived_logical_id = True
+            logical_id = effective_logical_tool_call_service.build_mcp_id(
+                run.id,
+                str(payload["attempt_id"]),
+                str(payload.get("turn_id") or run.active_turn_id),
+                str(payload.get("provider_tool_call_id") or tool_call_ref),
+            )
         tool_call = await session.scalar(select(ToolCall).where(ToolCall.run_id == run.id, ToolCall.logical_tool_call_id == logical_id))
         if tool_call is None:
             tool_call = ToolCall(
@@ -254,7 +294,7 @@ class CodexMaterializer:
             status=tool_call.status,
             started_at=tool_call.started_at,
             attempt_id=str(payload.get("attempt_id")) if payload.get("attempt_id") else None,
-            deduplicate_by_arguments=not bool(payload.get("logical_tool_call_id")),
+            deduplicate_by_arguments=not bool(payload.get("logical_tool_call_id")) and not derived_logical_id,
             counts_toward_budget=not normalized_tool.startswith("ctfctl."),
             logical_kind="OUTER_TRACE" if normalized_tool.startswith("ctfctl.") else "TOOL",
             provider_tool_name=normalized_tool,

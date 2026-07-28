@@ -202,7 +202,7 @@ async function backend(method: string, params: Record<string, unknown>, logicalT
 async function dispatch(name: string, args: Record<string, unknown>, requestId?: string | number) {
   const shortName = name.replace(/^ctfctl\./, "");
   if (!advertisedTools.has(shortName) && !compatibilityTools.has(shortName)) throw new Error("Unknown or unavailable ctfctl tool");
-  const logicalToolCallId = `mcp:${masterScope.model_turn_id ?? "turn"}:${String(requestId ?? randomUUID())}`;
+  const logicalToolCallId = `mcp:${masterScope.run_id}:${masterScope.attempt_id}:${masterScope.model_turn_id ?? masterScope.turn_id ?? "turn"}:${String(requestId ?? randomUUID())}`;
   const normalized = { ...args };
   if (shortName === "workspace_search" && typeof normalized.query !== "string") {
     for (const alias of ["q", "pattern", "search", "text"]) {

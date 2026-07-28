@@ -29,6 +29,16 @@ DELETABLE_PREFIXES = frozenset(
     {"scratch", "payloads", "generated", "scripts/generated", "final/draft"}
 )
 SYNC_BACK_PREFIXES = frozenset({"outputs", "evidence", "responses", "final"})
+SEARCH_DIRECTORIES = frozenset({"attachments", "extracted", "notes", "evidence", "scripts"})
+
+
+def searchable_path(relative: str) -> bool:
+    """Return whether a path is eligible for default broad search."""
+    normalized = str(relative or "").replace("\\", "/")
+    first = normalized.split("/", 1)[0]
+    if first in SEARCH_DIRECTORIES:
+        return True
+    return normalized.startswith("final/draft/")
 
 
 def _relative(raw: str) -> str:

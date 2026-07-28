@@ -9,6 +9,7 @@ from fastapi import HTTPException
 from app.config import settings
 from app.models import JobRequest
 from app.executors.session_store import session_store
+from app.executors.target_allowlist import target_allowed
 
 
 class _HTMLSummary(HTMLParser):
@@ -136,7 +137,7 @@ async def _execute_http(request: JobRequest) -> dict:
     url = str(args.get("url", ""))
     def validate(candidate: str) -> None:
         parsed = urlparse(candidate)
-        if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.hostname.lower() not in request.allowed_hosts or parsed.hostname == "169.254.169.254":
+        if parsed.scheme not in {"http", "https"} or not target_allowed(candidate, request.allowed_hosts):
             raise HTTPException(403, detail="target host is not allowlisted")
     is_session = request.tool == "http_session_request"
     session_name = str(args.get("session_name") or "")

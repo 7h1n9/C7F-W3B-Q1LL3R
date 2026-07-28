@@ -17,11 +17,15 @@ def test_runner_rejects_request_without_token() -> None:
 
 
 @pytest.mark.asyncio
-async def test_metadata_target_is_rejected_even_if_listed() -> None:
+async def test_authorized_metadata_target_is_not_hardcoded_rejected(monkeypatch) -> None:
     request = JobRequest(run_id="r", allowed_hosts=["169.254.169.254"], tool="http_request", arguments={"url": "http://169.254.169.254/latest"})
-    with pytest.raises(Exception) as error:
-        await execute_http(request)
-    assert getattr(error.value, "status_code", None) == 403
+    async def fake_request(*args, **kwargs):
+        import httpx
+        raise httpx.ConnectError("lab target unavailable", request=httpx.Request("GET", request.arguments["url"]))
+    monkeypatch.setattr("httpx.AsyncClient.request", fake_request)
+    result = await execute_http(request)
+    assert result["status"] == "FAILED"
+    assert "403" not in str(result.get("error", ""))
 
 
 def test_runner_writes_relative_artifact(tmp_path: Path) -> None:

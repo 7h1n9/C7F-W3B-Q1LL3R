@@ -143,7 +143,7 @@ class CodexPreflightService:
             challenge = Challenge(name="Codex Preflight", target_url="http://preflight.invalid", allowed_hosts=["preflight.invalid"])
             session.add(challenge)
             await session.flush()
-            run = SolveRun(challenge_id=challenge.id, workspace_path=str(temp_root), status="EXECUTING", current_phase="EXECUTING", engine_type="codex_sdk")
+            run = SolveRun(challenge_id=challenge.id, workspace_path=str(temp_root), status="EXECUTING", current_phase="INTAKE", engine_type="codex_sdk")
             session.add(run)
             await session.flush()
             attempt = RunAttempt(run_id=run.id, attempt_number=1, engine_type="codex_sdk", status="RUNNING")

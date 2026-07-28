@@ -17,7 +17,8 @@ class VerifiedFlagStopController:
             return
         now = datetime.now(UTC)
         run.status = "COMPLETED_SOLVED"
-        run.current_phase = "COMPLETED_SOLVED"
+        if run.current_phase not in {"INTAKE", "BASELINE", "MAPPING", "HYPOTHESIS", "TESTING", "CHAINING", "FLAG_SEARCH", "FLAG_VERIFICATION", "REPORTING"}:
+            run.current_phase = "REPORTING"
         run.finished_at = run.finished_at or now
         run.terminal_generation = int(run.terminal_generation or 0) + 1
         run.terminal_event_sequence = terminal_event_sequence or run.terminal_event_sequence

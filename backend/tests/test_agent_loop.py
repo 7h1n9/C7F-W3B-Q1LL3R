@@ -133,7 +133,7 @@ async def test_openai_loop_verifies_flag_and_generates_report(monkeypatch: pytes
     async with sessions() as session:
         challenge = Challenge(name="loop", description="test", target_url="http://test.local", allowed_hosts=["test.local"], flag_pattern=r"flag\{[^}]+\}")
         session.add(challenge); await session.flush()
-        run = SolveRun(challenge_id=challenge.id, engine_type="openai_compatible", workspace_path=str(workspace))
+        run = SolveRun(challenge_id=challenge.id, engine_type="openai_compatible", solver_mode="single_agent", workspace_path=str(workspace))
         session.add(run); await session.commit()
         session.add(
             SolverState(
@@ -175,7 +175,7 @@ async def test_openai_compatible_tool_to_artifact_flag_e2e(monkeypatch: pytest.M
     async with sessions() as session:
         challenge = Challenge(name="e2e", description="test", target_url="http://challenge.local", allowed_hosts=["challenge.local"], flag_pattern=r"flag\{[^}]+\}")
         session.add(challenge); await session.flush()
-        run = SolveRun(challenge_id=challenge.id, engine_type="openai_compatible", workspace_path=str(workspace), max_agent_steps=3)
+        run = SolveRun(challenge_id=challenge.id, engine_type="openai_compatible", solver_mode="single_agent", workspace_path=str(workspace), max_agent_steps=3)
         session.add(run); await session.commit()
         session.add(
             SolverState(

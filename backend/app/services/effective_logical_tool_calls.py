@@ -16,9 +16,17 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
 from app.models.run import LogicalToolCall, RunExecutionLease, SolveRun, ToolExecutionTrace
+from app.core.exceptions import DomainError
 
 
 class EffectiveLogicalToolCallService:
+    @staticmethod
+    def build_mcp_id(run_id: str, attempt_id: str, turn_id: str, provider_tool_call_id: str) -> str:
+        parts = (str(run_id), str(attempt_id), str(turn_id), str(provider_tool_call_id))
+        if any(not item or ":" in item for item in parts):
+            raise DomainError("LOGICAL_TOOL_ID_INVALID", "MCP logical tool identity components are invalid.", {"parts": parts}, 422)
+        return "mcp:" + ":".join(parts)
+
     @staticmethod
     def canonical_id(run_id: str, logical_tool_call_id: str) -> str:
         return str(uuid5(NAMESPACE_URL, f"ctf-agent:logical:{run_id}:{logical_tool_call_id}"))
@@ -114,6 +122,18 @@ class EffectiveLogicalToolCallService:
                 if logical is None:
                     raise
         else:
+            incoming_digest = self.arguments_digest(arguments) if arguments is not None else logical.arguments_digest
+            if (
+                logical.tool_name != tool_name
+                or logical.arguments_digest != incoming_digest
+                or (provider_tool_name and logical.provider_tool_name not in {None, provider_tool_name})
+            ):
+                raise DomainError(
+                    "LOGICAL_TOOL_ID_COLLISION",
+                    "A logical tool identity was reused with different execution data.",
+                    {"logical_tool_call_id": external_id, "existing_tool": logical.tool_name, "incoming_tool": tool_name, "existing_arguments_digest": logical.arguments_digest, "incoming_arguments_digest": incoming_digest},
+                    409,
+                )
             logical.tool_name = tool_name
             logical.status = status
             if started_at and logical.started_at is None:

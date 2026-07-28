@@ -18,6 +18,7 @@ from app.models import JobRequest
 from app.service import job_service
 from app.workspace.paths import DOWNLOAD_DIRS, UPLOAD_DIRS, initialize_workspace, safe_child, workspace_for
 from app.executors.session_store import session_store
+from app.executors.target_allowlist import enforced_proxy_available
 
 
 @asynccontextmanager
@@ -60,7 +61,7 @@ async def capability_registry() -> dict:
         "http_request", "http_session_request", "http_extract", "whatweb_fingerprint", "js_asset_analyze", "source_map_analyze",
         "file_type", "strings_extract", "archive_list", "content_discovery", "jwt_inspect", "session_inspect", "session_list_secret_refs", "jwt_clone_claims", "jwt_sign", "http_session_set_cookie_ref", "file_read",
         "file_search", "python_run", "script_run", "sandbox_exec", "pcap_metadata", "pcap_protocols", "pcap_query", "pcap_tcp_stream",
-        "pcap_http_objects", "pcap_dns_summary", "pcap_credentials", "request_capture", "sqlmap_detect", "sqlmap_run", "sql_injection_probe", "sql_boolean_compare", "sql_union_probe", "oracle_probe_matrix", "boolean_config_extract",
+        "pcap_http_objects", "pcap_dns_summary", "pcap_credentials", "request_capture", "sqlmap_detect", "sqlmap_run", "sql_injection_probe", "sql_boolean_compare", "sql_union_probe", "oracle_probe_matrix", "boolean_config_extract", "sqlite_metadata_discovery",
         "nikto_scan", "binwalk_scan", "exiftool_metadata",
     ]
     placeholder_tools = {"pcap_tcp_stream", "pcap_http_objects", "pcap_dns_summary", "pcap_credentials", "nmap_service_probe", "nikto_scan", "binwalk_scan", "exiftool_metadata"}
@@ -81,12 +82,30 @@ async def capability_registry() -> dict:
         ok, version = await self_test(command_map.get(name))
         implemented = name not in placeholder_tools
         installed = ok if name in command_map else True
-        tool_rows.append({"name": name, "implemented": implemented, "installed": installed, "enabled": implemented and installed, "available": implemented and installed, "version": version or ("policy-wrapper" if implemented else None), "self_test_ok": ok and implemented, "last_self_check": None})
+        row = {"name": name, "implemented": implemented, "installed": installed, "enabled": implemented and installed, "available": implemented and installed, "version": version or ("policy-wrapper" if implemented else None), "self_test_ok": ok and implemented, "last_self_check": None}
+        if name == "script_run":
+            enforced = bool(os.environ.get("RUNNER_ENFORCED_PROXY_URL")) or enforced_proxy_available()
+            row.update({"supported_network_modes": ["none", "target_allowlist"], "target_allowlist_enforced": enforced})
+        elif name == "python_run":
+            row.update({"supported_network_modes": ["none"], "target_allowlist_enforced": False})
+        tool_rows.append(row)
     return {
         "tools": tool_rows,
         "binaries": {name: bool(shutil.which(name)) for name in ("tshark", "capinfos", "ffuf", "feroxbuster", "sqlmap", "nmap", "nikto", "binwalk", "exiftool")},
         "interpreters": {name: bool(shutil.which(name)) for name in ("python", "node", "bash")},
-        "network_enforcement": {"mode": "controlled_proxy" if os.environ.get("RUNNER_ENFORCED_PROXY_URL") else "none", "available": bool(os.environ.get("RUNNER_ENFORCED_PROXY_URL")), "enforced": bool(os.environ.get("RUNNER_ENFORCED_PROXY_URL")), "os_level": False, "target_allowlist": bool(os.environ.get("RUNNER_ENFORCED_PROXY_URL")), "reason": "Controlled proxy is configured." if os.environ.get("RUNNER_ENFORCED_PROXY_URL") else "No namespace/nftables/iptables/proxy enforcement is available on this host."},
+        "network_enforcement": {
+            "mode": "controlled_proxy" if (os.environ.get("RUNNER_ENFORCED_PROXY_URL") or enforced_proxy_available()) else "none",
+            "available": bool(os.environ.get("RUNNER_ENFORCED_PROXY_URL")) or enforced_proxy_available(),
+            "enforced": bool(os.environ.get("RUNNER_ENFORCED_PROXY_URL")) or enforced_proxy_available(),
+            "target_allowlist": bool(os.environ.get("RUNNER_ENFORCED_PROXY_URL")) or enforced_proxy_available(),
+            "target_allowlist_enforced": bool(os.environ.get("RUNNER_ENFORCED_PROXY_URL")) or enforced_proxy_available(),
+            "supports_hostname": bool(os.environ.get("RUNNER_ENFORCED_PROXY_URL")) or enforced_proxy_available(),
+            "supports_ipv4": bool(os.environ.get("RUNNER_ENFORCED_PROXY_URL")) or enforced_proxy_available(),
+            "supports_ipv6": False,
+            "supports_ports": bool(os.environ.get("RUNNER_ENFORCED_PROXY_URL")) or enforced_proxy_available(),
+            "supports_redirect_validation": bool(os.environ.get("RUNNER_ENFORCED_PROXY_URL")) or enforced_proxy_available(),
+            "reason": "Controlled proxy is configured." if (os.environ.get("RUNNER_ENFORCED_PROXY_URL") or enforced_proxy_available()) else "No target allowlist enforcement is available on this host.",
+        },
     }
 
 

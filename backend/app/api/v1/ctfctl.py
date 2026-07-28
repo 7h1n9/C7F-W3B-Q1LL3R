@@ -29,6 +29,7 @@ from app.services.workspace_policy import (
     READABLE_ROOT_FILES,
     WorkspacePolicy,
     file_manifest,
+    searchable_path,
 )
 from app.services.workspace_sync import workspace_sync_service
 from app.services.solver_state import solver_state_service
@@ -153,7 +154,11 @@ async def _workspace_logical_call(session: AsyncSession, run: SolveRun, payload:
                 raise DomainError("FILE_NOT_FOUND", "Requested workspace path does not exist.", {"path": normalized, "counts_toward_budget": False}, 404)
         turn_id = run.active_turn_id or payload.scope.turn_id or payload.scope.model_turn_id
         turn_started_at = await session.scalar(select(AgentTurn.turn_started_at).where(AgentTurn.id == turn_id, AgentTurn.run_id == run.id)) if turn_id else None
-        logical_id = payload.scope.logical_tool_call_id or f"workspace:{turn_id or 'legacy'}:{tool_name}:{uuid.uuid4()}"
+        logical_id = payload.scope.logical_tool_call_id
+        if not logical_id:
+            logical_id = effective_logical_tool_call_service.build_mcp_id(
+                run.id, payload.scope.attempt_id, str(turn_id or "turn"), str(uuid.uuid4())
+            )
         await run_budget_guard.enforce(session, run, attempt_id=payload.scope.attempt_id, turn_id=turn_id, required_action=bool(payload.required_action), required_action_kind=payload.required_action_kind or tool_name)
         logical = await effective_logical_tool_call_service.ensure(
             session, run, logical_tool_call_id=logical_id, tool_name=tool_name, arguments={}, status="COMPLETED",
@@ -347,7 +352,7 @@ async def workspace_search(payload: SearchRequest, x_ctfctl_access_key: str | No
         # explicit artifact paths. Excluding them from broad searches keeps a
         # Codex context bounded and prevents repeated flag-pattern matches from
         # causing compaction churn during unattended runs.
-        if item["relative_path"].split("/", 1)[0] in {"responses", "outputs"}:
+        if not searchable_path(item["relative_path"]):
             continue
         if len(matches) >= payload.max_results:
             break

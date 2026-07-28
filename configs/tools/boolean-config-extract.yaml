@@ -28,5 +28,17 @@ parameters:
   control_fields: {type: object, required: false, additionalProperties: true}
   max_requests: {type: integer, required: false}
   max_length: {type: integer, required: false}
+  expression_type: {type: string, required: true}
+  supporting_evidence_ids:
+    type: array
+    required: true
+    items: {type: string}
+  supporting_fact_ids:
+    type: array
+    required: true
+    items: {type: string}
+  source_hypothesis_id: {type: string, required: true}
+  approved_analysis_review_id: {type: string, required: true}
+  assumption_status: {type: string, required: true}
 limits: {max_requests: 1024, timeout_seconds: 30, concurrency: 2}
 permissions: {target_allowlist_required: true}

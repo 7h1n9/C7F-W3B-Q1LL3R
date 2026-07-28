@@ -7,3 +7,5 @@ enabled: true
 parameters: {path: {type: string, required: true}, args: {type: array, items: {type: string}, required: false}}
 limits: {timeout_seconds: 30, max_output_bytes: 1048576}
 permissions: {workspace_only: true, shell_forbidden: true}
+supported_network_modes: [none]
+target_allowlist_enforced: false

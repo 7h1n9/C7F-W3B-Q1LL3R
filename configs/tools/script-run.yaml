@@ -12,5 +12,14 @@ parameters:
   timeout_seconds: {type: integer, required: false}
   design_card: {type: object, required: false}
   assumption_provenance: {type: array, items: {type: string}, required: false}
+  target_expression: {type: string, required: false}
+  expression_type: {type: string, required: false}
+  supporting_evidence_ids: {type: array, items: {type: string}, required: false}
+  supporting_fact_ids: {type: array, items: {type: string}, required: false}
+  source_hypothesis_id: {type: string, required: false}
+  approved_analysis_review_id: {type: string, required: false}
+  assumption_status: {type: string, required: false}
 limits: {timeout_seconds: 60, max_output_bytes: 1048576}
 permissions: {workspace_only: true, shell_forbidden: true, target_network_allowlist: true}
+supported_network_modes: [none, target_allowlist]
+target_allowlist_enforced: true

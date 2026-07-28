@@ -329,7 +329,7 @@ async def test_manual_flag_review_controls_finish_gate(tmp_path: Path) -> None:
         assert reviewed.review_state == "VALID"
         assert challenge.status == "SOLVED"
         assert run.status == "COMPLETED_SOLVED"
-        assert run.current_phase == "COMPLETED_SOLVED"
+        assert run.current_phase == "REPORTING"
     await engine.dispose()
 
 
@@ -372,7 +372,7 @@ async def test_valid_flag_reconciles_failed_run_to_solved(tmp_path: Path) -> Non
         changed = await flag_service.reconcile_run_status(session, run)
         assert changed is True
         assert run.status == "COMPLETED_SOLVED"
-        assert run.current_phase == "COMPLETED_SOLVED"
+        assert run.current_phase == "REPORTING"
         assert challenge.status == "SOLVED"
     await engine.dispose()
 

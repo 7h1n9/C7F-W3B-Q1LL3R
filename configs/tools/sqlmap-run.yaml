@@ -8,15 +8,22 @@ parameters:
   request_file: {type: string, required: true}
   parameter: {type: string, required: true}
   action: {type: string, required: true, enum: [detect, dbs, tables, columns, dump_target, search_column]}
-  techniques: {type: array, required: false}
+  techniques: {type: array, items: {type: string}, required: false}
   database: {type: string, required: false}
   table: {type: string, required: false}
-  columns: {type: array, required: false}
+  columns: {type: array, items: {type: string}, required: false}
   search_term: {type: string, required: false}
   level: {type: integer, required: false}
   risk: {type: integer, required: false}
   threads: {type: integer, required: false}
   timeout_seconds: {type: integer, required: false}
   dbms: {type: string, required: false}
+  target_expression: {type: string, required: false}
+  expression_type: {type: string, required: false}
+  supporting_evidence_ids: {type: array, items: {type: string}, required: false}
+  supporting_fact_ids: {type: array, items: {type: string}, required: false}
+  source_hypothesis_id: {type: string, required: false}
+  approved_analysis_review_id: {type: string, required: false}
+  assumption_status: {type: string, required: false}
 limits: {level: 3, risk: 2, threads: 3, timeout_seconds: 600}
 permissions: {target_allowlist_required: true, dump_forbidden: true, os_shell_forbidden: true, file_write_forbidden: true}

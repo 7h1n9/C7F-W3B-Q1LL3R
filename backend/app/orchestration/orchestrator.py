@@ -40,7 +40,7 @@ from app.models.run import (
     ToolCall,
 )
 from app.models.skill import RunSkillSnapshot, Skill
-from app.orchestration.state_machine import TERMINAL, RunStatus, transition
+from app.orchestration.state_machine import SOLVER_PHASES, TERMINAL, RunStatus, transition
 from app.schemas.agent import (
     ActionHypothesis,
     AutomationAction,
@@ -72,6 +72,7 @@ from app.services.script_controller import script_fallback_controller
 from app.services.solver_state import solver_state_service
 from app.services.tool_manifest import refresh_runtime_tool_manifest
 from app.services.tool_permissions import effective_tools_for
+from app.orchestration.multi_agent_orchestrator import multi_agent_orchestrator
 from app.services.run_budget_guard import run_budget_guard
 from app.tools.gateway import tool_gateway
 from app.tools.registry import load_tool_definitions
@@ -145,7 +146,7 @@ class SolveOrchestrator:
         run.current_phase = phase
         await session.commit()
         await solver_state_service.sync_from_run(session, run)
-        await event_service.append(session, run.id, "phase.corrected", {"previous_phase": previous, "phase": phase, "source": "model_action"})
+        await event_service.append(session, run.id, "run.phase_changed", {"previous_phase": previous, "phase": phase, "source": "model_action"})
 
     async def _skill_decision_required(self, session, run: SolveRun) -> bool:
         state = await solver_state_service.load(session, run.id)
@@ -203,10 +204,14 @@ class SolveOrchestrator:
     async def _transition(self, session, run: SolveRun, target: RunStatus) -> None:
         if RunStatus(run.status) == target:
             return
+        previous_phase = str(run.current_phase or "")
         transition(run, target)
         await session.commit()
         await solver_state_service.sync_from_run(session, run)
         await event_service.append(session, run.id, "run.status_changed", {"status": run.status})
+        current_phase = str(run.current_phase or "")
+        if previous_phase != current_phase and previous_phase in SOLVER_PHASES and current_phase in SOLVER_PHASES:
+            await event_service.append(session, run.id, "run.phase_changed", {"previous_phase": previous_phase, "phase": current_phase})
 
     async def _consume_queued_inputs(self, session, run: SolveRun, attempt=None) -> str | None:
         queued = list((await session.scalars(select(RunUserInput).where(RunUserInput.run_id == run.id, RunUserInput.status == "QUEUED").order_by(RunUserInput.revision))).all())
@@ -700,7 +705,9 @@ class SolveOrchestrator:
                         return
                 engine = await self.build_engine(run, session, attempt, lease)
                 self.active_engines[run_id] = engine
-                if run.engine_type == "openai_compatible":
+                if run.solver_mode == "multi_agent_v1":
+                    await multi_agent_orchestrator.run(session, run, await session.get(Challenge, run.challenge_id), attempt, lease)
+                elif run.engine_type == "openai_compatible":
                     await self._run_openai(session, run, engine, user_message, attempt, lease)
                 else:
                     await self._run_event_engine(session, run, engine, user_message, attempt, lease)
@@ -1914,14 +1921,16 @@ class SolveOrchestrator:
                 )
                 no_progress_turns = 0
                 if zero_evidence_turns >= 3:
-                    run.last_error_code = "CODEX_RUNTIME_DIAGNOSTIC"
+                    # A live provider that repeatedly emits no actionable
+                    # work is a method stall, not missing configuration.
+                    run.last_error_code = "METHOD_STALLED"
                     run.last_error_message = "Codex produced no ToolCall, Artifact, or Observation after repeated replans."
-                    await self._transition(session, run, RunStatus.WAITING_CONFIGURATION)
+                    await self._transition(session, run, RunStatus.PAUSED_CHECKPOINT)
                     await event_service.append(
                         session,
                         run.id,
-                        "run.configuration_blocked",
-                        {"code": "CODEX_RUNTIME_DIAGNOSTIC", "required_action": "Run Codex preflight and continue."},
+                        "run.recovery_checkpoint",
+                        {"code": "METHOD_STALLED", "required_action": "REPLAN_WITH_NEW_EVIDENCE", "diagnostic": "CODEX_RUNTIME_DIAGNOSTIC"},
                     )
                     return
             else:
@@ -1976,11 +1985,11 @@ class SolveOrchestrator:
                 if challenge and attempt_row and lease_row:
                     await script_fallback_controller.run(session, run, challenge, attempt_row, lease_row)
             if no_progress_turns >= 3:
-                run.last_error_code = "METHOD_ACTION_REQUIRED"
+                run.last_error_code = "METHOD_STALLED"
                 run.last_error_message = "Codex produced three turns without durable ToolCall, Artifact, Observation, or ScriptRecord progress."
                 await self._transition(session, run, RunStatus.PAUSED_CHECKPOINT)
                 await session.commit()
-                await event_service.append(session, run.id, "run.recovery_checkpoint", {"code": "METHOD_ACTION_REQUIRED", "required_action": "BOUNDED_SCRIPT_EXTRACTION"})
+                await event_service.append(session, run.id, "run.recovery_checkpoint", {"code": "METHOD_STALLED", "required_action": "BOUNDED_SCRIPT_EXTRACTION"})
                 return
             if no_progress_turns >= 8:
                 await event_service.append(

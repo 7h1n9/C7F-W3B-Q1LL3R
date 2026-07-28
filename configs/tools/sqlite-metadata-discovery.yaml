@@ -1,0 +1,20 @@
+name: sqlite_metadata_discovery
+display_name: SQLite Metadata Discovery
+category: web
+description: Bounded staged discovery of SQLite user tables and columns.
+risk_level: high
+enabled: true
+parameters:
+  request: {type: object, required: true}
+  test_field: {type: string, required: true}
+  baseline_value: {type: string, required: false}
+  target_expression: {type: string, required: true}
+  expression_type: {type: string, required: true}
+  supporting_evidence_ids: {type: array, items: {type: string}, required: true}
+  supporting_fact_ids: {type: array, items: {type: string}, required: true}
+  source_hypothesis_id: {type: string, required: true}
+  approved_analysis_review_id: {type: string, required: true}
+  assumption_status: {type: string, required: true}
+  max_requests: {type: integer, required: false}
+  resume: {type: boolean, required: false}
+permissions: {target_allowlist_required: true}

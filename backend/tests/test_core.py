@@ -65,5 +65,5 @@ def test_state_machine_restarts_failed_run_without_erasing_state() -> None:
     previous = restart(run)
     assert previous == RunStatus.FAILED_ENGINE
     assert run.status == "WAITING_USER"
-    assert run.current_phase == "WAITING_USER"
+    assert run.current_phase == "INTAKE"
     assert run.finished_at is None

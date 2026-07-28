@@ -29,7 +29,12 @@ def ensure_aware(value: datetime | None) -> datetime | None:
 
 
 class RunAttemptService:
-    lease_ttl_seconds = 90
+    # A bounded Runner job may legitimately take longer than the old 90s
+    # lease (three sequential HTTP stages plus artifact persistence).  The
+    # heartbeat still renews this lease every 15s, while the larger window
+    # prevents a transient scheduler delay from turning a healthy Run into
+    # STALE_MODEL_TURN during Verify.
+    lease_ttl_seconds = 300
     owner_instance_id = f"{socket.gethostname()}:{os.getpid()}"
 
     async def reclaim_expired_lease(self, session: AsyncSession, run_id: str) -> None:
@@ -87,6 +92,12 @@ class RunAttemptService:
             select(RunAttempt).where(RunAttempt.run_id == run.id).order_by(RunAttempt.attempt_number.desc())
         )
         now = utc_now()
+        # A Run can be resumed from PAUSED_DEPLOYMENT after the manifest
+        # preflight.  That path deliberately keeps the solver phase, so it
+        # may never pass through PREPARING; record the lifecycle start at the
+        # attempt boundary instead of leaving started_at NULL.
+        if run.started_at is None:
+            run.started_at = now
         input_tokens = await session.scalar(
             select(func.coalesce(func.sum(AgentTurn.input_tokens), 0)).where(AgentTurn.run_id == run.id)
         )
@@ -218,8 +229,8 @@ class RunAttemptService:
                             aborted_attempts += 1
                         if run and stale_owner and not expired and RunStatus(run.status) not in TERMINAL:
                             run.status = RunStatus.PAUSED_DEPLOYMENT.value
-                            if str(run.current_phase or "") not in {"INTAKE", "BASELINE", "MAPPING", "HYPOTHESIS", "TESTING", "CHAINING", "FLAG_SEARCH", "FLAG_VERIFICATION", "REPORTING", "COMPLETED_SOLVED"}:
-                                run.current_phase = RunStatus.PAUSED_DEPLOYMENT.value
+                            # Keep the last solver phase; PAUSED_DEPLOYMENT is
+                            # represented exclusively by Run.status.
                             await event_service.append(session, run.id, "run.paused_deployment", {"code": "PAUSED_DEPLOYMENT"})
                 # Tickets reference the lease by foreign key.  Reconcile
                 # stale leases in dependency order so one orphaned ticket

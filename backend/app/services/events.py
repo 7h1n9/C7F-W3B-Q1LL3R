@@ -24,13 +24,14 @@ class EventService:
         async with lock:
             body = payload or {}
             encoded_body = json.dumps(body, ensure_ascii=False, sort_keys=True, default=str).encode()
-            # Lifecycle events are intentionally separate from internal phase
-            # transitions.  This keeps status history useful and prevents a
-            # PLANNING/EXECUTING loop from looking like a Run restart.
-            if event_type == "run.status_changed" and str(body.get("status", "")) in {
-                "PLANNING", "EXECUTING", "EVALUATING"
-            }:
-                event_type = "run.phase_changed"
+            # Status and solver phase are different state machines.  Never
+            # infer a phase event from a lifecycle status event.
+            if event_type == "run.phase_changed":
+                previous = str(body.get("previous_phase") or "")
+                current = str(body.get("phase") or body.get("current_phase") or "")
+                if not previous or previous == current:
+                    event_type = "run.status_changed"
+                    body = {**body, "phase_event_suppressed": True}
 
             # ``solve_runs.event_sequence`` is a legacy compatibility field;
             # it is no longer updated for every event.  Ordering is owned by

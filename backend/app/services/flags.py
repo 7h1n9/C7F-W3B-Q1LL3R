@@ -66,7 +66,8 @@ class FlagService:
         if run.status == RunStatus.COMPLETED_SOLVED:
             return False
         run.status = RunStatus.COMPLETED_SOLVED.value
-        run.current_phase = RunStatus.COMPLETED_SOLVED.value
+        if run.current_phase not in {"INTAKE", "BASELINE", "MAPPING", "HYPOTHESIS", "TESTING", "CHAINING", "FLAG_SEARCH", "FLAG_VERIFICATION", "REPORTING"}:
+            run.current_phase = "REPORTING"
         await self._mark_challenge_solved(session, run)
         return True
 

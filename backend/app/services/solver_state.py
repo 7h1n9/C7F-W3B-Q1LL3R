@@ -4,7 +4,7 @@ from datetime import UTC, datetime
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.run import FlagCandidate, Hypothesis, SolveRun
+from app.models.run import FlagCandidate, Hypothesis, Observation, SolveRun
 from app.models.skill import RunSkillSnapshot, Skill
 from app.models.solver_state import SolverState
 from app.services.attack_chain import build_attack_chain, reduce_capability
@@ -67,14 +67,13 @@ class SolverStateService:
         verified = await session.scalar(select(FlagCandidate.id).where(FlagCandidate.run_id == run.id, FlagCandidate.verified, FlagCandidate.review_state == "VALID"))
         if verified and run.status != "COMPLETED_SOLVED":
             run.status = "COMPLETED_SOLVED"
-            run.current_phase = "COMPLETED_SOLVED"
+            if run.current_phase not in {"INTAKE", "BASELINE", "MAPPING", "HYPOTHESIS", "TESTING", "CHAINING", "FLAG_SEARCH", "FLAG_VERIFICATION", "REPORTING"}:
+                run.current_phase = "REPORTING"
             run.thread_invalidated = True
         state = await self.load(session, run.id)
         if not state:
             return None
         state.current_phase = run.current_phase
-        if run.status == "COMPLETED_SOLVED":
-            state.current_phase = "COMPLETED_SOLVED"
         await session.commit()
         return state
 
@@ -84,9 +83,10 @@ class SolverStateService:
         if not state:
             return None
         selected = None
+        allowed_sources = {"sql_boolean_compare", "oracle_probe_matrix", "http_true_false", "controlled_http_oracle", "analysis_review", "script_run"}
         for fact in state.confirmed_facts_json or []:
             arguments = fact.get("facts", {}).get("arguments", {}) if isinstance(fact, dict) else {}
-            if fact.get("source") == "sql_boolean_compare" and isinstance(arguments, dict):
+            if fact.get("source") in allowed_sources and isinstance(arguments, dict):
                 if isinstance(arguments.get("request"), dict) and isinstance(arguments.get("oracle"), dict):
                     selected = (fact, arguments)
         if selected is None:
@@ -94,12 +94,15 @@ class SolverStateService:
         fact, arguments = selected
         request = dict(arguments.get("request") or {})
         oracle = dict(arguments.get("oracle") or {})
-        evidence_ref = fact.get("facts", {}).get("artifact_path")
+        fact_payload = fact.get("facts", {}) if isinstance(fact, dict) else {}
+        evidence_ref = fact_payload.get("artifact_path")
+        evidence_ids = list(fact_payload.get("evidence_ids") or fact.get("evidence_ids") or [])
+        fact_ids = list(fact_payload.get("fact_ids") or fact.get("fact_ids") or [])
         capabilities = {
-            "target_reachable": {"confirmed": True, "source": evidence_ref},
-            "warranty_endpoint_identified": {"confirmed": True, "source": evidence_ref},
-            "department_boolean_sqli_confirmed": {"confirmed": True, "source": evidence_ref},
-            "matched_boolean_oracle_confirmed": {"confirmed": True, "source": evidence_ref},
+            "target_reachable": {"confirmed": True, "source": evidence_ref, "evidence_ids": evidence_ids, "fact_ids": fact_ids},
+            "warranty_endpoint_identified": {"confirmed": True, "source": evidence_ref, "evidence_ids": evidence_ids, "fact_ids": fact_ids},
+            "department_boolean_sqli_confirmed": {"confirmed": True, "source": evidence_ref, "evidence_ids": evidence_ids, "fact_ids": fact_ids},
+            "matched_boolean_oracle_confirmed": {"confirmed": True, "source": evidence_ref, "evidence_ids": evidence_ids, "fact_ids": fact_ids},
         }
         state.capability_ledger_json = {**(state.capability_ledger_json or {}), **capabilities}
         state.current_phase = "FLAG_SEARCH"
@@ -121,7 +124,7 @@ class SolverStateService:
             "oracle": oracle,
             "baseline_value": arguments.get("baseline_value"),
             "do_not_repeat": ["recon", "connectivity_probe", "sql_boolean_compare", "workspace_read:notes/oracle-confirmation.md"],
-            "next_required_action": {"type": "BOUNDED_EXTRACTION", "preferred_tools": ["boolean_config_extract", "script_run"]},
+            "next_required_action": {"type": "SQLITE_METADATA_DISCOVERY_OR_BOUNDED_EXTRACTION", "preferred_tools": ["sqlite_metadata_discovery", "boolean_config_extract", "script_run"]},
             "success_condition": "verified_flag_candidate",
         }
         run.recovery_checkpoint_json = checkpoint
@@ -129,11 +132,43 @@ class SolverStateService:
         await session.commit()
         return checkpoint
 
+    async def confirm_boolean_oracle(
+        self,
+        session: AsyncSession,
+        run: SolveRun,
+        *,
+        request_spec: dict,
+        test_field: str,
+        control_fields: dict,
+        oracle: dict,
+        evidence_ids: list[str],
+        fact_ids: list[str] | None = None,
+        true_stable: bool = True,
+        false_stable: bool = True,
+        differential: bool = True,
+    ) -> dict:
+        """Promote an oracle only after independent stable TRUE/FALSE evidence."""
+        if not request_spec or not test_field or not oracle or not evidence_ids or not true_stable or not false_stable or not differential:
+            raise ValueError("BOOLEAN_ORACLE_CONFIRMATION_INCOMPLETE")
+        state = await self.load(session, run.id)
+        if not state:
+            raise ValueError("SOLVER_STATE_MISSING")
+        evidence = list((await session.scalars(select(Observation).where(Observation.run_id == run.id))).all())
+        if not evidence:
+            raise ValueError("BOOLEAN_ORACLE_EVIDENCE_MISSING")
+        payload = {"confirmed": True, "evidence_ids": list(evidence_ids), "fact_ids": list(fact_ids or []), "request_spec": dict(request_spec), "test_field": test_field, "control_fields": dict(control_fields), "oracle": dict(oracle)}
+        state.capability_ledger_json = {**(state.capability_ledger_json or {}), "boolean_oracle_confirmed": payload, "matched_boolean_oracle_confirmed": payload}
+        run.recovery_checkpoint_json = {"checkpoint_type": "CONFIRMED_BOOLEAN_ORACLE", "current_phase": "FLAG_SEARCH", "do_not_repeat": ["baseline", "connectivity_probe", "same_boolean_compare"], "next_required_action": {"type": "SQLITE_METADATA_DISCOVERY_OR_BOUNDED_EXTRACTION"}, **payload}
+        run.current_phase = "FLAG_SEARCH"
+        state.current_phase = "FLAG_SEARCH"
+        await session.commit()
+        return run.recovery_checkpoint_json
+
     async def check_consistency(self, session: AsyncSession, run: SolveRun) -> dict:
         state = await self.load(session, run.id)
         if not state:
             return {"ok": False, "code": "STATE_INVARIANT_VIOLATION", "fields": ["SolverState"]}
-        expected = "COMPLETED_SOLVED" if run.status == "COMPLETED_SOLVED" else run.current_phase
+        expected = run.current_phase
         fields = []
         if state.current_phase != expected:
             fields.append("SolverState.current_phase")

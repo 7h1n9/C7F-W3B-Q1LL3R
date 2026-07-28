@@ -219,12 +219,11 @@ class RunBudgetGuard:
         # generation and closes only the active Attempt; no replacement
         # Attempt is created implicitly.
         locked_run.status = "PAUSED_BUDGET"
-        locked_run.current_phase = "PAUSED_BUDGET"
+        # PAUSED_BUDGET is a Run status, not a solver phase.
         locked_run.last_error_code = "PAUSED_BUDGET"
         locked_run.last_error_message = decision.reason
         locked_run.thread_invalidated = True
         run.status = locked_run.status
-        run.current_phase = locked_run.current_phase
         run.last_error_code = locked_run.last_error_code
         run.last_error_message = locked_run.last_error_message
         run.thread_invalidated = True

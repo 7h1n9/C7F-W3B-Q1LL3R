@@ -14,6 +14,22 @@ from fastapi import HTTPException
 from app.executors.http_executor import execute_http
 from app.models import JobRequest
 from app.workspace.paths import workspace_for
+from app.executors.target_allowlist import target_allowed
+
+
+def _require_provenance(args: dict[str, Any]) -> dict[str, Any]:
+    required = ("target_expression", "expression_type", "supporting_evidence_ids", "supporting_fact_ids", "source_hypothesis_id", "approved_analysis_review_id", "assumption_status")
+    missing = [key for key in required if key not in args]
+    if missing:
+        raise HTTPException(422, detail="SQL_EXPRESSION_PROVENANCE_REQUIRED: missing=" + ",".join(missing))
+    if args.get("expression_type") not in {"METADATA_DISCOVERY", "VALUE_EXTRACTION", "FLAG_SEARCH"} or args.get("assumption_status") not in {"VERIFIED", "HYPOTHESIS"}:
+        raise HTTPException(422, detail="SQL_EXPRESSION_PROVENANCE_REQUIRED: invalid provenance")
+    if not str(args.get("target_expression") or "").strip() or not isinstance(args.get("supporting_evidence_ids"), list) or not args.get("supporting_evidence_ids") or not isinstance(args.get("supporting_fact_ids"), list) or not args.get("supporting_fact_ids") or not str(args.get("source_hypothesis_id") or "").strip() or not str(args.get("approved_analysis_review_id") or "").strip():
+        raise HTTPException(422, detail="SQL_EXPRESSION_PROVENANCE_REQUIRED: incomplete provenance")
+    expression = " ".join(str(args["target_expression"]).lower().split())
+    if "select value from config" in expression:
+        raise HTTPException(422, detail="SQL_EXPRESSION_PROVENANCE_REQUIRED: config.value requires verified schema promotion")
+    return {key: args[key] for key in required}
 
 
 def _spec(args: dict[str, Any]) -> dict[str, Any]:
@@ -62,8 +78,8 @@ async def boolean_config_extract(request: JobRequest) -> dict[str, Any]:
     expression = str(args.get("target_expression") or args.get("expression") or "").strip().rstrip(";").strip()
     if not spec["url"] or not field or not expression:
         raise HTTPException(422, detail="request.url, test_field and target_expression are required")
-    hostname = __import__("urllib.parse").parse.urlparse(spec["url"]).hostname
-    if not hostname or hostname.lower() not in {str(item).lower() for item in request.allowed_hosts}:
+    provenance = _require_provenance(args)
+    if not target_allowed(spec["url"], request.allowed_hosts):
         raise HTTPException(403, detail="boolean extraction target is not allowlisted")
     root = workspace_for(request.run_id)
     job_id = str(args.get("job_id") or "unknown")
@@ -72,7 +88,8 @@ async def boolean_config_extract(request: JobRequest) -> dict[str, Any]:
     output.mkdir(parents=True, exist_ok=True)
     evidence.mkdir(parents=True, exist_ok=True)
     progress_path, checkpoint_path, result_path, oracle_path = output / "progress.jsonl", output / "checkpoint.json", output / "result.json", evidence / "oracle.json"
-    max_requests = min(max(int(args.get("max_requests") or 64), 1), 1024)
+    request_contract_path = evidence / "request-contract.json"
+    max_requests = min(max(int(args.get("max_requests") or 64), 1), 512)
     timeout = min(max(float(args.get("timeout") or 15), 1), 30)
     delay = max(float(args.get("min_interval_seconds") or 0), 0)
     oracle_config = dict(args.get("oracle") or {})
@@ -85,8 +102,27 @@ async def boolean_config_extract(request: JobRequest) -> dict[str, Any]:
     request_spec_hash = _hash(spec)
     expression_hash = _hash(expression)
     oracle_hash = _hash(oracle_config)
+    request_contract_path.write_text(
+        json.dumps(
+            {
+                "run_id": request.run_id,
+                "job_id": job_id,
+                "request": {**spec, "headers": {key: "<redacted>" if key.lower() in {"authorization", "cookie", "set-cookie", "proxy-authorization"} else value for key, value in spec.get("headers", {}).items()}},
+                "test_field": field,
+                "control_fields": control_fields,
+                "target_expression": expression,
+                "provenance": provenance,
+                "max_requests": max_requests,
+                "max_length": min(int(args.get("max_length") or 64), 128),
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
     chars: list[str] = []
     checkpoint = {}
+    request_lock = asyncio.Lock()
     if bool(args.get("resume")) and checkpoint_path.is_file():
         try:
             checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
@@ -109,8 +145,10 @@ async def boolean_config_extract(request: JobRequest) -> dict[str, Any]:
 
     async def probe(condition: str) -> bool:
         nonlocal responses, last_request
-        if responses >= max_requests:
-            raise RuntimeError("MAX_REQUESTS_REACHED")
+        async with request_lock:
+            if responses >= max_requests:
+                raise RuntimeError("MAX_REQUESTS_REACHED")
+            responses += 1
         wait = delay - (time.monotonic() - last_request)
         if wait > 0:
             await asyncio.sleep(wait)
@@ -122,7 +160,6 @@ async def boolean_config_extract(request: JobRequest) -> dict[str, Any]:
         for attempt in range(3):
             last_request = time.monotonic()
             result = await execute_http(request.model_copy(update={"tool": "http_request", "arguments": {**candidate, "timeout": timeout}}))
-            responses += 1
             state = _oracle(result, oracle_config)
             if state is not None:
                 return state
@@ -150,8 +187,9 @@ async def boolean_config_extract(request: JobRequest) -> dict[str, Any]:
         false_state = await confirmed(str(args.get("calibration_false") or "1=2"))
         if true_state == false_state:
             raise RuntimeError("ORACLE_NOT_DIFFERENTIAL")
+        oracle_path.write_text(json.dumps({"json_field": oracle_config.get("json_field", "matched"), "true_value": true_state, "false_value": false_state, "requests": responses, "stable": True}, ensure_ascii=False, indent=2), encoding="utf-8")
         length = 0
-        hi = min(int(args.get("max_length") or 64), 64)
+        hi = min(int(args.get("max_length") or 64), 128)
         low = 0
         while low < hi:
             mid = (low + hi + 1) // 2
@@ -175,7 +213,7 @@ async def boolean_config_extract(request: JobRequest) -> dict[str, Any]:
             progress_path.write_text("".join(json.dumps(item, ensure_ascii=False) + "\n" for item in progress), encoding="utf-8")
             checkpoint_path.write_text(json.dumps({"status": "PARTIAL", "run_id": request.run_id, "target_expression_hash": expression_hash, "request_spec_hash": request_spec_hash, "test_field": field, "oracle_hash": oracle_hash, "position": position, "partial": "".join(chars), "requests": responses, "length": length}, ensure_ascii=False, indent=2), encoding="utf-8")
         extracted = "".join(chars)
-        result = {"status": "COMPLETED", "summary": "Boolean configuration extraction completed", "structured_result": {"extracted_value": extracted, "length": length, "requests": responses, "oracle_verified": True, "oracle": {"true": true_state, "false": false_state}, "target_expression": expression, "result_path": str(result_path.relative_to(root)).replace("\\", "/"), "checkpoint_path": str(checkpoint_path.relative_to(root)).replace("\\", "/"), "progress_path": str(progress_path.relative_to(root)).replace("\\", "/")}, "artifact_paths": [str(progress_path.relative_to(root)).replace("\\", "/"), str(checkpoint_path.relative_to(root)).replace("\\", "/"), str(result_path.relative_to(root)).replace("\\", "/"), str(oracle_path.relative_to(root)).replace("\\", "/")], "progress_path": str(progress_path.relative_to(root)).replace("\\", "/"), "checkpoint_path": str(checkpoint_path.relative_to(root)).replace("\\", "/"), "result_path": str(result_path.relative_to(root)).replace("\\", "/")}
+        result = {"status": "COMPLETED", "summary": "Boolean configuration extraction completed", "structured_result": {"extracted_value": extracted, "length": length, "requests": responses, "oracle_verified": True, "oracle": {"true": true_state, "false": false_state}, "target_expression": expression, "provenance": provenance, "result_path": str(result_path.relative_to(root)).replace("\\", "/"), "checkpoint_path": str(checkpoint_path.relative_to(root)).replace("\\", "/"), "progress_path": str(progress_path.relative_to(root)).replace("\\", "/")}, "artifact_paths": [str(progress_path.relative_to(root)).replace("\\", "/"), str(checkpoint_path.relative_to(root)).replace("\\", "/"), str(result_path.relative_to(root)).replace("\\", "/"), str(oracle_path.relative_to(root)).replace("\\", "/"), str(request_contract_path.relative_to(root)).replace("\\", "/")], "progress_path": str(progress_path.relative_to(root)).replace("\\", "/"), "checkpoint_path": str(checkpoint_path.relative_to(root)).replace("\\", "/"), "result_path": str(result_path.relative_to(root)).replace("\\", "/")}
         checkpoint_path.write_text(json.dumps({"status": "COMPLETED", "run_id": request.run_id, "target_expression_hash": expression_hash, "request_spec_hash": request_spec_hash, "test_field": field, "oracle_hash": oracle_hash, "position": length, "partial": extracted, "requests": responses, "length": length}, ensure_ascii=False, indent=2), encoding="utf-8")
         result_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
         oracle_path.write_text(json.dumps({"json_field": oracle_config.get("json_field", "matched"), "true_value": true_state, "false_value": false_state, "requests": responses}, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -185,7 +223,7 @@ async def boolean_config_extract(request: JobRequest) -> dict[str, Any]:
         status = "PARTIAL" if str(error) == "MAX_REQUESTS_REACHED" else "FAILED"
         checkpoint_path.write_text(json.dumps({"status": status, "error_code": str(error), "run_id": request.run_id, "target_expression_hash": expression_hash, "request_spec_hash": request_spec_hash, "test_field": field, "oracle_hash": oracle_hash, "position": len(chars), "requests": responses, "partial": partial}, ensure_ascii=False, indent=2), encoding="utf-8")
         if status == "PARTIAL":
-            result = {"status": "PARTIAL", "summary": "Boolean configuration extraction reached its request budget", "structured_result": {"extracted_value": partial, "length": len(partial), "requests": responses, "oracle_verified": True, "target_expression": expression, "result_path": str(result_path.relative_to(root)).replace("\\", "/"), "checkpoint_path": str(checkpoint_path.relative_to(root)).replace("\\", "/"), "progress_path": str(progress_path.relative_to(root)).replace("\\", "/")}, "artifact_paths": [str(checkpoint_path.relative_to(root)).replace("\\", "/"), str(progress_path.relative_to(root)).replace("\\", "/")], "checkpoint_path": str(checkpoint_path.relative_to(root)).replace("\\", "/"), "progress_path": str(progress_path.relative_to(root)).replace("\\", "/"), "result_path": str(result_path.relative_to(root)).replace("\\", "/")}
+            result = {"status": "PARTIAL", "summary": "Boolean configuration extraction reached its request budget", "structured_result": {"extracted_value": partial, "length": len(partial), "requests": responses, "oracle_verified": True, "target_expression": expression, "result_path": str(result_path.relative_to(root)).replace("\\", "/"), "checkpoint_path": str(checkpoint_path.relative_to(root)).replace("\\", "/"), "progress_path": str(progress_path.relative_to(root)).replace("\\", "/")}, "artifact_paths": [str(checkpoint_path.relative_to(root)).replace("\\", "/"), str(progress_path.relative_to(root)).replace("\\", "/"), str(request_contract_path.relative_to(root)).replace("\\", "/")], "checkpoint_path": str(checkpoint_path.relative_to(root)).replace("\\", "/"), "progress_path": str(progress_path.relative_to(root)).replace("\\", "/"), "result_path": str(result_path.relative_to(root)).replace("\\", "/")}
             result_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
             return result
         raise HTTPException(422, detail=str(error)) from error

@@ -6,6 +6,7 @@ from app.core.exceptions import DomainError
 
 class RunStatus(StrEnum):
     CREATED = "CREATED"
+    RUNNING = "RUNNING"
     PREPARING = "PREPARING"
     ANALYZING = "ANALYZING"
     PLANNING = "PLANNING"
@@ -39,7 +40,7 @@ TERMINAL = {status for status in RunStatus if status.name.startswith(("COMPLETED
 }
 SOLVER_PHASES = {
     "INTAKE", "BASELINE", "MAPPING", "HYPOTHESIS", "TESTING", "CHAINING",
-    "FLAG_SEARCH", "FLAG_VERIFICATION", "REPORTING", "COMPLETED_SOLVED",
+    "FLAG_SEARCH", "FLAG_VERIFICATION", "REPORTING",
 }
 RESTARTABLE = {
     RunStatus.WAITING_USER,
@@ -58,6 +59,7 @@ RESTARTABLE = {
 }
 TIMEOUT_SOURCES = {
     RunStatus.CREATED,
+    RunStatus.RUNNING,
     RunStatus.PREPARING,
     RunStatus.ANALYZING,
     RunStatus.PLANNING,
@@ -70,6 +72,7 @@ TIMEOUT_SOURCES = {
 }
 ALLOWED: dict[RunStatus, set[RunStatus]] = {
     RunStatus.CREATED: {
+        RunStatus.RUNNING,
         RunStatus.PREPARING,
         RunStatus.FAILED_ENGINE,
         RunStatus.FAILED_RUNNER,
@@ -79,18 +82,21 @@ ALLOWED: dict[RunStatus, set[RunStatus]] = {
         RunStatus.INFRASTRUCTURE_VALIDATION,
     },
     RunStatus.PREPARING: {
+        RunStatus.RUNNING,
         RunStatus.ANALYZING,
         RunStatus.FAILED_ENGINE,
         RunStatus.FAILED_RUNNER,
         RunStatus.CANCELLED,
     },
     RunStatus.ANALYZING: {
+        RunStatus.RUNNING,
         RunStatus.PLANNING,
         RunStatus.WAITING_USER,
         RunStatus.FAILED_ENGINE,
         RunStatus.CANCELLED,
     },
     RunStatus.PLANNING: {
+        RunStatus.RUNNING,
         RunStatus.EXECUTING,
         RunStatus.VERIFYING_FLAG,
         RunStatus.REPORTING,
@@ -99,6 +105,7 @@ ALLOWED: dict[RunStatus, set[RunStatus]] = {
         RunStatus.CANCELLED,
     },
     RunStatus.EXECUTING: {
+        RunStatus.RUNNING,
         RunStatus.EVALUATING,
         # A controlled stop (budget/no-progress ceiling) may finish directly
         # after a rejected or failed tool action, before EVALUATING is entered.
@@ -110,6 +117,7 @@ ALLOWED: dict[RunStatus, set[RunStatus]] = {
         RunStatus.CANCELLED,
     },
     RunStatus.EVALUATING: {
+        RunStatus.RUNNING,
         RunStatus.PLANNING,
         RunStatus.VERIFYING_FLAG,
         RunStatus.REPORTING,
@@ -142,6 +150,15 @@ ALLOWED: dict[RunStatus, set[RunStatus]] = {
     RunStatus.WAITING_CONFIGURATION: {RunStatus.PLANNING, RunStatus.CANCELLED, RunStatus.INFRASTRUCTURE_VALIDATION},
     RunStatus.INFRASTRUCTURE_VALIDATION: {RunStatus.PLANNING, RunStatus.WAITING_CONFIGURATION, RunStatus.CANCELLED},
     RunStatus.RETRYING: {RunStatus.PLANNING, RunStatus.WAITING_CONFIGURATION, RunStatus.CANCELLED},
+    RunStatus.RUNNING: {
+        RunStatus.ANALYZING,
+        RunStatus.PLANNING,
+        RunStatus.EXECUTING,
+        RunStatus.EVALUATING,
+        RunStatus.VERIFYING_FLAG,
+        RunStatus.REPORTING,
+        RunStatus.CANCELLED,
+    },
 }
 
 for status in TIMEOUT_SOURCES:
@@ -186,9 +203,12 @@ def transition(run: object, target: RunStatus) -> None:
     # phase.  Legacy runs may still carry a lifecycle value as phase; retain
     # the old mirroring behavior only until a real solver phase exists.
     if target == RunStatus.COMPLETED_SOLVED:
-        run.current_phase = target.value
+        # Solved is a lifecycle status.  The last solver phase remains
+        # FLAG_VERIFICATION/REPORTING and is never replaced by a status value.
+        if str(getattr(run, "current_phase", "")) not in SOLVER_PHASES:
+            run.current_phase = "REPORTING"
     elif str(getattr(run, "current_phase", "")) not in SOLVER_PHASES:
-        run.current_phase = target.value
+        run.current_phase = "INTAKE"
     if target == RunStatus.PREPARING and not getattr(run, "started_at"):
         run.started_at = datetime.now(UTC)
     if target in TERMINAL:
@@ -206,7 +226,7 @@ def restart(run: object) -> RunStatus:
         )
     run.status = RunStatus.WAITING_USER.value
     if str(getattr(run, "current_phase", "")) not in SOLVER_PHASES:
-        run.current_phase = RunStatus.WAITING_USER.value
+        run.current_phase = "INTAKE"
     run.finished_at = None
     # Restart creates a fresh Attempt but must never erase durable Run totals.
     # Legacy counters mirror the current Attempt for compatibility.

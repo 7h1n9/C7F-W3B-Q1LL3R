@@ -16,6 +16,21 @@ from sqlalchemy.orm import Mapped, mapped_column
 from app.models.base import Base, UUIDTimestampMixin
 
 
+SCRIPT_RECORD_STATUSES = frozenset(
+    {
+        "CREATED",
+        "VALIDATING",
+        "VALIDATED",
+        "RUNNING",
+        "COMPLETED",
+        "PARTIAL",
+        "FAILED",
+        "BLOCKED_DEPLOYMENT",
+        "CANCELLED",
+    }
+)
+
+
 class SolveRun(UUIDTimestampMixin, Base):
     __tablename__ = "solve_runs"
     challenge_id: Mapped[str] = mapped_column(ForeignKey("challenges.id"), nullable=False)
@@ -33,7 +48,7 @@ class SolveRun(UUIDTimestampMixin, Base):
     role_snapshot_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
     hints_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
     status: Mapped[str] = mapped_column(String(40), default="CREATED")
-    current_phase: Mapped[str] = mapped_column(String(80), default="CREATED")
+    current_phase: Mapped[str] = mapped_column(String(80), default="INTAKE", server_default="INTAKE")
     workspace_path: Mapped[str] = mapped_column(String(1024), nullable=False)
     codex_thread_id: Mapped[str | None] = mapped_column(String(255))
     conversation_summary: Mapped[str | None] = mapped_column(Text)
@@ -187,6 +202,8 @@ class AttemptToolManifest(UUIDTimestampMixin, Base):
     effective_tools: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
     missing_expected_tools: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
     schema_hashes: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    network_enforcement_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    tool_capabilities_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
     manifest_sha256: Mapped[str] = mapped_column(String(64), nullable=False, default="")
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),

@@ -50,8 +50,10 @@ async def refresh_runtime_tool_manifest(
         runner_health = await runner_client.health()
     except Exception:
         runner_health = {}
+    capability_payload: dict = {}
     try:
         capability = await runner_client.capabilities()
+        capability_payload = capability if isinstance(capability, dict) else {}
         rows = capability.get("tools") if isinstance(capability, dict) else []
         runner = {
             str(item.get("name"))
@@ -74,6 +76,14 @@ async def refresh_runtime_tool_manifest(
     effective = role & challenge_tools & backend & runner & advertised if advertised else set()
     expected = role & challenge_tools & backend
     missing = sorted(expected - effective)
+    runner_tool_rows = {str(item.get("name")): item for item in (capability_payload.get("tools") or []) if isinstance(item, dict)}
+    network_enforcement = capability_payload.get("network_enforcement") if isinstance(capability_payload.get("network_enforcement"), dict) else {}
+    script_row = runner_tool_rows.get("script_run") or {}
+    network_contract_ok = (
+        "target_allowlist" in set(script_row.get("supported_network_modes") or [])
+        and bool(script_row.get("target_allowlist_enforced"))
+        and bool(network_enforcement.get("target_allowlist_enforced"))
+    )
     manifest_data = {
         "role_snapshot_tools": sorted(role),
         "challenge_allowed_tools": sorted(challenge_tools),
@@ -83,6 +93,8 @@ async def refresh_runtime_tool_manifest(
         "effective_tools": sorted(effective),
         "missing_expected_tools": missing,
         "schema_hashes": schema_hashes,
+        "network_enforcement_json": network_enforcement,
+        "tool_capabilities_json": {"script_run": {"supported_network_modes": script_row.get("supported_network_modes") or [], "target_allowlist_enforced": bool(script_row.get("target_allowlist_enforced")), "valid": network_contract_ok}},
     }
     attempt.runtime_build_manifest_json = {
         "backend": backend_build_manifest(),
@@ -97,6 +109,8 @@ async def refresh_runtime_tool_manifest(
         for key, value in manifest_data.items():
             setattr(item, key, value)
         item.manifest_sha256 = _digest(manifest_data)
+    if "script_run" in expected and not network_contract_ok:
+        missing.append("script_run.target_allowlist_enforced")
     blocking_missing = [item for item in missing if item not in OPTIONAL_MISSING_RUNTIME_TOOLS]
     if missing:
         await event_service.append(
@@ -112,11 +126,10 @@ async def refresh_runtime_tool_manifest(
                 "recommended_action": "restart_backend_runner_bridge",
             },
         )
-        if blocking_missing and run.engine_type == "codex_sdk":
+        if blocking_missing:
             run.status = "PAUSED_DEPLOYMENT"
-            run.current_phase = "PAUSED_DEPLOYMENT"
-            run.last_error_code = "TOOL_CATALOG_DRIFT"
-            run.last_error_message = "Attempt tool manifest does not match the advertised runtime catalog."
+            run.last_error_code = "SCRIPT_TARGET_NETWORK_UNAVAILABLE" if "script_run.target_allowlist_enforced" in missing else "TOOL_CATALOG_DRIFT"
+            run.last_error_message = "Attempt tool manifest does not prove target allowlist enforcement." if run.last_error_code == "SCRIPT_TARGET_NETWORK_UNAVAILABLE" else "Attempt tool manifest does not match the advertised runtime catalog."
             attempt.tool_manifest_status = "DRIFT"
         elif missing:
             attempt.tool_manifest_status = "FALLBACK_READY"

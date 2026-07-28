@@ -6,5 +6,5 @@ risk_level: low
 parameters:
   path: {type: string, required: true}
   display_filter: {type: string, required: false}
-  fields: {type: array, required: true}
+  fields: {type: array, items: {type: string}, required: true}
   limit: {type: integer, required: false}

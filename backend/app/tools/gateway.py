@@ -10,11 +10,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import DomainError
 from app.models.challenge import Challenge
+from app.models.multi_agent import AnalysisReview, EvidenceLedger, VerifiedFact
 from app.models.run import (
     AgentTurn,
     Artifact,
     Observation,
+    Hypothesis,
     RunExecutionLease,
+    SCRIPT_RECORD_STATUSES,
     ScriptRecord,
     SolveRun,
     ToolCall,
@@ -28,6 +31,7 @@ from app.services.flags import flag_service
 from app.services.infrastructure import clear_failure, record_failure
 from app.services.run_budget_guard import run_budget_guard
 from app.services.runner_client import runner_client
+from app.services.sql_provenance import validate_sql_expression_provenance
 from app.services.solver_state import solver_state_service
 from app.services.tool_argument_adapter import adapt_arguments
 from app.services.tool_invocation_coordinator import tool_invocation_coordinator
@@ -51,6 +55,73 @@ def _redact_arguments(value):
 
 
 class ToolGateway:
+    async def _validate_sql_sources(self, session: AsyncSession, run: SolveRun, arguments: dict) -> None:
+        """Resolve provenance IDs to this Run's durable records."""
+        evidence_ids = {str(item) for item in arguments.get("supporting_evidence_ids") or []}
+        fact_ids = {str(item) for item in arguments.get("supporting_fact_ids") or []}
+        evidence = list((await session.scalars(select(EvidenceLedger).where(EvidenceLedger.run_id == run.id, EvidenceLedger.id.in_(evidence_ids)))).all()) if evidence_ids else []
+        facts = list((await session.scalars(select(VerifiedFact).where(VerifiedFact.run_id == run.id, VerifiedFact.id.in_(fact_ids)))).all()) if fact_ids else []
+        hypothesis = await session.scalar(select(Hypothesis).where(Hypothesis.run_id == run.id, Hypothesis.id == str(arguments.get("source_hypothesis_id") or "")))
+        review = await session.get(AnalysisReview, str(arguments.get("approved_analysis_review_id") or ""))
+        if len(evidence) != len(evidence_ids) or len(facts) != len(fact_ids) or hypothesis is None or review is None:
+            raise DomainError(
+                "SQL_EXPRESSION_PROVENANCE_REQUIRED",
+                "SQL expression provenance must reference Evidence, VerifiedFact, Hypothesis, and AnalysisReview rows in this Run.",
+                {"run_id": run.id, "evidence_ids": sorted(evidence_ids), "fact_ids": sorted(fact_ids)},
+                422,
+            )
+
+    async def _ensure_script_record(self, session: AsyncSession, run: SolveRun, challenge: Challenge, arguments: dict) -> ScriptRecord:
+        """Create the exploit-script lifecycle before a Runner job starts.
+
+        ``python_run`` deliberately never calls this helper.  A generic
+        ``script_run`` must be auditable even when deployment validation
+        blocks it before a ToolCall or Runner Job exists.
+        """
+        path = str(arguments.get("path") or "")
+        existing = await session.scalar(
+            select(ScriptRecord)
+            .where(ScriptRecord.run_id == run.id, ScriptRecord.path == path)
+            .order_by(ScriptRecord.created_at.desc())
+        )
+        if existing is None or existing.status in {"COMPLETED", "PARTIAL", "FAILED", "BLOCKED_DEPLOYMENT", "CANCELLED"}:
+            provenance = arguments.get("assumption_provenance") or []
+            record = ScriptRecord(
+                run_id=run.id,
+                path=path,
+                script_path=path,
+                sha256=str(arguments.get("script_sha256") or ""),
+                source="MODEL_GENERATED",
+                assistance_level=assistance_level(provenance),
+                assumption_provenance_json=provenance,
+                design_card_json=arguments.get("design_card") or {},
+                objective=str((arguments.get("design_card") or {}).get("objective") or ""),
+                network_mode=str(arguments.get("network_mode") or "none"),
+                allowed_hosts_json=list(challenge.allowed_hosts or []),
+                max_requests=int(arguments.get("max_requests") or 0),
+                max_runtime_seconds=int(arguments.get("timeout_seconds") or 60),
+                status="CREATED",
+            )
+            session.add(record)
+        else:
+            record = existing
+            record.status = "CREATED"
+            record.validation_error = None
+            record.execution_error = None
+        await session.commit()
+        await event_service.append(session, run.id, "script.record.status", {"script_id": record.id, "status": record.status, "path": path})
+        return record
+
+    async def _set_script_record_status(self, session: AsyncSession, run: SolveRun, record: ScriptRecord, status: str, **fields) -> None:
+        if status not in SCRIPT_RECORD_STATUSES:
+            raise DomainError("SCRIPT_STATUS_INVALID", "Unknown ScriptRecord lifecycle status.", {"status": status}, 500)
+        record.status = status
+        for key, value in fields.items():
+            if hasattr(record, key):
+                setattr(record, key, value)
+        await session.commit()
+        await event_service.append(session, run.id, "script.record.status", {"script_id": record.id, "status": status, **{key: value for key, value in fields.items() if key in {"validation_error", "execution_error"}}})
+
     async def invoke(
         self, session: AsyncSession, run: SolveRun, challenge: Challenge, name: str, arguments: dict,
         *, logical_tool_call_id: str | None = None, parent_tool_call_id: str | None = None,
@@ -88,6 +159,22 @@ class ToolGateway:
                     {"recommended_tools": ["sql_boolean_compare", "sqlmap_run", "script_run"], "final_verification": True},
                     422,
                 )
+        script_record: ScriptRecord | None = None
+        if name == "script_run":
+            script_record = await self._ensure_script_record(session, run, challenge, arguments)
+            await self._set_script_record_status(session, run, script_record, "VALIDATING")
+        if name == "script_run" and str(arguments.get("network_mode") or "none") == "target_allowlist":
+            from app.models.run import AttemptToolManifest
+            manifest = await session.scalar(select(AttemptToolManifest).where(AttemptToolManifest.attempt_id == lease.attempt_id))
+            contract = (manifest.tool_capabilities_json or {}).get("script_run", {}) if manifest else {}
+            if manifest is None or ("target_allowlist" not in set(contract.get("supported_network_modes") or []) or not contract.get("target_allowlist_enforced") or not (manifest.network_enforcement_json or {}).get("target_allowlist_enforced")):
+                run.status = "PAUSED_DEPLOYMENT"
+                run.last_error_code = "SCRIPT_TARGET_NETWORK_UNAVAILABLE"
+                run.last_error_message = "Attempt manifest does not prove target allowlist enforcement."
+                if script_record is not None:
+                    await self._set_script_record_status(session, run, script_record, "BLOCKED_DEPLOYMENT", execution_error=run.last_error_message)
+                await session.commit()
+                raise DomainError("SCRIPT_TARGET_NETWORK_UNAVAILABLE", run.last_error_message, {"status": run.status}, 503, stage="NETWORK_POLICY", retryable=False)
         arguments = adapt_arguments(name, arguments, challenge)
         try:
             arguments = definition.validate_arguments(arguments)
@@ -98,6 +185,24 @@ class ToolGateway:
                 raise DomainError(error.code, error.message, details, error.status_code) from error
             raise
         enforce_tool_policy(name, arguments, challenge.allowed_hosts)
+        verified_schema = False
+        if "config.value" in str(arguments.get("target_expression") or "").lower():
+            from app.models.multi_agent import VerifiedFact
+            schema_facts = list((await session.scalars(select(VerifiedFact).where(VerifiedFact.run_id == run.id, VerifiedFact.id.in_(arguments.get("supporting_fact_ids") or [])))).all())
+            verified_schema = any(str(item.fact_type).upper() in {"SQL_SCHEMA", "SQL_TABLE", "SQL_COLUMN", "SCHEMA"} and item.promotion_status == "VERIFIED" for item in schema_facts)
+        if name in {"boolean_config_extract", "sqlite_metadata_discovery"}:
+            await self._validate_sql_sources(session, run, arguments)
+            validate_sql_expression_provenance(arguments, verified_schema=verified_schema)
+        elif name == "sqlmap_run" and str(arguments.get("action") or "detect") != "detect":
+            await self._validate_sql_sources(session, run, arguments)
+            validate_sql_expression_provenance(arguments, verified_schema=verified_schema)
+        elif name == "script_run" and arguments.get("target_expression"):
+            await self._validate_sql_sources(session, run, arguments)
+            validate_sql_expression_provenance(arguments, verified_schema=verified_schema)
+        if script_record is not None:
+            # The request has passed the Backend contract.  Runner still
+            # performs the authoritative static validation before execution.
+            await self._set_script_record_status(session, run, script_record, "VALIDATED")
         # Reserve only after policy and argument validation.  Rejected model
         # requests must not consume a durable tool budget slot.
         turn_id = turn_id or run.active_turn_id
@@ -124,13 +229,19 @@ class ToolGateway:
                     {"tool": name, "code": "FILE_RANGE_ALREADY_AVAILABLE", "path": arguments.get("path")},
                 )
                 return cached if isinstance(cached, dict) else cached.model_dump()
+        if script_record is not None:
+            await self._set_script_record_status(session, run, script_record, "RUNNING")
+        provider_call_id = str(uuid.uuid4())
+        logical_tool_call_id = logical_tool_call_id or effective_logical_tool_call_service.build_mcp_id(
+            run.id, lease.attempt_id, str(turn_id or "turn"), provider_call_id
+        )
         call = ToolCall(
             run_id=run.id,
             tool_name=name,
             arguments_json=_redact_arguments(arguments),
             status="REQUESTED",
             started_at=datetime.now(UTC),
-            logical_tool_call_id=logical_tool_call_id or str(uuid.uuid4()),
+            logical_tool_call_id=logical_tool_call_id,
             parent_tool_call_id=parent_tool_call_id,
             execution_layer=execution_layer,
             counts_toward_budget=True,
@@ -160,6 +271,12 @@ class ToolGateway:
             turn_id=turn_id,
             turn_started_at=turn_started_at,
         )
+        # The gateway is also the execution boundary for controller-owned
+        # multi-agent calls.  Keep the durable counters in sync here so those
+        # calls are visible in reports and cannot appear as zero-tool Runs.
+        run.tool_call_count = int(run.tool_call_count or 0) + 1
+        run.run_total_logical_tool_calls = int(run.run_total_logical_tool_calls or 0) + 1
+        run.attempt_logical_tool_calls = int(run.attempt_logical_tool_calls or 0) + 1
         await run_budget_guard.release(session, run, turn_id=turn_id, required_action=required_action, required_action_kind=required_action_kind or name)
         await effective_logical_tool_call_service.trace(
             session, logical, execution_layer=execution_layer, event_type="requested", external_id=call.id
@@ -231,6 +348,11 @@ class ToolGateway:
                     result["error_code"] = "FILE_NOT_FOUND"
             if result.get("error_code") in {"TARGET_UNAVAILABLE", "BACKEND_UNAVAILABLE", "RUNNER_UNAVAILABLE", "TOOL_RESULT_DELIVERY_FAILED"}:
                 record_failure(run, code=str(result["error_code"]), message=str(result.get("error") or result.get("summary") or result["error_code"]), stage=str(result.get("stage") or "EXECUTION"))
+                await session.commit()
+            if result.get("error_code") in {"TARGET_NETWORK_ENFORCEMENT_UNAVAILABLE", "SCRIPT_TARGET_NETWORK_UNAVAILABLE"}:
+                run.status = "PAUSED_DEPLOYMENT"
+                run.last_error_code = str(result["error_code"])
+                run.last_error_message = str(result.get("error") or result.get("summary") or result["error_code"])[:4000]
                 await session.commit()
         except Exception as error:
             code = getattr(error, "code", None) or ("RUNNER_UNAVAILABLE" if isinstance(error, (ConnectionError, TimeoutError)) else "RUNNER_JOB_FAILED")
@@ -318,14 +440,11 @@ class ToolGateway:
                 "size": artifact.size,
                 "sha256": artifact.sha256,
             }
-        if name in {"script_run", "python_run"} and artifact is not None:
+        if name == "script_run" and artifact is not None:
             provenance = arguments.get("assumption_provenance") or []
             level = assistance_level(provenance)
-            existing_script = await session.scalar(
-                select(ScriptRecord).where(
-                    ScriptRecord.run_id == run.id,
-                    ScriptRecord.path == str(arguments.get("path") or artifact.file_path),
-                ).order_by(ScriptRecord.created_at.desc())
+            existing_script = script_record or await session.scalar(
+                select(ScriptRecord).where(ScriptRecord.run_id == run.id, ScriptRecord.path == str(arguments.get("path") or artifact.file_path)).order_by(ScriptRecord.created_at.desc())
             )
             if existing_script is None:
                 existing_script = ScriptRecord(
@@ -343,14 +462,14 @@ class ToolGateway:
                     allowed_hosts_json=list(challenge.allowed_hosts or []),
                     max_requests=int(arguments.get("max_requests") or 0),
                     max_runtime_seconds=int(arguments.get("timeout_seconds") or 60),
-                    status="COMPLETED" if result.get("status") == "COMPLETED" else "FAILED",
+                    status="COMPLETED" if result.get("status") == "COMPLETED" and isinstance(result.get("structured_result"), dict) and str(result.get("structured_result", {}).get("status") or "") == "COMPLETED" else "PARTIAL" if result.get("status") == "PARTIAL" else "FAILED",
                     tool_call_id=call.id,
                     result_artifact_id=artifact.id,
                 )
                 session.add(existing_script)
             else:
                 existing_script.artifact_id = artifact.id
-                existing_script.status = "COMPLETED" if result.get("status") == "COMPLETED" else "PARTIAL" if result.get("status") == "PARTIAL" else "FAILED"
+                existing_script.status = "COMPLETED" if result.get("status") == "COMPLETED" and isinstance(result.get("structured_result"), dict) and str(result.get("structured_result", {}).get("status") or "") == "COMPLETED" else "PARTIAL" if result.get("status") == "PARTIAL" else "FAILED"
                 existing_script.execution_error = None if existing_script.status in {"COMPLETED", "PARTIAL"} else str(result.get("error") or result.get("summary") or "")[:4000]
                 existing_script.result_artifact_id = artifact.id
                 existing_script.tool_call_id = call.id
@@ -363,6 +482,10 @@ class ToolGateway:
                 if source not in current_sources:
                     current_sources.append(source)
             run.assistance_sources_json = current_sources
+        if script_record is not None and (artifact is None or name != "script_run"):
+            failed_code = str(result.get("error_code") or result.get("summary") or "SCRIPT_EXECUTION_FAILED")
+            lifecycle = "BLOCKED_DEPLOYMENT" if failed_code in {"TARGET_NETWORK_ENFORCEMENT_UNAVAILABLE", "SCRIPT_TARGET_NETWORK_UNAVAILABLE"} else "PARTIAL" if result.get("status") == "PARTIAL" else "FAILED"
+            await self._set_script_record_status(session, run, script_record, lifecycle, execution_error=None if lifecycle == "PARTIAL" else failed_code)
         unified = self._unified_result(result, artifact, permitted_tools)
         facts = self._facts(name, result, relative.replace("\\", "/"))
         facts["tool_model_view"] = unified.model_view.model_dump()
