@@ -9,6 +9,7 @@ from app.api.v1 import (
     health,
     learned_skills,
     models,
+    multi_agent,
     readiness,
     runner,
     runs,
@@ -30,3 +31,4 @@ router.include_router(models.router)
 router.include_router(system_settings.router)
 router.include_router(readiness.router)
 router.include_router(learned_skills.router)
+router.include_router(multi_agent.router)

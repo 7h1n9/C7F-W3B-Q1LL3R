@@ -36,19 +36,21 @@ class RunnerClient:
         )
 
     async def health(self) -> dict:
-        async with httpx.AsyncClient(timeout=5, trust_env=False) as client:
+        # The Kali VM is reached through the host's VMware/system network
+        # route. Respect that transport configuration for Runner traffic.
+        async with httpx.AsyncClient(timeout=15, trust_env=True) as client:
             response = await client.get(f"{self.base_url}/health")
             response.raise_for_status()
             return response.json()
 
     async def capabilities(self) -> dict:
-        async with httpx.AsyncClient(timeout=5, trust_env=False) as client:
+        async with httpx.AsyncClient(timeout=15, trust_env=True) as client:
             response = await client.get(f"{self.base_url}/api/v1/capabilities", headers=self._headers())
             response.raise_for_status()
             return response.json()
 
     async def initialize_workspace(self, run_id: str) -> None:
-        async with httpx.AsyncClient(timeout=15, trust_env=False) as client:
+        async with httpx.AsyncClient(timeout=15, trust_env=True) as client:
             response = await client.post(
                 f"{self.base_url}/api/v1/workspaces/{run_id}", headers=self._headers()
             )
@@ -64,7 +66,7 @@ class RunnerClient:
             )
         raw = local_path.read_bytes()
         checksum = hashlib.sha256(raw).hexdigest()
-        async with httpx.AsyncClient(timeout=30, trust_env=False) as client:
+        async with httpx.AsyncClient(timeout=30, trust_env=True) as client:
             response = await client.put(
                 f"{self.base_url}/api/v1/workspaces/{run_id}/files/{pure.as_posix()}",
                 headers={**self._headers(), "X-Content-SHA256": checksum},
@@ -74,7 +76,7 @@ class RunnerClient:
             return response.json()
 
     async def workspace_manifest(self, run_id: str) -> dict[str, dict]:
-        async with httpx.AsyncClient(timeout=15, trust_env=False) as client:
+        async with httpx.AsyncClient(timeout=15, trust_env=True) as client:
             response = await client.get(
                 f"{self.base_url}/api/v1/workspaces/{run_id}/manifest", headers=self._headers()
             )
@@ -117,7 +119,7 @@ class RunnerClient:
             "tool": tool,
             "arguments": arguments,
         }
-        async with httpx.AsyncClient(timeout=30, trust_env=False) as client:
+        async with httpx.AsyncClient(timeout=30, trust_env=True) as client:
             response = await client.post(
                 f"{self.base_url}/api/v1/jobs", headers=self._headers(), json=payload
             )
@@ -141,7 +143,7 @@ class RunnerClient:
                 return None
             return {**(result.get("result") or {}), "job_id": result.get("job_id"), "status": result["status"], "error": result.get("error")}
 
-        async with httpx.AsyncClient(timeout=None, trust_env=False) as client:
+        async with httpx.AsyncClient(timeout=None, trust_env=True) as client:
             try:
                 async with client.stream(
                     "GET", f"{self.base_url}/api/v1/jobs/{job_id}/events", headers=self._headers()
@@ -180,7 +182,7 @@ class RunnerClient:
         return {"job_id": job_id, "status": "FAILED", "error_code": "RUNNER_TIMEOUT", "summary": "Runner job wait timed out", "error": "RUNNER_TIMEOUT", "stage": "RUNNER_WAIT"}
 
     async def cancel_job(self, job_id: str) -> dict:
-        async with httpx.AsyncClient(timeout=10, trust_env=False) as client:
+        async with httpx.AsyncClient(timeout=10, trust_env=True) as client:
             response = await client.post(
                 f"{self.base_url}/api/v1/jobs/{job_id}/cancel", headers=self._headers()
             )
@@ -201,7 +203,7 @@ class RunnerClient:
         temporary = destination.with_name(f".{destination.name}.download")
         hasher, size = hashlib.sha256(), 0
         try:
-            async with httpx.AsyncClient(timeout=45, trust_env=False) as client:
+            async with httpx.AsyncClient(timeout=45, trust_env=True) as client:
                 async with client.stream(
                     "GET",
                     f"{self.base_url}/api/v1/workspaces/{run_id}/files/{pure.as_posix()}",
@@ -227,14 +229,14 @@ class RunnerClient:
             temporary.unlink(missing_ok=True)
 
     async def delete_workspace(self, run_id: str) -> None:
-        async with httpx.AsyncClient(timeout=15, trust_env=False) as client:
+        async with httpx.AsyncClient(timeout=15, trust_env=True) as client:
             response = await client.delete(
                 f"{self.base_url}/api/v1/workspaces/{run_id}", headers=self._headers()
             )
             response.raise_for_status()
 
     async def clear_sessions(self, run_id: str) -> None:
-        async with httpx.AsyncClient(timeout=10, trust_env=False) as client:
+        async with httpx.AsyncClient(timeout=10, trust_env=True) as client:
             response = await client.delete(f"{self.base_url}/api/v1/sessions/{run_id}", headers=self._headers())
             response.raise_for_status()
 

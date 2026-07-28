@@ -3,6 +3,7 @@ from pydantic import BaseModel, Field
 
 class RunCreate(BaseModel):
     engine_type: str = Field(default="mock", pattern="^(mock|openai_compatible|codex_sdk)$")
+    solver_mode: str = Field(default="single_agent", pattern="^(single_agent|multi_agent_v1)$")
     model_config_id: str | None = None
     max_agent_steps: int = Field(default=120, ge=1, le=300)
     max_tool_calls: int = Field(default=120, ge=0, le=300)
@@ -21,6 +22,7 @@ class RunRead(BaseModel):
     challenge_type: str | None = None
     target_summary: str | None = None
     engine_type: str
+    solver_mode: str = "single_agent"
     model_config_id: str | None
     model_name: str | None = None
     role_name: str | None

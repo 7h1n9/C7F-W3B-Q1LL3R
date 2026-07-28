@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from pydantic import BaseModel, Field, field_validator
 
-ASSISTANCE_LEVELS = {"AUTONOMOUS", "EVIDENCE_GUIDED", "ANSWER_GUIDED"}
+ASSISTANCE_LEVELS = {"AUTONOMOUS", "HINT_GUIDED", "EVIDENCE_GUIDED", "ANSWER_GUIDED"}
 ASSUMPTION_SOURCES = {"OBSERVATION", "MODEL_INFERENCE", "USER_HINT", "KNOWN_ANSWER"}
 
 
@@ -41,9 +42,21 @@ def assistance_level(assumptions: list[dict[str, Any]] | list[Assumption] | None
     sources.discard(None)
     if "KNOWN_ANSWER" in sources:
         return "ANSWER_GUIDED"
+    if sources == {"USER_HINT"}:
+        return "HINT_GUIDED"
     if sources:
         return "EVIDENCE_GUIDED"
     return "AUTONOMOUS"
+
+
+def classify_user_input(content: str) -> str:
+    """Classify user guidance without treating it as solver evidence."""
+    text = str(content or "")
+    if not text.strip():
+        return "AUTONOMOUS"
+    if re.search(r"(?i)flag\{[^{}\r\n]{1,256}\}|(?:known answer|answer is|solution is)", text):
+        return "ANSWER_GUIDED"
+    return "HINT_GUIDED"
 
 
 def validate_design_card(card: dict[str, Any]) -> tuple[ScriptDesignCard, str]:

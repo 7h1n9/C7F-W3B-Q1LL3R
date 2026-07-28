@@ -9,7 +9,7 @@ router = APIRouter(prefix="/system-settings", tags=["settings"])
 
 async def probe(url: str) -> dict:
     try:
-        async with httpx.AsyncClient(timeout=3, trust_env=False) as client:
+        async with httpx.AsyncClient(timeout=15, trust_env=True) as client:
             response = await client.get(f"{url.rstrip('/')}/health")
             response.raise_for_status()
         return {"reachable": True, "details": response.json()}

@@ -4,11 +4,12 @@ import hashlib
 import json
 import re
 import shutil
+from datetime import UTC, datetime
 from pathlib import Path
 
 from sqlalchemy import select
 
-from app.models.run import Artifact, FlagCandidate
+from app.models.run import Artifact, FlagCandidate, FlagProvenance
 from app.services.reproduction_commands import reproduction_command_renderer
 from app.services.runner_client import runner_client
 
@@ -104,17 +105,73 @@ class FreshReproductionExecutor:
             artifact_path = final / "fresh-flag-artifact.json"
             artifact_path.write_text(json.dumps({**flag_artifact, "candidate": "flag{<redacted>}", "source_value": "<redacted>"}, ensure_ascii=False, indent=2), encoding="utf-8")
             raw = artifact_path.read_bytes()
-            artifact = Artifact(run_id=run.id, artifact_type="fresh_flag", file_path="final/fresh-flag-artifact.json", mime_type="application/json", size=len(raw), sha256=hashlib.sha256(raw).hexdigest(), summary="Fresh Runner flag artifact")
+            artifact = Artifact(
+                run_id=run.id,
+                artifact_type="fresh_flag",
+                file_path="final/fresh-flag-artifact.json",
+                mime_type="application/json",
+                size=len(raw),
+                sha256=hashlib.sha256(raw).hexdigest(),
+                summary="Fresh Runner flag artifact",
+                retention_class="FRESH_REPRODUCTION",
+                terminal_referenced=True,
+            )
             session.add(artifact)
             await session.flush()
             if fresh_flag_value:
                 existing = await session.scalar(select(FlagCandidate).where(FlagCandidate.run_id == run.id, FlagCandidate.candidate == fresh_flag_value))
                 if existing is None:
-                    session.add(FlagCandidate(run_id=run.id, candidate=fresh_flag_value, source_artifact_id=artifact.id, pattern_matched=True, verified=True, review_state="VALID"))
+                    existing = FlagCandidate(
+                        run_id=run.id,
+                        candidate=fresh_flag_value,
+                        source_artifact_id=artifact.id,
+                        pattern_matched=True,
+                        verified=True,
+                        review_state="VALID",
+                        first_seen_source_type="FRESH_REPRODUCTION",
+                        first_seen_source_id=artifact.id,
+                        first_seen_at=datetime.now(UTC),
+                    )
+                    session.add(existing)
+                    await session.flush()
+                    session.add(
+                        FlagProvenance(
+                            run_id=run.id,
+                            candidate_id=existing.id,
+                            first_seen_source_type="FRESH_REPRODUCTION",
+                            first_seen_source_id=artifact.id,
+                            first_seen_at=datetime.now(UTC),
+                            source_artifact_id=artifact.id,
+                            verification_source_type="FRESH_REPRODUCTION",
+                            verification_source_id=artifact.id,
+                            source_is_autonomous=True,
+                        )
+                    )
                 else:
                     existing.source_artifact_id = artifact.id
                     existing.verified = True
                     existing.review_state = "VALID"
+                    existing_provenance = await session.scalar(
+                        select(FlagProvenance).where(FlagProvenance.candidate_id == existing.id)
+                    )
+                    if existing_provenance is None:
+                        session.add(
+                            FlagProvenance(
+                                run_id=run.id,
+                                candidate_id=existing.id,
+                                first_seen_source_type=existing.first_seen_source_type or "FRESH_REPRODUCTION",
+                                first_seen_source_id=existing.first_seen_source_id or artifact.id,
+                                first_seen_at=existing.first_seen_at or datetime.now(UTC),
+                                source_artifact_id=existing.source_artifact_id,
+                                verification_source_type="FRESH_REPRODUCTION",
+                                verification_source_id=artifact.id,
+                                source_is_autonomous=True,
+                            )
+                        )
+                    else:
+                        existing_provenance.verification_source_type = "FRESH_REPRODUCTION"
+                        existing_provenance.verification_source_id = artifact.id
+                        existing_provenance.source_is_autonomous = True
             await session.commit()
         validation = {"executed": bool(log), "verified": success and bool(log) and flag_artifact is not None, "fresh_session": True, "fresh_flag_artifact": flag_artifact is not None, "steps": log}
         (final / "reproduction-validation.json").write_text(json.dumps(validation, ensure_ascii=False, indent=2), encoding="utf-8")

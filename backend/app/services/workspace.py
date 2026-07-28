@@ -31,8 +31,20 @@ def create_workspace(
         "payloads",
         "extracted",
         "generated",
+        "runtime",
+        "archive",
     ):
         (workspace / child).mkdir(parents=True, exist_ok=True)
+    for runtime_group in (
+        "agents",
+        "web-research",
+        "tool-subrequests",
+        "streams",
+        "runner-jobs",
+        "pending-promotion",
+        "cleanup-manifests",
+    ):
+        (workspace / "runtime" / runtime_group).mkdir(parents=True, exist_ok=True)
     manifest = []
     repository_root = Path(__file__).resolve().parents[3]
     attachment_root = (repository_root / "data" / "challenges" / challenge.id / "attachments").resolve()

@@ -45,6 +45,7 @@ from app.schemas.compaction import CompactionDecisionAction
 from app.schemas.flag import FlagReviewUpdate
 from app.schemas.run import RunCreate, RunRead
 from app.schemas.solver_state import SolverStateRead
+from app.services.assistance import classify_user_input
 from app.services.codex_materializer import codex_materializer
 from app.services.codex_preflight import codex_preflight_service
 from app.services.compaction import compaction_service
@@ -480,6 +481,13 @@ async def enqueue_run_message(run_id: str, payload: dict, session: AsyncSession 
     revision = int(latest or 0) + 1
     item = RunUserInput(run_id=run.id, content=content[:16000], input_type=str(payload.get("input_type") or "SUPPLEMENT")[:40], status="QUEUED", revision=revision)
     session.add(item)
+    guidance_level = classify_user_input(content)
+    level_rank = {"AUTONOMOUS": 0, "HINT_GUIDED": 1, "EVIDENCE_GUIDED": 2, "ANSWER_GUIDED": 3}
+    if level_rank.get(guidance_level, 0) > level_rank.get(run.assistance_level or "AUTONOMOUS", 0):
+        run.assistance_level = guidance_level
+    sources = list(run.assistance_sources_json or [])
+    sources.append({"type": guidance_level, "revision": revision, "source": "USER_INPUT"})
+    run.assistance_sources_json = sources[-100:]
     run.context_revision += 1
     await session.commit()
     await event_service.append(session, run.id, "user.input_received", {"revision": revision, "input_type": item.input_type})

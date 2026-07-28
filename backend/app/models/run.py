@@ -20,6 +20,10 @@ class SolveRun(UUIDTimestampMixin, Base):
     __tablename__ = "solve_runs"
     challenge_id: Mapped[str] = mapped_column(ForeignKey("challenges.id"), nullable=False)
     engine_type: Mapped[str] = mapped_column(String(40), default="mock")
+    # The legacy single-agent loop remains the default.  multi_agent_v1 is
+    # opt-in until its controller has accepted a task/result transition.
+    solver_mode: Mapped[str] = mapped_column(String(30), default="single_agent", nullable=False)
+    controller_revision: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     model_config_id: Mapped[str | None] = mapped_column(ForeignKey("model_configs.id"))
     role_name: Mapped[str | None] = mapped_column(String(120))
     role_version: Mapped[str | None] = mapped_column(String(40))
@@ -87,6 +91,11 @@ class SolveRun(UUIDTimestampMixin, Base):
     infrastructure_state: Mapped[str] = mapped_column(String(40), default="HEALTHY")
     infrastructure_last_error_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
     active_turn_id: Mapped[str | None] = mapped_column(String(36), index=True)
+    terminal_cleanup_completed: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    terminal_cleanup_manifest_id: Mapped[str | None] = mapped_column(String(36), index=True)
+    terminal_cleanup_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    terminal_evidence_snapshot_id: Mapped[str | None] = mapped_column(String(36), index=True)
+    cleanup_generation: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
 
 
 class AgentTurn(UUIDTimestampMixin, Base):
@@ -281,6 +290,10 @@ class Artifact(UUIDTimestampMixin, Base):
     sha256: Mapped[str] = mapped_column(String(64), default="")
     summary: Mapped[str] = mapped_column(Text, default="")
     status: Mapped[str] = mapped_column(String(20), default="ACTIVE", nullable=False)
+    retention_class: Mapped[str] = mapped_column(String(30), default="PROTECTED", nullable=False)
+    temporary: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    terminal_referenced: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    promoted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class ScriptRecord(UUIDTimestampMixin, Base):
@@ -334,6 +347,105 @@ class FlagCandidate(UUIDTimestampMixin, Base):
     pattern_matched: Mapped[bool] = mapped_column(Boolean, default=False)
     verified: Mapped[bool] = mapped_column(Boolean, default=False)
     review_state: Mapped[str] = mapped_column(String(20), default="OPEN")
+    first_seen_source_type: Mapped[str | None] = mapped_column(String(30))
+    first_seen_source_id: Mapped[str | None] = mapped_column(String(36))
+    first_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    source_tool_call_id: Mapped[str | None] = mapped_column(ForeignKey("tool_calls.id"))
+    source_agent_task_id: Mapped[str | None] = mapped_column(String(36), index=True)
+    source_assistance_level: Mapped[str] = mapped_column(String(30), default="AUTONOMOUS", nullable=False)
+
+
+class FlagProvenance(UUIDTimestampMixin, Base):
+    __tablename__ = "flag_provenance"
+    __table_args__ = (UniqueConstraint("candidate_id", name="uq_flag_provenance_candidate"),)
+
+    run_id: Mapped[str] = mapped_column(ForeignKey("solve_runs.id"), nullable=False, index=True)
+    candidate_id: Mapped[str] = mapped_column(ForeignKey("flag_candidates.id"), nullable=False)
+    first_seen_source_type: Mapped[str] = mapped_column(String(30), nullable=False)
+    first_seen_source_id: Mapped[str | None] = mapped_column(String(36))
+    first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    source_artifact_id: Mapped[str | None] = mapped_column(ForeignKey("artifacts.id"))
+    source_tool_call_id: Mapped[str | None] = mapped_column(ForeignKey("tool_calls.id"))
+    source_agent_task_id: Mapped[str | None] = mapped_column(String(36))
+    source_assistance_level: Mapped[str] = mapped_column(String(30), nullable=False, default="AUTONOMOUS")
+    verification_source_type: Mapped[str | None] = mapped_column(String(30))
+    verification_source_id: Mapped[str | None] = mapped_column(String(36))
+    source_is_autonomous: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+
+
+class CleanupManifest(UUIDTimestampMixin, Base):
+    __tablename__ = "cleanup_manifests"
+    __table_args__ = (UniqueConstraint("idempotency_key", name="uq_cleanup_manifest_idempotency"),)
+
+    run_id: Mapped[str] = mapped_column(ForeignKey("solve_runs.id"), nullable=False, index=True)
+    agent_task_id: Mapped[str | None] = mapped_column(String(36), index=True)
+    cleanup_kind: Mapped[str] = mapped_column(String(40), nullable=False)
+    status: Mapped[str] = mapped_column(String(30), nullable=False, default="PLANNED")
+    idempotency_key: Mapped[str] = mapped_column(String(255), nullable=False)
+    manifest_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    sha256: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    row_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    archive_path: Mapped[str | None] = mapped_column(String(1024))
+    archive_sha256: Mapped[str | None] = mapped_column(String(64))
+    retention_deadline: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    deleted_paths_json: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    preserved_paths_json: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    debug_mode: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+
+
+class ToolBatchSummary(UUIDTimestampMixin, Base):
+    __tablename__ = "tool_batch_summaries"
+    __table_args__ = (UniqueConstraint("run_id", "logical_tool_call_id", name="uq_tool_batch_run_logical"),)
+
+    run_id: Mapped[str] = mapped_column(ForeignKey("solve_runs.id"), nullable=False, index=True)
+    agent_task_id: Mapped[str | None] = mapped_column(String(36), index=True)
+    logical_tool_call_id: Mapped[str] = mapped_column(String(120), nullable=False)
+    tool_call_id: Mapped[str | None] = mapped_column(ForeignKey("tool_calls.id"))
+    tool_name: Mapped[str] = mapped_column(String(100), nullable=False)
+    subrequest_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    success_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    failure_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    retry_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    bytes_received: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+    duration_ms: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    result_artifact_id: Mapped[str | None] = mapped_column(ForeignKey("artifacts.id"))
+    result_artifact_path: Mapped[str | None] = mapped_column(String(1024))
+    status: Mapped[str] = mapped_column(String(30), nullable=False, default="COMPLETED")
+
+
+class ToolRequestFingerprint(UUIDTimestampMixin, Base):
+    __tablename__ = "tool_request_fingerprints"
+    __table_args__ = (UniqueConstraint("run_id", "fingerprint", name="uq_tool_request_run_fingerprint"),)
+
+    run_id: Mapped[str] = mapped_column(ForeignKey("solve_runs.id"), nullable=False, index=True)
+    fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    tool_name: Mapped[str] = mapped_column(String(100), nullable=False)
+    normalized_arguments_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    stage: Mapped[str] = mapped_column(String(80), nullable=False, default="")
+    evidence_version: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    logical_tool_call_id: Mapped[str | None] = mapped_column(String(120))
+    status: Mapped[str] = mapped_column(String(30), nullable=False, default="SCHEDULED")
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC), nullable=False)
+
+
+class WebResearchRecord(UUIDTimestampMixin, Base):
+    __tablename__ = "web_research_records"
+
+    run_id: Mapped[str] = mapped_column(ForeignKey("solve_runs.id"), nullable=False, index=True)
+    agent_task_id: Mapped[str | None] = mapped_column(String(36), index=True)
+    query: Mapped[str] = mapped_column(Text, nullable=False)
+    query_type: Mapped[str] = mapped_column(String(40), nullable=False)
+    requested_by: Mapped[str] = mapped_column(String(30), nullable=False)
+    risk_level: Mapped[str] = mapped_column(String(20), nullable=False)
+    answer_leak_risk: Mapped[str] = mapped_column(String(20), nullable=False)
+    status: Mapped[str] = mapped_column(String(30), nullable=False, default="EPHEMERAL")
+    source_urls_json: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    summary: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    used_in_fact_ids_json: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    runtime_path: Mapped[str | None] = mapped_column(String(1024))
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    promoted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class RunCompactionCheckpoint(UUIDTimestampMixin, Base):

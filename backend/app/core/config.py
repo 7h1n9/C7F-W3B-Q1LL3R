@@ -27,6 +27,10 @@ class Settings(BaseSettings):
     allow_remote_local_targets: bool = False
     codex_diagnostic_mode: bool = False
     historical_lesson_mode: str = "strategy_only"
+    web_search_provider: str = "disabled"
+    web_search_url: str = ""
+    web_search_api_key: str = ""
+    web_search_timeout_seconds: int = 20
 
     # Hotfix feature gates. They deliberately default to off; Codex MCP is
     # enabled for a run only after the explicit preflight succeeds.

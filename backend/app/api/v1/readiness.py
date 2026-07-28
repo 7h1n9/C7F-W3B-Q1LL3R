@@ -9,7 +9,7 @@ from app.services.codex_preflight import codex_preflight_service
 from app.services.runner_client import runner_client
 
 router = APIRouter(prefix="/readiness", tags=["readiness"])
-EXPECTED_REVISION = "0017_terminal_tool_tickets"
+EXPECTED_REVISION = "0025_data_governance_web_research"
 
 
 @router.get("/codex-preflight")

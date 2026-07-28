@@ -1,10 +1,11 @@
 import re
+from datetime import UTC, datetime
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.challenge import Challenge
-from app.models.run import Artifact, FlagCandidate, SolveRun
+from app.models.run import Artifact, FlagCandidate, FlagProvenance, SolveRun
 from app.orchestration.state_machine import RunStatus
 from app.services.events import event_service
 from app.services.verified_flag_stop import verified_flag_stop_controller
@@ -97,6 +98,10 @@ class FlagService:
         challenge: Challenge,
         artifact: Artifact,
         content: str,
+        *,
+        source_tool_call_id: str | None = None,
+        source_agent_task_id: str | None = None,
+        source_type: str = "TOOL_ARTIFACT",
     ) -> list[FlagCandidate]:
         matches = self._extract_matches(challenge.flag_pattern, content)
         candidates: list[FlagCandidate] = []
@@ -114,8 +119,29 @@ class FlagService:
                 source_artifact_id=artifact.id,
                 pattern_matched=True,
                 review_state="OPEN",
+                first_seen_source_type=source_type,
+                first_seen_source_id=artifact.id,
+                first_seen_at=datetime.now(UTC),
+                source_tool_call_id=source_tool_call_id or artifact.tool_call_id,
+                source_agent_task_id=source_agent_task_id,
+                source_assistance_level=run.assistance_level or "AUTONOMOUS",
             )
             session.add(item)
+            await session.flush()
+            session.add(
+                FlagProvenance(
+                    run_id=run.id,
+                    candidate_id=item.id,
+                    first_seen_source_type=source_type,
+                    first_seen_source_id=artifact.id,
+                    first_seen_at=item.first_seen_at or datetime.now(UTC),
+                    source_artifact_id=artifact.id,
+                    source_tool_call_id=source_tool_call_id or artifact.tool_call_id,
+                    source_agent_task_id=source_agent_task_id,
+                    source_assistance_level=run.assistance_level or "AUTONOMOUS",
+                    source_is_autonomous=(run.assistance_level or "AUTONOMOUS") in {"AUTONOMOUS", "HINT_GUIDED"},
+                )
+            )
             candidates.append(item)
         await session.commit()
         for item in candidates:
@@ -146,11 +172,30 @@ class FlagService:
                 pattern_matched=valid,
                 verified=valid,
                 review_state="VALID" if valid else "INVALID",
+                first_seen_source_type="USER_INPUT",
+                first_seen_source_id=None,
+                first_seen_at=datetime.now(UTC),
+                source_assistance_level=run.assistance_level or "ANSWER_GUIDED",
             )
             session.add(item)
+            await session.flush()
+            session.add(
+                FlagProvenance(
+                    run_id=run.id,
+                    candidate_id=item.id,
+                    first_seen_source_type="USER_INPUT",
+                    first_seen_at=item.first_seen_at or datetime.now(UTC),
+                    source_assistance_level=run.assistance_level or "ANSWER_GUIDED",
+                    source_is_autonomous=False,
+                )
+            )
         else:
             item.verified = valid
             item.review_state = "VALID" if valid else "INVALID"
+            provenance = await session.scalar(select(FlagProvenance).where(FlagProvenance.candidate_id == item.id))
+            if provenance:
+                provenance.verification_source_type = "FRESH_REPRODUCTION"
+                provenance.verification_source_id = item.source_artifact_id
         await session.commit()
         await event_service.append(
             session,

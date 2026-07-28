@@ -2,7 +2,8 @@ param(
     [int]$BackendPort = 8000,
     [int]$RunnerPort = 8091,
     [int]$BridgePort = 8090,
-    [int]$FrontendPort = 5173
+    [int]$FrontendPort = 5173,
+    [string]$RunnerUrl = "http://192.168.236.128:8091"
 )
 
 $ErrorActionPreference = "SilentlyContinue"
@@ -13,11 +14,12 @@ $services = @(
     @{ Name = "backend"; Port = $BackendPort; Uri = "http://127.0.0.1:$BackendPort/api/v1/health/ready" },
     @{ Name = "bridge"; Port = $BridgePort; Uri = "http://127.0.0.1:$BridgePort/health" },
     @{ Name = "frontend"; Port = $FrontendPort; Uri = "http://127.0.0.1:$FrontendPort" },
-    @{ Name = "runner"; Port = $RunnerPort; Uri = "http://127.0.0.1:$RunnerPort/health" }
+    @{ Name = "runner"; Port = $RunnerPort; Uri = "$($RunnerUrl.TrimEnd('/'))/health" }
 )
 
 foreach ($service in $services) {
-    $connection = Get-NetTCPConnection -State Listen -LocalPort $service.Port | Select-Object -First 1
+    $uri = [Uri]$service.Uri
+    $connection = if ($uri.Host -in @("127.0.0.1", "localhost", "::1")) { Get-NetTCPConnection -State Listen -LocalPort $service.Port | Select-Object -First 1 } else { $null }
     $pidPath = Join-Path $pidsRoot "$($service.Name).pid"
     $pidValue = if (Test-Path -LiteralPath $pidPath) { (Get-Content -LiteralPath $pidPath -Raw).Trim() } else { "-" }
     $health = "DOWN"

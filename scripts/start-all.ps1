@@ -7,7 +7,8 @@ param(
     [int]$RunnerPort = 8091,
     [int]$BridgePort = 8090,
     [int]$FrontendPort = 5173,
-    [string]$DatabaseUrl = ""
+    [string]$DatabaseUrl = "",
+    [string]$RunnerUrl = "http://192.168.236.128:8091"
 )
 
 $ErrorActionPreference = "Stop"
@@ -251,15 +252,14 @@ function Start-BackgroundService {
 
 $runnerToken = "development-runner-token"
 $frontendApiBase = "http://127.0.0.1:$BackendPort/api/v1"
-$backendRunnerUrl = "http://127.0.0.1:$RunnerPort"
+$backendRunnerUrl = $RunnerUrl.TrimEnd('/')
 $backendBridgeUrl = "http://127.0.0.1:$BridgePort"
 $backendCorsOrigins = "http://localhost:5173,http://127.0.0.1:5173"
 $backendEncryptionKey = "development-only-change-me"
 $ctfctlAccessKey = "development-ctfctl-access-key"
 $backendAllowedCidrs = "127.0.0.0/8,192.168.56.0/24,192.168.236.0/24"
-$sqliteFallbackUrl = "sqlite+aiosqlite:///./local-dev.db"
 $mysqlUrl = "mysql+asyncmy://ctf_agent:ctf_agent@127.0.0.1:3307/ctf_agent"
-$databaseUrl = if ($DatabaseUrl) { $DatabaseUrl } else { $sqliteFallbackUrl }
+$databaseUrl = if ($DatabaseUrl) { $DatabaseUrl } else { $mysqlUrl }
 
 $dockerUsed = $false
 if (-not $SkipDocker) {
@@ -290,13 +290,15 @@ if (-not $SkipDocker) {
                 throw "mysql container did not become healthy"
             }
         } catch {
-            Write-Warning "[docker] mysql startup failed, falling back to SQLite: $($_.Exception.Message)"
+            if (-not $DatabaseUrl) { throw "[docker] mysql startup failed and no alternate database was supplied: $($_.Exception.Message)" }
+            Write-Warning "[docker] mysql startup failed; using explicitly supplied database URL. $($_.Exception.Message)"
         }
     } else {
-        Write-Warning "[docker] docker command not found, falling back to SQLite."
+        if (-not $DatabaseUrl) { throw "[docker] docker command not found and no alternate database was supplied." }
+        Write-Warning "[docker] docker command not found; using explicitly supplied database URL."
     }
 } else {
-    Write-Warning "[docker] skipped by request, using SQLite fallback."
+    Write-Warning "[docker] skipped by request; using configured MySQL URL."
 }
 
 Set-EnvValue -Name "APP_DATABASE_URL" -Value $databaseUrl
@@ -358,7 +360,15 @@ if (-not (Test-Path (Join-Path $bridgeDir "node_modules"))) {
 Write-Host "[migrate] applying backend migrations..."
 Invoke-CommandInDirectory -Name "backend migrate" -WorkingDirectory $backendDir -Command $pythonExe -Arguments @("-m", "alembic", "upgrade", "head")
 
-Start-BackgroundService -Name "runner" -Port $RunnerPort -WorkingDirectory $runnerDir -Command $pythonExe -Arguments @("-m", "uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", "$RunnerPort") -HealthyUri "http://127.0.0.1:$RunnerPort/health" -ProcessPattern "app\.main:app.*--port\s+$RunnerPort"
+$runnerUri = [Uri]$backendRunnerUrl
+$localRunner = $runnerUri.Host -in @("127.0.0.1", "localhost", "::1")
+if ($localRunner) {
+    Start-BackgroundService -Name "runner" -Port $RunnerPort -WorkingDirectory $runnerDir -Command $pythonExe -Arguments @("-m", "uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", "$RunnerPort") -HealthyUri "http://127.0.0.1:$RunnerPort/health" -ProcessPattern "app\.main:app.*--port\s+$RunnerPort"
+} else {
+    Stop-ProjectService -Name "runner" -Port $RunnerPort -ProcessPattern "app\.main:app.*--port\s+$RunnerPort"
+    Wait-HttpOk -Uri "$backendRunnerUrl/health" -Name "remote runner" | Out-Null
+    Write-Host "[runner] using remote Kali Runner at $backendRunnerUrl"
+}
 Start-BackgroundService -Name "backend" -Port $BackendPort -WorkingDirectory $backendDir -Command $pythonExe -Arguments @("-m", "uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", "$BackendPort") -HealthyUri "http://127.0.0.1:$BackendPort/api/v1/health/ready" -ProcessPattern "app\.main:app.*--port\s+$BackendPort"
 Start-BackgroundService -Name "bridge" -Port $BridgePort -WorkingDirectory $bridgeDir -Command $npmExe -Arguments @("run", "dev") -HealthyUri "http://127.0.0.1:$BridgePort/health" -ProcessPattern "codex-bridge.*(dist[\\/]server\.js|src[\\/]server\.ts)"
 
@@ -380,7 +390,7 @@ Write-Host ""
 Write-Host "[state]"
 Write-Host "  docker mysql : $([bool]$dockerUsed)"
 Write-Host "  backend      : http://127.0.0.1:$BackendPort/api/v1/health/ready"
-Write-Host "  runner       : http://127.0.0.1:$RunnerPort/health"
+Write-Host "  runner       : $backendRunnerUrl/health"
 Write-Host "  bridge       : http://127.0.0.1:$BridgePort/health"
 Write-Host "  frontend     : http://127.0.0.1:$FrontendPort"
 Write-Host "  logs         : $logsRoot"
