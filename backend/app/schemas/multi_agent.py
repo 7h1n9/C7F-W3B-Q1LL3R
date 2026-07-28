@@ -1,7 +1,7 @@
 """Public contracts for the structured multi-agent controller."""
 
 from enum import StrEnum
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -30,6 +30,34 @@ class TaskBudget(BaseModel):
     max_logical_calls: int = Field(default=1, ge=0, le=1000)
     max_internal_requests: int = Field(default=8, ge=0, le=10000)
     max_runtime_seconds: int = Field(default=120, ge=1, le=86400)
+
+
+class ScriptProposalContract(BaseModel):
+    """Structured proposal consumed by the Script controller.
+
+    The controller, not the model, turns this proposal into the durable
+    CREATE/VALIDATE/EXECUTE chain.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    action: Literal["CREATE_BOUNDED_SCRIPT"]
+    script_name: str = Field(pattern=r"^[A-Za-z0-9_.-]+$", min_length=1, max_length=120)
+    language: Literal["python", "node", "bash"]
+    objective: str = Field(min_length=1, max_length=2000)
+    network_mode: Literal["none", "target_allowlist"]
+    allowed_hosts: list[str] = Field(default_factory=list, max_length=20)
+    max_requests: int = Field(default=1, ge=1, le=1000)
+    max_runtime_seconds: int = Field(default=60, ge=1, le=600)
+    checkpoint: str = Field(min_length=1, max_length=255)
+    resume: str = Field(min_length=1, max_length=1000)
+    script_content: str = Field(min_length=1, max_length=200000)
+
+    @model_validator(mode="after")
+    def network_requires_hosts(self) -> "ScriptProposalContract":
+        if self.network_mode == "target_allowlist" and not self.allowed_hosts:
+            raise ValueError("target_allowlist requires allowed_hosts")
+        return self
 
 
 class AgentTaskContract(BaseModel):

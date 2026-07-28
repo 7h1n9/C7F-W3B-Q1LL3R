@@ -8,6 +8,15 @@ from app.services.skill_selection import allowed_tools_for
 
 
 async def effective_tools_for(session: AsyncSession, run: SolveRun, challenge: Challenge) -> set[str]:
+    # Once an Attempt manifest exists it is the immutable source of truth for
+    # the running build.  Recomputing an ad-hoc intersection per request was
+    # the source of runtime tool drift.
+    from app.models.run import AttemptToolManifest, RunExecutionLease
+    lease = await session.scalar(select(RunExecutionLease).where(RunExecutionLease.run_id == run.id))
+    if lease and run.engine_type == "codex_sdk":
+        manifest = await session.scalar(select(AttemptToolManifest).where(AttemptToolManifest.attempt_id == lease.attempt_id))
+        if manifest is not None:
+            return set(manifest.effective_tools or []) - await forbidden_tools_for(session, run.id)
     allowed = set(allowed_tools_for(challenge.challenge_type))
     role_tools = set((run.role_snapshot_json or {}).get("tools") or [])
     if role_tools:
@@ -29,8 +38,9 @@ async def effective_tools_for(session: AsyncSession, run: SolveRun, challenge: C
             }
     except Exception:
         # Keep local test/fallback engines usable when the optional Runner is down;
-        # actual invocation still fails closed in ToolGateway.
-        pass
+        # codex attempts fail closed because their catalog must be reproducible.
+        if run.engine_type == "codex_sdk":
+            return set()
     return allowed - await forbidden_tools_for(session, run.id)
 
 

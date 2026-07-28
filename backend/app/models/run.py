@@ -83,6 +83,12 @@ class SolveRun(UUIDTimestampMixin, Base):
     last_compaction_snapshot_id: Mapped[str | None] = mapped_column(String(36), index=True)
     reserved_tool_calls: Mapped[int] = mapped_column(Integer, default=0)
     reserved_tool_calls_by_turn_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    # Required fallback actions have an independent reservation pool.  A
+    # general model/tool burst must never consume the four calls needed to
+    # materialize and execute a bounded extraction script.
+    reserved_required_action_calls: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    reserved_required_action_calls_by_type_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    required_action_calls_used: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     assistance_level: Mapped[str] = mapped_column(String(30), default="AUTONOMOUS")
     assistance_sources_json: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
     recovery_checkpoint_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
@@ -136,6 +142,8 @@ class RunAttempt(UUIDTimestampMixin, Base):
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     status: Mapped[str] = mapped_column(String(40), default="RUNNING")
+    runtime_build_manifest_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    tool_manifest_status: Mapped[str] = mapped_column(String(40), default="UNSET", nullable=False)
     error_code: Mapped[str | None] = mapped_column(String(100))
     agent_steps: Mapped[int] = mapped_column(Integer, default=0)
     tool_calls: Mapped[int] = mapped_column(Integer, default=0)
@@ -334,6 +342,11 @@ class ScriptRecord(UUIDTimestampMixin, Base):
     """Provenance for generated exploit scripts, separate from execution output."""
 
     __tablename__ = "scripts"
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(UTC),
+        onupdate=lambda: datetime.now(UTC),
+    )
     run_id: Mapped[str] = mapped_column(ForeignKey("solve_runs.id"), nullable=False, index=True)
     artifact_id: Mapped[str | None] = mapped_column(ForeignKey("artifacts.id"))
     path: Mapped[str] = mapped_column(String(1024), nullable=False)
@@ -342,7 +355,22 @@ class ScriptRecord(UUIDTimestampMixin, Base):
     assistance_level: Mapped[str] = mapped_column(String(30), default="AUTONOMOUS")
     assumption_provenance_json: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
     design_card_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
-    status: Mapped[str] = mapped_column(String(20), default="ACTIVE", nullable=False)
+    # ``path`` is retained for compatibility with the original provenance
+    # table; script_path is the explicit lifecycle field used by the
+    # controller and Runner.
+    script_path: Mapped[str | None] = mapped_column(String(1024))
+    agent_task_id: Mapped[str | None] = mapped_column(String(36), index=True)
+    tool_call_id: Mapped[str | None] = mapped_column(ForeignKey("tool_calls.id"))
+    objective: Mapped[str] = mapped_column(Text, default="")
+    network_mode: Mapped[str] = mapped_column(String(40), default="none")
+    allowed_hosts_json: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    max_requests: Mapped[int] = mapped_column(Integer, default=0)
+    max_runtime_seconds: Mapped[int] = mapped_column(Integer, default=60)
+    validation_error: Mapped[str | None] = mapped_column(Text)
+    execution_error: Mapped[str | None] = mapped_column(Text)
+    result_artifact_id: Mapped[str | None] = mapped_column(ForeignKey("artifacts.id"))
+    checkpoint_artifact_id: Mapped[str | None] = mapped_column(ForeignKey("artifacts.id"))
+    status: Mapped[str] = mapped_column(String(20), default="CREATED", nullable=False)
 
 
 class Observation(UUIDTimestampMixin, Base):

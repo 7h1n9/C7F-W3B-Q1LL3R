@@ -56,6 +56,8 @@ class ToolGateway:
         *, logical_tool_call_id: str | None = None, parent_tool_call_id: str | None = None,
         execution_layer: str = "gateway", turn_id: str | None = None,
         provider_tool_name: str | None = None, logical_kind: str = "TOOL",
+        required_action: bool = False,
+        required_action_kind: str | None = None,
     ) -> dict:
         definition = load_tool_definitions().get(name)
         if not definition or not definition.enabled:
@@ -102,11 +104,18 @@ class ToolGateway:
         turn_started_at = None
         if turn_id:
             turn_started_at = await session.scalar(select(AgentTurn.turn_started_at).where(AgentTurn.id == turn_id, AgentTurn.run_id == run.id))
-        await run_budget_guard.enforce(session, run, attempt_id=lease.attempt_id, turn_id=turn_id)
+        await run_budget_guard.enforce(
+            session,
+            run,
+            attempt_id=lease.attempt_id,
+            turn_id=turn_id,
+            required_action=required_action,
+            required_action_kind=required_action_kind or name,
+        )
         if name == "file_read":
             cached = await self._cached_file_read(session, run, arguments)
             if cached is not None:
-                await run_budget_guard.release(session, run, turn_id=turn_id)
+                await run_budget_guard.release(session, run, turn_id=turn_id, required_action=required_action, required_action_kind=required_action_kind or name)
                 await session.commit()
                 await event_service.append(
                     session,
@@ -151,7 +160,7 @@ class ToolGateway:
             turn_id=turn_id,
             turn_started_at=turn_started_at,
         )
-        await run_budget_guard.release(session, run, turn_id=turn_id)
+        await run_budget_guard.release(session, run, turn_id=turn_id, required_action=required_action, required_action_kind=required_action_kind or name)
         await effective_logical_tool_call_service.trace(
             session, logical, execution_layer=execution_layer, event_type="requested", external_id=call.id
         )
@@ -315,23 +324,38 @@ class ToolGateway:
             existing_script = await session.scalar(
                 select(ScriptRecord).where(
                     ScriptRecord.run_id == run.id,
-                    ScriptRecord.path == artifact.file_path,
-                    ScriptRecord.sha256 == artifact.sha256,
-                )
+                    ScriptRecord.path == str(arguments.get("path") or artifact.file_path),
+                ).order_by(ScriptRecord.created_at.desc())
             )
             if existing_script is None:
-                session.add(
-                    ScriptRecord(
-                        run_id=run.id,
-                        artifact_id=artifact.id,
-                        path=artifact.file_path,
-                        sha256=artifact.sha256,
-                        source="MODEL_GENERATED",
-                        assistance_level=level,
-                        assumption_provenance_json=provenance,
-                        design_card_json=arguments.get("design_card") or {},
-                    )
+                existing_script = ScriptRecord(
+                    run_id=run.id,
+                    artifact_id=artifact.id,
+                    path=str(arguments.get("path") or artifact.file_path),
+                    script_path=str(arguments.get("path") or artifact.file_path),
+                    sha256=str(arguments.get("script_sha256") or ""),
+                    source="MODEL_GENERATED",
+                    assistance_level=level,
+                    assumption_provenance_json=provenance,
+                    design_card_json=arguments.get("design_card") or {},
+                    objective=str((arguments.get("design_card") or {}).get("objective") or ""),
+                    network_mode=str(arguments.get("network_mode") or "none"),
+                    allowed_hosts_json=list(challenge.allowed_hosts or []),
+                    max_requests=int(arguments.get("max_requests") or 0),
+                    max_runtime_seconds=int(arguments.get("timeout_seconds") or 60),
+                    status="COMPLETED" if result.get("status") == "COMPLETED" else "FAILED",
+                    tool_call_id=call.id,
+                    result_artifact_id=artifact.id,
                 )
+                session.add(existing_script)
+            else:
+                existing_script.artifact_id = artifact.id
+                existing_script.status = "COMPLETED" if result.get("status") == "COMPLETED" else "PARTIAL" if result.get("status") == "PARTIAL" else "FAILED"
+                existing_script.execution_error = None if existing_script.status in {"COMPLETED", "PARTIAL"} else str(result.get("error") or result.get("summary") or "")[:4000]
+                existing_script.result_artifact_id = artifact.id
+                existing_script.tool_call_id = call.id
+                if not existing_script.sha256 and arguments.get("script_sha256"):
+                    existing_script.sha256 = str(arguments["script_sha256"])
             if level == "ANSWER_GUIDED" or (level == "EVIDENCE_GUIDED" and run.assistance_level == "AUTONOMOUS"):
                 run.assistance_level = level
             current_sources = list(run.assistance_sources_json or [])

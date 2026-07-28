@@ -21,12 +21,17 @@ class BudgetDecision:
     turn_count: int
     reserved_count: int = 0
     reserved_turn_count: int = 0
+    required_action: bool = False
+    required_reserved_count: int = 0
     reason: str | None = None
 
 
 class RunBudgetGuard:
     SYSTEM_HARD_LIMIT = 120
-    MAX_TOOLS_PER_TURN = 8
+    # A Codex SDK turn can legitimately contain a bounded batch plus a small
+    # amount of evidence inspection.  Eight was too small for the CTF role and
+    # made the MCP layer report budget exhaustion after a handful of calls.
+    MAX_TOOLS_PER_TURN = 16
     MAX_TOOLS_PER_ATTEMPT = 40
 
     def __init__(self) -> None:
@@ -34,12 +39,25 @@ class RunBudgetGuard:
 
     def _limits(self, run: SolveRun) -> tuple[int, int, int]:
         role = run.role_snapshot_json or {}
+        role_limits = role.get("limits") if isinstance(role.get("limits"), dict) else role
         configured = int(run.max_tool_calls or self.SYSTEM_HARD_LIMIT)
-        role_limit = int(role.get("max_tool_calls") or self.SYSTEM_HARD_LIMIT)
+        role_limit = int(
+            role_limits.get("max_tool_calls")
+            or role.get("max_tool_calls")
+            or self.SYSTEM_HARD_LIMIT
+        )
         return (
             min(configured, role_limit, self.SYSTEM_HARD_LIMIT),
-            int(role.get("max_tools_per_turn") or self.MAX_TOOLS_PER_TURN),
-            int(role.get("max_tools_per_attempt") or self.MAX_TOOLS_PER_ATTEMPT),
+            int(
+                role_limits.get("max_tools_per_turn")
+                or role.get("max_tools_per_turn")
+                or self.MAX_TOOLS_PER_TURN
+            ),
+            int(
+                role_limits.get("max_tools_per_attempt")
+                or role.get("max_tools_per_attempt")
+                or self.MAX_TOOLS_PER_ATTEMPT
+            ),
         )
 
     async def counts(self, session, run: SolveRun, *, attempt_id: str | None = None, turn_id: str | None = None, turn_started_at=None) -> tuple[int, int, int]:
@@ -90,7 +108,23 @@ class RunBudgetGuard:
             )
         return run_count, attempt_count, turn_count
 
-    async def check(self, session, run: SolveRun, *, attempt_id: str | None = None, turn_id: str | None = None, turn_started_at=None) -> BudgetDecision:
+    async def check(self, session, run: SolveRun, *, attempt_id: str | None = None, turn_id: str | None = None, turn_started_at=None, required_action: bool = False) -> BudgetDecision:
+        if required_action:
+            reserved = int(run.reserved_required_action_calls or 0)
+            used = int(run.required_action_calls_used or 0)
+            allowed = used + reserved < 4
+            return BudgetDecision(
+                allowed=allowed,
+                effective_max_tool_calls=4,
+                run_count=0,
+                attempt_count=0,
+                turn_count=0,
+                reserved_count=int(run.reserved_tool_calls or 0),
+                reserved_turn_count=0,
+                required_action=True,
+                required_reserved_count=reserved,
+                reason=None if allowed else "REQUIRED_ACTION_BUDGET_EXHAUSTED",
+            )
         maximum, per_turn, per_attempt = self._limits(run)
         run_count, attempt_count, turn_count = await self.counts(
             session, run, attempt_id=attempt_id, turn_id=turn_id, turn_started_at=turn_started_at
@@ -115,12 +149,12 @@ class RunBudgetGuard:
             reason=reason,
         )
 
-    async def enforce(self, session, run: SolveRun, *, attempt_id: str | None = None, turn_id: str | None = None, turn_started_at=None) -> BudgetDecision:
+    async def enforce(self, session, run: SolveRun, *, attempt_id: str | None = None, turn_id: str | None = None, turn_started_at=None, required_action: bool = False, required_action_kind: str | None = None) -> BudgetDecision:
         lock = self._locks.setdefault(run.id, asyncio.Lock())
         async with lock:
-            return await self._enforce(session, run, attempt_id=attempt_id, turn_id=turn_id, turn_started_at=turn_started_at)
+            return await self._enforce(session, run, attempt_id=attempt_id, turn_id=turn_id, turn_started_at=turn_started_at, required_action=required_action, required_action_kind=required_action_kind)
 
-    async def _enforce(self, session, run: SolveRun, *, attempt_id: str | None = None, turn_id: str | None = None, turn_started_at=None) -> BudgetDecision:
+    async def _enforce(self, session, run: SolveRun, *, attempt_id: str | None = None, turn_id: str | None = None, turn_started_at=None, required_action: bool = False, required_action_kind: str | None = None) -> BudgetDecision:
         # The lock is essential: checking a COUNT and inserting the logical
         # call in separate transactions lets concurrent model actions all see
         # the same remaining budget.  MySQL/InnoDB honors FOR UPDATE; SQLite
@@ -131,8 +165,19 @@ class RunBudgetGuard:
         if locked_run is None:
             raise DomainError("RUN_NOT_FOUND", "Run no longer exists.", status_code=404)
         turn_id = turn_id or locked_run.active_turn_id
-        decision = await self.check(session, locked_run, attempt_id=attempt_id, turn_id=turn_id, turn_started_at=turn_started_at)
+        decision = await self.check(session, locked_run, attempt_id=attempt_id, turn_id=turn_id, turn_started_at=turn_started_at, required_action=required_action)
         if decision.allowed:
+            if required_action:
+                locked_run.reserved_required_action_calls = int(locked_run.reserved_required_action_calls or 0) + 1
+                by_type = dict(locked_run.reserved_required_action_calls_by_type_json or {})
+                if required_action_kind:
+                    by_type[required_action_kind] = int(by_type.get(required_action_kind, 0)) + 1
+                locked_run.reserved_required_action_calls_by_type_json = by_type
+                run.reserved_required_action_calls = locked_run.reserved_required_action_calls
+                run.reserved_required_action_calls_by_type_json = by_type
+                await session.flush()
+                await session.commit()
+                return decision
             locked_run.reserved_tool_calls = int(locked_run.reserved_tool_calls or 0) + 1
             by_turn = dict(locked_run.reserved_tool_calls_by_turn_json or {})
             if turn_id:
@@ -146,11 +191,25 @@ class RunBudgetGuard:
             await session.commit()
             return decision
 
+        if decision.reason == "REQUIRED_ACTION_BUDGET_EXHAUSTED":
+            raise DomainError(
+                decision.reason,
+                "The bounded fallback action budget is exhausted.",
+                {"required_reserved_count": decision.required_reserved_count, "required_action_used": int(run.required_action_calls_used or 0), "required_action_budget": 4},
+                429,
+                stage="REQUIRED_ACTION_BUDGET",
+                retryable=False,
+            )
         if decision.reason == "TURN_TOOL_BUDGET_EXHAUSTED":
             raise DomainError(
                 decision.reason,
                 "The current model turn exceeded its tool budget.",
-                {"effective_max_tool_calls": decision.effective_max_tool_calls, "turn_count": decision.turn_count, "reserved_turn_count": decision.reserved_turn_count},
+                {
+                    "effective_max_tool_calls": decision.effective_max_tool_calls,
+                    "turn_count": decision.turn_count,
+                    "reserved_turn_count": decision.reserved_turn_count,
+                    "per_turn_limit": self._limits(run)[1],
+                },
                 429,
                 stage="BUDGET_GUARD",
                 retryable=False,
@@ -194,8 +253,20 @@ class RunBudgetGuard:
             429,
         )
 
-    async def release(self, session, run: SolveRun, amount: int = 1, turn_id: str | None = None) -> None:
+    async def release(self, session, run: SolveRun, amount: int = 1, turn_id: str | None = None, required_action: bool = False, required_action_kind: str | None = None) -> None:
         """Transfer an in-flight reservation to a persisted logical call."""
+        if required_action:
+            amount = max(1, amount)
+            run.reserved_required_action_calls = max(0, int(run.reserved_required_action_calls or 0) - amount)
+            run.required_action_calls_used = int(run.required_action_calls_used or 0) + amount
+            by_type = dict(run.reserved_required_action_calls_by_type_json or {})
+            if required_action_kind and by_type.get(required_action_kind, 0):
+                by_type[required_action_kind] = max(0, int(by_type[required_action_kind]) - amount)
+                if not by_type[required_action_kind]:
+                    by_type.pop(required_action_kind, None)
+            run.reserved_required_action_calls_by_type_json = by_type
+            await session.flush()
+            return
         run.reserved_tool_calls = max(0, int(run.reserved_tool_calls or 0) - max(1, amount))
         by_turn = dict(run.reserved_tool_calls_by_turn_json or {})
         if turn_id and by_turn.get(str(turn_id), 0):

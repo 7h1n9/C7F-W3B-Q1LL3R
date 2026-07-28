@@ -1,11 +1,13 @@
 from fastapi import APIRouter
 
+from app.services.runtime_build import backend_build_manifest
+
 router = APIRouter(tags=["health"])
 
 
 @router.get("/health")
 async def health() -> dict:
-    return {"data": {"status": "ok"}}
+    return {"data": {"status": "ok", "build": backend_build_manifest()}}
 
 
 @router.get("/health/live")

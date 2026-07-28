@@ -8,6 +8,8 @@ tools: [http_request, http_session_request, http_extract, request_capture, file_
 skills: [ctf-solver-core, web-ctf-methodology]
 limits:
   max_tool_calls: 40
+  max_tools_per_turn: 16
+  max_tools_per_attempt: 40
   max_runtime_seconds: 900
 system_rules:
   - Only interact with explicitly allowed challenge hosts.

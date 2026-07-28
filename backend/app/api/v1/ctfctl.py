@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import asyncio
 import secrets
 import shutil
 import tarfile
@@ -30,10 +31,12 @@ from app.services.workspace_policy import (
     file_manifest,
 )
 from app.services.workspace_sync import workspace_sync_service
+from app.services.solver_state import solver_state_service
 from app.tools.gateway import tool_gateway
 from app.tools.registry import load_tool_definitions
 
 router = APIRouter(prefix="/internal/ctfctl", tags=["internal-ctfctl"])
+_workspace_locks: dict[str, asyncio.Lock] = {}
 
 
 class Scope(BaseModel):
@@ -54,6 +57,10 @@ class Scope(BaseModel):
 class Request(BaseModel):
     scope: Scope
     tool_ticket: str | None = None
+    # Set only by the backend fallback controller.  It gives the required
+    # CREATE/VALIDATE/EXECUTE chain its independent reservation pool.
+    required_action: bool = False
+    required_action_kind: str | None = None
 
 
 class ReadRequest(Request):
@@ -116,46 +123,48 @@ async def _workspace_logical_call(session: AsyncSession, run: SolveRun, payload:
     from app.services.effective_logical_tool_calls import effective_logical_tool_call_service
     from app.services.run_budget_guard import run_budget_guard
 
-    # Validate file existence before creating or reserving a logical call.
-    # Negative results are cached per run workspace revision so repeated model
-    # reads become cheap FILE_NOT_FOUND_CACHED responses.
-    if tool_name in {"workspace_read", "workspace_stat"} and isinstance(payload, ReadRequest):
-        policy = policy_for(payload, Path(run.workspace_path).resolve())
-        relative = str(payload.path).replace("\\", "/")
-        cache_key = f"{run.workspace_revision}:{relative}"
-        negative = dict(run.workspace_negative_cache_json or {})
-        if cache_key in negative:
-            raise DomainError("FILE_NOT_FOUND_CACHED", "Requested workspace path does not exist.", {"path": relative, "counts_toward_budget": False}, 404)
-        target, normalized = policy.path(payload.path, operation="read", allow_missing=True)
-        if not target.is_file():
-            negative[cache_key] = {"path": normalized, "workspace_revision": run.workspace_revision}
-            run.workspace_negative_cache_json = negative
-            await session.commit()
-            raise DomainError("FILE_NOT_FOUND", "Requested workspace path does not exist.", {"path": normalized, "counts_toward_budget": False}, 404)
-    turn_id = run.active_turn_id or payload.scope.turn_id or payload.scope.model_turn_id
-    turn_started_at = await session.scalar(select(AgentTurn.turn_started_at).where(AgentTurn.id == turn_id, AgentTurn.run_id == run.id)) if turn_id else None
-    logical_id = payload.scope.logical_tool_call_id or f"workspace:{turn_id or 'legacy'}:{tool_name}:{uuid.uuid4()}"
-    await run_budget_guard.enforce(session, run, attempt_id=payload.scope.attempt_id, turn_id=turn_id)
-    logical = await effective_logical_tool_call_service.ensure(
-        session,
-        run,
-        logical_tool_call_id=logical_id,
-        tool_name=tool_name,
-        arguments={},
-        status="COMPLETED",
-        attempt_id=payload.scope.attempt_id,
-        counts_toward_budget=True,
-        logical_kind="WORKSPACE_MCP",
-        provider_tool_name=f"ctfctl.{tool_name}",
-        effective_tool_name=tool_name,
-        turn_id=turn_id,
-        turn_started_at=turn_started_at,
-    )
-    await run_budget_guard.release(session, run, turn_id=turn_id)
-    await effective_logical_tool_call_service.trace(
-        session, logical, execution_layer="ctfctl", event_type="completed", external_id=payload.scope.logical_tool_call_id or logical_id
-    )
-    await session.commit()
+    lock = _workspace_locks.setdefault(run.id, asyncio.Lock())
+    if lock.locked():
+        raise DomainError("WORKSPACE_CONCURRENT_ACCESS", "Workspace MCP operations are serialized per Run.", {"max_concurrency": 1}, 409)
+    await lock.acquire()
+    try:
+        state = await solver_state_service.load(session, run.id)
+        if tool_name == "workspace_read" and isinstance(payload, ReadRequest) and state:
+            relative = str(payload.path).replace("\\", "/")
+            end_line = payload.end_line or 0
+            if any(item.get("path") == relative and int(item.get("start_line", 1)) == payload.start_line and (int(item.get("end_line", 0)) == end_line or end_line == 0) for item in (state.read_ranges_json or [])):
+                raise DomainError("EVIDENCE_ALREADY_AVAILABLE", "This workspace range is already present in the Evidence Ledger.", {"path": relative, "counts_toward_budget": False, "new_logical_tool_call": False}, 409)
+            if str(run.current_phase or "") == "FLAG_SEARCH" and state.read_ranges_json:
+                raise DomainError("METHOD_ACTION_REQUIRED", "FLAG_SEARCH permits one workspace read; continue with the required bounded action.", {"path": relative, "counts_toward_budget": False}, 409)
+
+        # Validate file existence before creating or reserving a logical call.
+        if tool_name in {"workspace_read", "workspace_stat"} and isinstance(payload, ReadRequest):
+            policy = policy_for(payload, Path(run.workspace_path).resolve())
+            relative = str(payload.path).replace("\\", "/")
+            cache_key = f"{run.workspace_revision}:{relative}"
+            negative = dict(run.workspace_negative_cache_json or {})
+            if cache_key in negative:
+                raise DomainError("FILE_NOT_FOUND_CACHED", "Requested workspace path does not exist.", {"path": relative, "counts_toward_budget": False}, 404)
+            target, normalized = policy.path(payload.path, operation="read", allow_missing=True)
+            if not target.is_file():
+                negative[cache_key] = {"path": normalized, "workspace_revision": run.workspace_revision}
+                run.workspace_negative_cache_json = negative
+                await session.commit()
+                raise DomainError("FILE_NOT_FOUND", "Requested workspace path does not exist.", {"path": normalized, "counts_toward_budget": False}, 404)
+        turn_id = run.active_turn_id or payload.scope.turn_id or payload.scope.model_turn_id
+        turn_started_at = await session.scalar(select(AgentTurn.turn_started_at).where(AgentTurn.id == turn_id, AgentTurn.run_id == run.id)) if turn_id else None
+        logical_id = payload.scope.logical_tool_call_id or f"workspace:{turn_id or 'legacy'}:{tool_name}:{uuid.uuid4()}"
+        await run_budget_guard.enforce(session, run, attempt_id=payload.scope.attempt_id, turn_id=turn_id, required_action=bool(payload.required_action), required_action_kind=payload.required_action_kind or tool_name)
+        logical = await effective_logical_tool_call_service.ensure(
+            session, run, logical_tool_call_id=logical_id, tool_name=tool_name, arguments={}, status="COMPLETED",
+            attempt_id=payload.scope.attempt_id, counts_toward_budget=True, logical_kind="WORKSPACE_MCP",
+            provider_tool_name=f"ctfctl.{tool_name}", effective_tool_name=tool_name, turn_id=turn_id, turn_started_at=turn_started_at,
+        )
+        await run_budget_guard.release(session, run, turn_id=turn_id, required_action=bool(payload.required_action), required_action_kind=payload.required_action_kind or tool_name)
+        await effective_logical_tool_call_service.trace(session, logical, execution_layer="ctfctl", event_type="completed", external_id=payload.scope.logical_tool_call_id or logical_id)
+        await session.commit()
+    finally:
+        lock.release()
 
 
 async def _workspace_changed(session: AsyncSession, run: SolveRun) -> None:
@@ -316,6 +325,14 @@ async def workspace_read(payload: ReadRequest, x_ctfctl_access_key: str | None =
     lines = target.read_text(encoding="utf-8", errors="replace").splitlines()
     end = payload.end_line or len(lines)
     text = "\n".join(lines[payload.start_line - 1 : end])[: payload.max_chars]
+    await solver_state_service.record_file_read(
+        session,
+        run.id,
+        path=relative,
+        start_line=payload.start_line,
+        end_line=min(end, len(lines)),
+        content_sha256=hashlib.sha256(target.read_bytes()).hexdigest(),
+    )
     return {"data": {"path": relative, "start_line": payload.start_line, "end_line": min(end, len(lines)), "content": text, "content_sha256": hashlib.sha256(target.read_bytes()).hexdigest(), "truncated": len(text) >= payload.max_chars}}
 
 
@@ -348,8 +365,12 @@ async def workspace_search(payload: SearchRequest, x_ctfctl_access_key: str | No
 
 @router.post("/workspace_write_note")
 async def workspace_write_note(payload: WriteRequest, x_ctfctl_access_key: str | None = Header(default=None), session: AsyncSession = Depends(get_session)) -> dict:
+    return await _write_workspace_file(payload, x_ctfctl_access_key, session, "workspace_write_note")
+
+
+async def _write_workspace_file(payload: WriteRequest, x_ctfctl_access_key: str | None, session: AsyncSession, tool_name: str) -> dict:
     run, _, root = await scoped_run(payload, x_ctfctl_access_key, session)
-    await _workspace_logical_call(session, run, payload, "workspace_write_note")
+    await _workspace_logical_call(session, run, payload, tool_name)
     target, relative = policy_for(payload, root).writable(payload.path)
     if target.exists() and not payload.overwrite:
         raise DomainError("FILE_EXISTS", "Destination exists and overwrite=false.", {"path": relative}, 409)
@@ -367,7 +388,7 @@ async def workspace_write_note(payload: WriteRequest, x_ctfctl_access_key: str |
 
 @router.post("/workspace_write_file")
 async def workspace_write_file(payload: WriteRequest, x_ctfctl_access_key: str | None = Header(default=None), session: AsyncSession = Depends(get_session)) -> dict:
-    return await workspace_write_note(payload, x_ctfctl_access_key, session)
+    return await _write_workspace_file(payload, x_ctfctl_access_key, session, "workspace_write_file")
 
 
 @router.post("/workspace_patch_file")
@@ -527,7 +548,19 @@ async def list_tools(payload: Request, x_ctfctl_access_key: str | None = Header(
         "workspace_write_file", "workspace_write_note", "workspace_patch_file", "workspace_mkdir", "workspace_copy",
         "workspace_move_generated", "workspace_delete_generated", "workspace_extract_archive",
     }
-    return {"data": {"tools": [{"name": name, "description": definitions[name].description, "parameters": definitions[name].parameters} for name in sorted(allowed | {"script_run", "sandbox_exec"}) if name in definitions and definitions[name].enabled] + [{"name": name, "description": "Run-scoped workspace operation.", "parameters": {}} for name in sorted(workspace_tools)]}}
+    workspace_parameters = {
+        "workspace_list": {"type": "object", "properties": {}, "additionalProperties": False},
+        "workspace_tree": {"type": "object", "properties": {}, "additionalProperties": False},
+        "workspace_stat": {"path": {"type": "string", "required": True}},
+        "workspace_read": {"path": {"type": "string", "required": True}, "start_line": {"type": "integer"}, "end_line": {"type": "integer"}, "max_chars": {"type": "integer"}},
+        "workspace_search": {"query": {"type": "string", "required": True}, "max_results": {"type": "integer"}},
+        "workspace_write_file": {"path": {"type": "string", "required": True}, "content": {"type": "string", "required": True}, "encoding": {"type": "string"}, "overwrite": {"type": "boolean"}},
+        "workspace_write_note": {"path": {"type": "string", "required": True}, "content": {"type": "string", "required": True}, "encoding": {"type": "string"}, "overwrite": {"type": "boolean"}},
+        "workspace_patch_file": {"path": {"type": "string", "required": True}, "content": {"type": "string", "required": True}, "old_text": {"type": "string"}, "start_line": {"type": "integer"}, "end_line": {"type": "integer"}},
+    }
+    rows = [{"name": name, "description": definitions[name].description, "parameters": definitions[name].parameters} for name in sorted(allowed) if name in definitions and definitions[name].enabled]
+    rows.extend({"name": name, "description": "Run-scoped workspace operation.", "parameters": workspace_parameters.get(name, {})} for name in sorted(workspace_tools))
+    return {"data": {"tools": rows}}
 
 
 @router.post("/tool/{tool_name}")
@@ -542,6 +575,11 @@ async def direct_tool(tool_name: str, payload: DirectToolRequest, x_ctfctl_acces
     # declarative ToolDefinition validator reject every direct MCP tool call
     # as an unexpected field.
     raw.pop("tool_ticket", None)
+    # These are backend control-plane fields, not arguments of the declared
+    # tool.  Keeping them here makes every direct MCP call fail strict schema
+    # validation with extra_forbidden (notably script_run).
+    raw.pop("required_action", None)
+    raw.pop("required_action_kind", None)
     arguments = raw.pop("arguments", None)
     if not isinstance(arguments, dict):
         arguments = raw

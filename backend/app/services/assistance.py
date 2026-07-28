@@ -37,8 +37,30 @@ class ScriptDesignCard(BaseModel):
     fallback: str | None = None
 
 
-def assistance_level(assumptions: list[dict[str, Any]] | list[Assumption] | None) -> str:
-    sources = {item.source if isinstance(item, Assumption) else item.get("source") for item in (assumptions or [])}
+def assistance_level(
+    assumptions: list[dict[str, Any]] | list[Assumption] | list[str] | None,
+) -> str:
+    """Determine the assistance level from structured or legacy provenance.
+
+    Older runtime callers persist provenance as plain labels/descriptions rather
+    than ``{"source": ...}`` objects.  Treat non-empty strings as evidence
+    provenance so those callers remain safe and cannot be mistaken for answer
+    guidance.
+    """
+    sources: set[str] = set()
+    for item in assumptions or []:
+        if isinstance(item, Assumption):
+            sources.add(item.source)
+        elif isinstance(item, dict):
+            source = item.get("source")
+            if source:
+                sources.add(str(source))
+        elif isinstance(item, str) and item.strip():
+            normalized = item.strip().upper()
+            if normalized in ASSUMPTION_SOURCES:
+                sources.add(normalized)
+            else:
+                sources.add("OBSERVATION")
     sources.discard(None)
     if "KNOWN_ANSWER" in sources:
         return "ANSWER_GUIDED"

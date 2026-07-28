@@ -68,9 +68,11 @@ from app.services.progress_evaluator import progress_evaluator
 from app.services.reports import ReproductionPlanner, report_service
 from app.services.run_attempts import run_attempt_service
 from app.services.runner_client import runner_client
+from app.services.script_controller import script_fallback_controller
 from app.services.solver_state import solver_state_service
 from app.services.tool_manifest import refresh_runtime_tool_manifest
 from app.services.tool_permissions import effective_tools_for
+from app.services.run_budget_guard import run_budget_guard
 from app.tools.gateway import tool_gateway
 from app.tools.registry import load_tool_definitions
 
@@ -245,7 +247,18 @@ class SolveOrchestrator:
             )
         )
         if boolean_confirmed and not flag_verified:
-            if no_progress_count == 2:
+            if no_progress_count >= 2:
+                run.recovery_checkpoint_json = {**(run.recovery_checkpoint_json or {}), "force_script_fallback": True}
+                await session.commit()
+                attempt = await session.scalar(select(RunAttempt).where(RunAttempt.run_id == run.id, RunAttempt.status == "RUNNING"))
+                lease = await session.scalar(select(RunExecutionLease).where(RunExecutionLease.run_id == run.id))
+                if attempt and lease:
+                    fallback = await script_fallback_controller.run(session, run, challenge, attempt, lease)
+                    if fallback.get("status") in {"COMPLETED", "PARTIAL", "FAILED"}:
+                        await event_service.append(session, run.id, "agent.extraction_controller_result", {"status": fallback.get("status"), "script_id": fallback.get("script_id"), "error_code": fallback.get("error_code")})
+                        if fallback.get("status") in {"COMPLETED", "PARTIAL"}:
+                            return False
+            if no_progress_count == 1:
                 await event_service.append(
                     session,
                     run.id,
@@ -256,7 +269,7 @@ class SolveOrchestrator:
                         "reason": "boolean_oracle_confirmed_without_verified_flag",
                     },
                 )
-            elif no_progress_count == 3:
+            elif no_progress_count == 2:
                 await solver_state_service.require_plan_action(session, run.id, True)
                 await event_service.append(
                     session,
@@ -264,9 +277,9 @@ class SolveOrchestrator:
                     "agent.extraction_task_forced",
                     {"tool": "boolean_config_extract", "fallback": "script_run"},
                 )
-            elif no_progress_count >= 4:
+            elif no_progress_count >= 3:
                 run.last_error_code = "METHOD_ACTION_REQUIRED"
-                run.last_error_message = "A confirmed boolean oracle requires a bounded extraction action."
+                run.last_error_message = "A confirmed boolean oracle produced three replans without a durable extraction action."
                 await self._transition(session, run, RunStatus.PAUSED_CHECKPOINT)
                 await event_service.append(
                     session,
@@ -637,6 +650,9 @@ class SolveOrchestrator:
                             "attempt.tool_manifest_refreshed",
                             {"manifest_id": manifest.id, "manifest_sha256": manifest.manifest_sha256, "missing_expected_tools": manifest.missing_expected_tools},
                         )
+                        if attempt.tool_manifest_status == "DRIFT" and run.engine_type == "codex_sdk":
+                            await event_service.append(session, run.id, "run.configuration_blocked", {"code": "TOOL_CATALOG_DRIFT", "missing_expected_tools": manifest.missing_expected_tools, "action": "restart_backend_runner_bridge"})
+                            return
                     heartbeat_task = asyncio.create_task(self._lease_heartbeat_loop(run.id, attempt.id, lease.id))
                     if run.status == RunStatus.PAUSED_DEPLOYMENT:
                         run.last_error_code = None
@@ -1707,7 +1723,13 @@ class SolveOrchestrator:
             before_progress = await self._codex_progress_snapshot(session, run.id)
             turn_tool_refs: set[str] = set()
             recovery_intercepted = False
-            max_tools_per_turn = int((run.role_snapshot_json or {}).get("max_tools_per_turn") or 8)
+            role_snapshot = run.role_snapshot_json or {}
+            role_limits = role_snapshot.get("limits") if isinstance(role_snapshot.get("limits"), dict) else role_snapshot
+            max_tools_per_turn = int(
+                role_limits.get("max_tools_per_turn")
+                or role_snapshot.get("max_tools_per_turn")
+                or run_budget_guard.MAX_TOOLS_PER_TURN
+            )
             async for item in iterator:
                 if item.event_type in {"tool.requested", "tool.started", "tool.completed", "tool.failed"}:
                     tool_ref = logical_tool_budget_ref(item.payload)
@@ -1944,6 +1966,21 @@ class SolveOrchestrator:
                         "reason": "AUTO_TURN_LIMIT",
                     },
                 )
+                return
+            if no_progress_turns == 2:
+                run.recovery_checkpoint_json = {**(run.recovery_checkpoint_json or {}), "force_script_fallback": True}
+                await session.commit()
+                challenge = await session.get(Challenge, run.challenge_id)
+                attempt_row = await session.scalar(select(RunAttempt).where(RunAttempt.run_id == run.id, RunAttempt.status == "RUNNING"))
+                lease_row = await session.scalar(select(RunExecutionLease).where(RunExecutionLease.run_id == run.id))
+                if challenge and attempt_row and lease_row:
+                    await script_fallback_controller.run(session, run, challenge, attempt_row, lease_row)
+            if no_progress_turns >= 3:
+                run.last_error_code = "METHOD_ACTION_REQUIRED"
+                run.last_error_message = "Codex produced three turns without durable ToolCall, Artifact, Observation, or ScriptRecord progress."
+                await self._transition(session, run, RunStatus.PAUSED_CHECKPOINT)
+                await session.commit()
+                await event_service.append(session, run.id, "run.recovery_checkpoint", {"code": "METHOD_ACTION_REQUIRED", "required_action": "BOUNDED_SCRIPT_EXTRACTION"})
                 return
             if no_progress_turns >= 8:
                 await event_service.append(

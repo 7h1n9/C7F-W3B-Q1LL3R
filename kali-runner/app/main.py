@@ -52,7 +52,7 @@ async def unhandled_error(_: Request, error: Exception) -> JSONResponse:
 @app.get("/health")
 async def health() -> dict:
     capabilities = await capability_registry()
-    return {"status": "ok", "execution_backend": "KaliVmExecutionBackend", "capabilities": capabilities}
+    return {"status": "ok", "execution_backend": "KaliVmExecutionBackend", "build": {"component": "runner", "git_sha": os.getenv("GIT_SHA", "unknown"), "build_id": os.getenv("RUNNER_BUILD_ID", os.getenv("BUILD_ID", "dev")), "mcp_schema_version": "mcp-v1"}, "capabilities": capabilities}
 
 
 async def capability_registry() -> dict:

@@ -11,12 +11,27 @@ from fastapi import HTTPException
 from app.config import settings
 from app.models import JobRequest
 from app.workspace.paths import safe_child, workspace_for
+from app.executors.script_validation import validate_python_source, validate_script_path
 
 OFFLINE_TOOLS = {"file", "strings", "grep", "sed", "awk", "jq", "xxd", "base64", "openssl", "unzip", "tar", "7z", "binwalk", "exiftool"}
 FORBIDDEN_TOKENS = ("|", ">", "<", "&&", "||", ";", "`", "$()", "\n", "\r")
 
 
 async def sandbox_exec(request: JobRequest) -> dict:
+    validation_mode = str(request.arguments.get("validation_mode") or "")
+    if validation_mode == "script":
+        path = str(request.arguments.get("path") or "")
+        errors = validate_script_path(path)
+        workspace = workspace_for(request.run_id)
+        if not errors:
+            target = safe_child(workspace, path)
+            if not target.is_file() or target.suffix.lower() != ".py":
+                errors.append("SCRIPT_FILE_INVALID")
+            else:
+                errors.extend(validate_python_source(target.read_text(encoding="utf-8", errors="replace")))
+        if errors:
+            raise HTTPException(422, detail="SCRIPT_VALIDATION_FAILED: " + "; ".join(errors[:20]))
+        return {"exit_code": 0, "status": "COMPLETED", "validation_status": "VALIDATED", "summary": "Script static validation passed", "network_targets": [], "runtime_ms": 0, "structured_result": {"status": "VALIDATED", "validation": "static"}}
     executable = str(request.arguments.get("executable") or "")
     if executable not in OFFLINE_TOOLS or shutil.which(executable) is None:
         raise HTTPException(422, detail=f"TOOL_NOT_INSTALLED: executable is not an installed allowlisted offline tool: {executable}")

@@ -12,6 +12,7 @@ from fastapi import HTTPException
 from app.config import settings
 from app.models import JobRequest
 from app.workspace.paths import safe_child, workspace_for
+from app.executors.script_validation import validate_python_source
 
 INTERPRETERS = {"python": ("python", {".py"}), "node": ("node", {".js", ".mjs", ".cjs"}), "bash": ("bash", {".sh"})}
 
@@ -41,6 +42,10 @@ def _validate_args(arguments: dict) -> tuple[Path, str, list[str], str, int]:
     command, suffixes = INTERPRETERS[interpreter]
     if script.suffix.lower() not in suffixes or not script.is_file():
         raise HTTPException(400, detail=f"script_run requires an existing {interpreter} script")
+    if interpreter == "python":
+        errors = validate_python_source(script.read_text(encoding="utf-8", errors="replace"))
+        if errors:
+            raise HTTPException(422, detail="SCRIPT_VALIDATION_FAILED: " + "; ".join(errors[:20]))
     args = arguments.get("args", [])
     if not isinstance(args, list) or len(args) > 64 or not all(isinstance(item, str) and len(item) <= 4096 for item in args):
         raise HTTPException(422, detail="args must be an array of bounded strings")

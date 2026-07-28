@@ -144,6 +144,16 @@ class JobService:
                         parsed = json.loads(expected.read_text(encoding="utf-8"))
                         if not isinstance(parsed, dict):
                             raise ValueError("result.json must contain an object")
+                        if str(parsed.get("status") or "") not in {"COMPLETED", "PARTIAL"}:
+                            raise ValueError("result.json status must be COMPLETED or PARTIAL")
+                        normalized["status"] = str(parsed["status"])
+                        structured = parsed.get("structured_result")
+                        if not isinstance(structured, dict):
+                            raise ValueError("result.json structured_result must be an object")
+                        normalized["structured_result"] = structured
+                        normalized["script_result"] = parsed
+                        normalized["result_json_path"] = str(expected.relative_to(workspace_for(job.request.run_id))).replace("\\", "/")
+                        normalized["artifact_paths"] = sorted(set([*(normalized.get("artifact_paths") or []), normalized["result_json_path"]]))
                     except (OSError, ValueError, json.JSONDecodeError) as error:
                         normalized.update(status="FAILED", error_code="SCRIPT_RESULT_INVALID", retryable=False, stage="RESULT_VALIDATION", summary=f"Script result.json is invalid: {error}")
             self._persist_standard_script_artifacts(job, normalized)
@@ -186,7 +196,7 @@ class JobService:
         evidence_dir.mkdir(parents=True, exist_ok=True)
         progress = output_dir / "progress.jsonl"
         checkpoint = output_dir / "checkpoint.json"
-        progress.write_text(json.dumps({"at": self._now(), "status": "COMPLETED" if result.get("status") == "COMPLETED" else "FAILED", "stage": result.get("stage")}, ensure_ascii=False) + "\n", encoding="utf-8")
+        progress.write_text(json.dumps({"at": self._now(), "status": result.get("status") if result.get("status") in {"COMPLETED", "PARTIAL"} else "FAILED", "stage": result.get("stage")}, ensure_ascii=False) + "\n", encoding="utf-8")
         checkpoint.write_text(json.dumps({"job_id": job.job_id, "status": result.get("status"), "error_code": result.get("error_code")}, ensure_ascii=False, indent=2), encoding="utf-8")
         (evidence_dir / "request-summary.json").write_text(json.dumps({"job_id": job.job_id, "run_id": job.request.run_id, "tool": job.request.tool, "path": job.request.arguments.get("path"), "interpreter": job.request.arguments.get("interpreter"), "network_mode": job.request.arguments.get("network_mode", "none"), "allowed_hosts": job.request.allowed_hosts}, ensure_ascii=False, indent=2), encoding="utf-8")
         standard = [str(path.relative_to(workspace)).replace("\\", "/") for path in (progress, checkpoint, evidence_dir / "request-summary.json")]

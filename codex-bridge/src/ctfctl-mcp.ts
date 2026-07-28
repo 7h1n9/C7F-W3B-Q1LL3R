@@ -5,7 +5,8 @@
  */
 import { createInterface } from "node:readline";
 import { randomUUID } from "node:crypto";
-import { appendFileSync } from "node:fs";
+import { appendFileSync, mkdirSync } from "node:fs";
+import { dirname } from "node:path";
 import { parametersToInputSchema, validateMcpInputSchema } from "./mcp-schema.js";
 
 type Scope = { run_id: string; challenge_id: string; workspace_root: string; allowed_hosts: string[]; attempt_id: string; lease_token: string; master_lease_token?: string; thread_id?: string; model_turn_id?: string; turn_id?: string };
@@ -18,6 +19,7 @@ const debugLog = process.env.CTFCTL_DEBUG_LOG;
 function debug(event: string, detail: Record<string, unknown> = {}) {
   if (!debugLog) return;
   try {
+    mkdirSync(dirname(debugLog), { recursive: true });
     appendFileSync(debugLog, `${JSON.stringify({ at: new Date().toISOString(), event, ...detail })}\n`, "utf8");
   } catch {
     // MCP stdout is protocol-only. Diagnostics must never interfere with it.
@@ -26,6 +28,8 @@ function debug(event: string, detail: Record<string, unknown> = {}) {
 
 const compatibilityTools = new Set(["invoke_tool", "list_tools"]);
 let advertisedTools = new Set<string>();
+const rejectedCalls = new Map<string, number>();
+let turnStopReason: string | undefined;
 
 type ErrorEnvelope = { code: string; message: string; stage: string; retryable: boolean; diagnostic_id: string; tool_execution_completed: boolean; details?: unknown };
 class McpEnvelopeError extends Error {
@@ -77,10 +81,14 @@ async function toolDefinitions() {
       const errors = validateMcpInputSchema(item.inputSchema);
       if (errors.length) {
         rejected.push({ name: item.name, errors, fallback_used: true });
-        // A malformed definition must not poison unrelated tools.
-        item.inputSchema = { type: "object", additionalProperties: true };
+        // Never turn a malformed critical schema into an unconstrained
+        // additionalProperties=true tool.  A drifted catalog is blocked by
+        // preflight and the Attempt is paused for deployment repair.
+        if (["sql_boolean_compare", "boolean_config_extract", "script_run", "sandbox_exec", "workspace_write_file"].includes(item.name)) {
+          throw new Error(`MCP_SCHEMA_DEGRADED:${item.name}`);
+        }
       }
-      return true;
+      return errors.length === 0;
     });
   if (rejected.length) debug("mcp_tool_schema_rejected", { rejected });
   if (definitions.length === 0) throw new Error("CTFCTL_TOOL_CATALOG_EMPTY");
@@ -89,6 +97,14 @@ async function toolDefinitions() {
 }
 
 async function backend(method: string, params: Record<string, unknown>, logicalToolCallId?: string) {
+  if (turnStopReason) {
+    return {
+      status: "STOPPED",
+      stop: true,
+      reason: turnStopReason,
+      instruction: "Stop invoking ctfctl tools for this turn and summarize the durable evidence.",
+    };
+  }
   const dedicatedMethods = new Set([
     "workspace_list", "workspace_tree", "workspace_stat", "workspace_read", "workspace_search",
     "workspace_write_file", "workspace_write_note", "workspace_patch_file", "workspace_mkdir",
@@ -127,7 +143,50 @@ async function backend(method: string, params: Record<string, unknown>, logicalT
       body: JSON.stringify({ scope: requestScope, tool_ticket: ticket, ...params }),
     });
     const body = await response.json().catch(() => ({}));
-    if (!response.ok) throw new McpEnvelopeError(responseEnvelope(body, "MCP_VALIDATION_FAILED", response.statusText));
+    if (!response.ok) {
+      const envelope = responseEnvelope(body, "MCP_VALIDATION_FAILED", response.statusText);
+      const signature = `${method}:${JSON.stringify(params, Object.keys(params).sort())}:${envelope.code}`;
+      const count = (rejectedCalls.get(signature) ?? 0) + 1;
+      rejectedCalls.set(signature, count);
+      debug("backend_error", {
+        method,
+        status: response.status,
+        code: envelope.code,
+        rejection_count: count,
+        argument_keys: Object.keys(params).sort(),
+        details: envelope.details,
+      });
+      if (
+        response.status === 429
+        && [
+          "TURN_TOOL_BUDGET_EXHAUSTED",
+          "ATTEMPT_TOOL_BUDGET_EXHAUSTED",
+          "RUN_MAX_TOOL_CALLS",
+          "REQUIRED_ACTION_BUDGET_EXHAUSTED",
+        ].includes(envelope.code)
+      ) {
+        turnStopReason = envelope.code;
+        return {
+          status: "STOPPED",
+          stop: true,
+          reason: turnStopReason,
+          instruction: "The bounded tool budget is exhausted. Stop invoking tools for this turn and summarize the durable evidence.",
+        };
+      }
+      if (count >= 3) {
+        envelope.code = "MCP_REPEATED_REJECTION";
+        envelope.retryable = false;
+        envelope.message = `${envelope.message} Do not retry this exact ${method} call; choose a different bounded action.`;
+        turnStopReason = envelope.code;
+        return {
+          status: "STOPPED",
+          stop: true,
+          reason: turnStopReason,
+          instruction: "The same tool call was rejected repeatedly. Stop this turn and choose a different bounded action next time.",
+        };
+      }
+      throw new McpEnvelopeError(envelope);
+    }
     return body.data ?? body;
   }
   const response = await fetch(`${backendUrl}/api/v1/internal/ctfctl/${endpoint}`, {
@@ -144,7 +203,24 @@ async function dispatch(name: string, args: Record<string, unknown>, requestId?:
   const shortName = name.replace(/^ctfctl\./, "");
   if (!advertisedTools.has(shortName) && !compatibilityTools.has(shortName)) throw new Error("Unknown or unavailable ctfctl tool");
   const logicalToolCallId = `mcp:${masterScope.model_turn_id ?? "turn"}:${String(requestId ?? randomUUID())}`;
-  return backend(shortName, args, logicalToolCallId);
+  const normalized = { ...args };
+  if (shortName === "workspace_search" && typeof normalized.query !== "string") {
+    for (const alias of ["q", "pattern", "search", "text"]) {
+      if (typeof normalized[alias] === "string") {
+        normalized.query = normalized[alias];
+        break;
+      }
+    }
+  }
+  if (["workspace_read", "workspace_stat"].includes(shortName) && typeof normalized.path !== "string") {
+    for (const alias of ["artifact_path", "file", "name"]) {
+      if (typeof normalized[alias] === "string") {
+        normalized.path = normalized[alias];
+        break;
+      }
+    }
+  }
+  return backend(shortName, normalized, logicalToolCallId);
 }
 
 const input = createInterface({ input: process.stdin, crlfDelay: Infinity });

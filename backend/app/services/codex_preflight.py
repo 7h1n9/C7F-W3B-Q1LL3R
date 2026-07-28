@@ -19,6 +19,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import get_settings
 from app.models.challenge import Challenge
 from app.models.run import RunAttempt, RunExecutionLease, SolveRun, ToolInvocationTicket
+from app.services.runner_client import runner_client
+from app.services.runtime_build import backend_build_manifest, compare_builds
 from app.tools.registry import load_tool_definitions
 
 SCHEMA_TYPES = {"object", "array", "string", "integer", "number", "boolean", "null"}
@@ -103,6 +105,14 @@ class CodexPreflightService:
         try:
             bridge = await self._bridge_health(settings.codex_bridge_url)
             stages.append({"stage": "BRIDGE_HEALTH", "ok": True, "details": bridge})
+            backend_build = backend_build_manifest()
+            runner_health = await runner_client.health()
+            runner_build = runner_health.get("build") if isinstance(runner_health, dict) else {}
+            bridge_build = bridge.get("build") if isinstance(bridge, dict) else {}
+            drift = compare_builds(backend_build, runner_build or {}) + compare_builds(backend_build, bridge_build or {})
+            stages.append({"stage": "RUNTIME_BUILD_CONSISTENCY", "ok": not drift, "details": {"backend": backend_build, "runner": runner_build, "bridge": bridge_build, "mismatches": sorted(set(drift))}})
+            if drift:
+                raise PreflightFailure("RUNTIME_BUILD_CONSISTENCY", "RUNTIME_BUILD_DRIFT", "Backend, Runner and Bridge build identities do not match.")
             sdk_version = self._sdk_version()
             stages.append({"stage": "SDK_VERSION", "ok": bool(sdk_version), "details": {"sdk_version": sdk_version}})
             cli_version = self._cli_version()
@@ -122,7 +132,7 @@ class CodexPreflightService:
                     valid.append(name)
             valid.extend(sorted(WORKSPACE_TOOLS))
             stages.append({"stage": "MCP_SCHEMA_VALIDATION", "ok": bool(valid), "details": {"valid_tools": valid, "rejected": rejected}})
-            required_tools = {"http_request"} | WORKSPACE_TOOLS
+            required_tools = {"http_request"} | WORKSPACE_TOOLS | {"script_run", "sandbox_exec"}
             if not required_tools.issubset(set(valid)):
                 raise PreflightFailure("MCP_SCHEMA_VALIDATION", "MCP_SCHEMA_INVALID", "Required ctfctl schemas are invalid.")
 
@@ -156,14 +166,35 @@ class CodexPreflightService:
             critical_schema_errors: list[str] = []
             by_name = {str(item.get("name")): item for item in mcp_tools if isinstance(item, dict)}
             missing_critical: list[str] = []
-            for name in ("sql_boolean_compare", "boolean_config_extract", "oracle_probe_matrix"):
+            critical_required_fields = {
+                "sql_boolean_compare": {"request", "test_field", "oracle"},
+                "boolean_config_extract": {"request", "oracle", "max_requests"},
+                "script_run": {"path", "interpreter", "network_mode"},
+                "sandbox_exec": {"executable", "args", "network_mode"},
+                "workspace_write_file": {"path", "content"},
+            }
+            for name, required_fields in critical_required_fields.items():
                 if name not in by_name:
+                    # boolean_config_extract is a preferred accelerator, not
+                    # a deployment prerequisite.  The Script controller is
+                    # the explicit fallback when an older Runner omits it.
+                    if name == "boolean_config_extract":
+                        continue
                     missing_critical.append(name)
                     continue
                 schema = (by_name.get(name) or {}).get("inputSchema") or {}
                 properties = schema.get("properties") if isinstance(schema, dict) else None
                 if not isinstance(properties, dict) or not properties:
                     critical_schema_errors.append(f"{name}: MCP_SCHEMA_DEGRADED")
+                    continue
+                if schema.get("additionalProperties") is True:
+                    critical_schema_errors.append(f"{name}: MCP_SCHEMA_DEGRADED_ADDITIONAL_PROPERTIES")
+                actual_required = set(schema.get("required") or [])
+                missing_fields = sorted(required_fields - set(properties))
+                if missing_fields:
+                    critical_schema_errors.append(f"{name}: missing_fields={missing_fields}")
+                if not actual_required:
+                    critical_schema_errors.append(f"{name}: MCP_SCHEMA_DEGRADED_REQUIRED_EMPTY")
             if critical_schema_errors:
                 raise PreflightFailure("MCP_SCHEMA_VALIDATION", "MCP_SCHEMA_DEGRADED", "; ".join(critical_schema_errors))
             if missing_critical:
@@ -180,6 +211,7 @@ class CodexPreflightService:
                         },
                     }
                 )
+                raise PreflightFailure("MCP_TOOL_CATALOG", "TOOL_CATALOG_DRIFT", f"Live MCP catalog is missing critical tools: {', '.join(missing_critical)}")
             # The MCP handshake mints one-shot tickets for list/read calls.
             # Remove those temporary rows before the explicit ticket test and
             # before deleting the temporary run in the finally block.

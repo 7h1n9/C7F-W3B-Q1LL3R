@@ -5,6 +5,8 @@ payloads, fields and expressions must come from the run's evidence or
 checkpoint, never from a hard-coded challenge default.
 """
 
+import json
+
 ALIASES = {
     "target_url": "url",
     "target": "url",
@@ -16,6 +18,9 @@ ALIASES = {
     "cookie": "headers.Cookie",
     "artifact": "path",
     "artifact_path": "path",
+    "script_path": "path",
+    "q": "query",
+    "pattern": "query",
 }
 _REQUEST_TOOLS = {
     "sql_injection_probe",
@@ -41,6 +46,26 @@ def adapt_arguments(tool: str, arguments: dict, challenge: object | None = None)
                 out[new] = value
     if tool == "http_extract" and "url" in out and "path" not in out:
         out["url"] = out["url"]
+    if tool == "http_request":
+        # MCP models commonly emit a structured JSON body for JSON APIs while
+        # the declarative tool contract stores HTTP bodies as strings.
+        if "json" in out and "body" not in out:
+            out["body"] = out.pop("json")
+        if isinstance(out.get("body"), (dict, list)):
+            out["body"] = json.dumps(out["body"], ensure_ascii=False, separators=(",", ":"))
+    if tool == "script_run" and "interpreter" not in out:
+        path = str(out.get("path") or "").lower()
+        interpreter = {
+            ".py": "python",
+            ".py3": "python",
+            ".js": "node",
+            ".mjs": "node",
+            ".sh": "bash",
+        }
+        for suffix, value in interpreter.items():
+            if path.endswith(suffix):
+                out["interpreter"] = value
+                break
     if tool not in _REQUEST_TOOLS:
         return out
 

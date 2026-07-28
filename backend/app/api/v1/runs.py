@@ -6,7 +6,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.challenges import require_challenge
@@ -19,23 +19,49 @@ from app.models.conversation import (
     ChallengeConversationSkill,
     ChallengeMessage,
 )
+from app.models.learned_skill import (
+    LearnedSkillCandidate,
+    LearnedSkillCandidateSource,
+    LearnedSkillReview,
+    LearnedSkillValidationRun,
+)
 from app.models.model_config import ModelConfig
+from app.models.multi_agent import (
+    AgentTask,
+    AgentTaskResult,
+    AnalysisReview,
+    EvidenceLedger,
+    FailureSignature,
+    MemorySnapshot,
+    PlannerProposal,
+    SolutionChainNode,
+    VerifiedFact,
+)
 from app.models.run import (
     AgentTurn,
     Artifact,
     AttemptToolManifest,
+    CleanupManifest,
+    CompactionLease,
+    EvidenceSnapshot,
     FlagCandidate,
+    FlagProvenance,
     Hypothesis,
     LogicalToolCall,
     Observation,
+    RunCompactionCheckpoint,
     RunAttempt,
     RunEvent,
     RunExecutionLease,
     RunUserInput,
+    ScriptRecord,
     SolveRun,
+    ToolBatchSummary,
     ToolCall,
     ToolExecutionTrace,
     ToolInvocationTicket,
+    ToolRequestFingerprint,
+    WebResearchRecord,
 )
 from app.models.skill import RunSkillSnapshot
 from app.models.solver_state import SolverState
@@ -94,15 +120,19 @@ def read(item: SolveRun) -> RunRead:
             value = value.replace(tzinfo=UTC)
         return value.astimezone(UTC).isoformat()
 
-    return RunRead.model_validate(
-        {
-            **item.__dict__,
-            "created_at": iso(item.created_at),
-            "updated_at": iso(item.updated_at),
-            "started_at": iso(item.started_at),
-            "finished_at": iso(item.finished_at),
-        }
-    )
+    payload = {
+        **item.__dict__,
+        # Columns introduced by later migrations can still be NULL on legacy
+        # rows.  Keep the API contract stable for those rows.
+        "recovery_checkpoint_json": item.recovery_checkpoint_json or {},
+        "role_snapshot_json": item.role_snapshot_json or {},
+        "hints_json": item.hints_json or {},
+        "created_at": iso(item.created_at),
+        "updated_at": iso(item.updated_at),
+        "started_at": iso(item.started_at),
+        "finished_at": iso(item.finished_at),
+    }
+    return RunRead.model_validate(payload)
 
 
 async def read_with_summary(
@@ -138,6 +168,9 @@ async def read_with_summary(
     preflight_ready = codex_preflight_service.is_ready(item.id) if is_codex else False
     payload = {
         **item.__dict__,
+        "recovery_checkpoint_json": item.recovery_checkpoint_json or {},
+        "role_snapshot_json": item.role_snapshot_json or {},
+        "hints_json": item.hints_json or {},
         "challenge_name": challenge.name if challenge else None,
         "challenge_type": challenge.challenge_type if challenge else None,
         "target_summary": challenge.target_url if challenge and challenge.target_url else None,
@@ -331,40 +364,69 @@ async def _delete_run_records(session: AsyncSession, run_id: str) -> None:
     # Delete children explicitly because the schema intentionally keeps these
     # tables unconfigured with ORM cascade rules.
     logical_ids = select(LogicalToolCall.id).where(LogicalToolCall.run_id == run_id)
+    task_ids = select(AgentTask.id).where(AgentTask.run_id == run_id)
+    proposal_ids = select(PlannerProposal.id).where(PlannerProposal.run_id == run_id)
+    candidate_ids = select(LearnedSkillCandidate.id).where(LearnedSkillCandidate.source_run_id == run_id)
     # Tool traces reference logical calls, so they must be removed first.
     await session.execute(
         delete(ToolExecutionTrace).where(ToolExecutionTrace.logical_tool_call_id.in_(logical_ids))
     )
+    # These tables reference run-scoped task/proposal/candidate rows rather
+    # than carrying run_id themselves.
+    await session.execute(delete(AgentTaskResult).where(AgentTaskResult.task_id.in_(task_ids)))
+    await session.execute(delete(AnalysisReview).where(AnalysisReview.proposal_id.in_(proposal_ids)))
+    await session.execute(
+        delete(LearnedSkillCandidateSource).where(LearnedSkillCandidateSource.candidate_id.in_(candidate_ids))
+    )
+    await session.execute(
+        delete(LearnedSkillReview).where(LearnedSkillReview.candidate_id.in_(candidate_ids))
+    )
+    await session.execute(
+        delete(LearnedSkillValidationRun).where(LearnedSkillValidationRun.candidate_id.in_(candidate_ids))
+    )
     for model in (
         ToolInvocationTicket,
+        LogicalToolCall,
+        FlagProvenance,
         FlagCandidate,
+        EvidenceLedger,
+        SolutionChainNode,
+        VerifiedFact,
+        MemorySnapshot,
+        ScriptRecord,
+        ToolBatchSummary,
+        RunUserInput,
+        AttemptToolManifest,
+        RunExecutionLease,
+        # LogicalToolCall.result_observation_id points back to observations.
+        # It must be removed before the referenced observations.
         Observation,
         Artifact,
         ToolCall,
-        LogicalToolCall,
+        EvidenceSnapshot,
+        RunCompactionCheckpoint,
+        CompactionLease,
+        CleanupManifest,
+        ToolRequestFingerprint,
+        WebResearchRecord,
         Hypothesis,
         RunEvent,
-        RunUserInput,
         AgentTurn,
         RunSkillSnapshot,
         SolverState,
-        RunExecutionLease,
         RunAttempt,
-        AttemptToolManifest,
+        FailureSignature,
+        PlannerProposal,
     ):
         await session.execute(delete(model).where(model.run_id == run_id))
-    from app.models.learned_skill import (
-        LearnedSkillCandidate,
-        LearnedSkillCandidateSource,
-        LearnedSkillReview,
-        LearnedSkillValidationRun,
-    )
-    candidate_ids = select(LearnedSkillCandidate.id).where(LearnedSkillCandidate.source_run_id == run_id)
-    await session.execute(delete(LearnedSkillCandidateSource).where(LearnedSkillCandidateSource.candidate_id.in_(candidate_ids)))
-    await session.execute(delete(LearnedSkillReview).where(LearnedSkillReview.candidate_id.in_(candidate_ids)))
-    await session.execute(delete(LearnedSkillValidationRun).where(LearnedSkillValidationRun.candidate_id.in_(candidate_ids)))
     await session.execute(delete(LearnedSkillValidationRun).where(LearnedSkillValidationRun.run_id == run_id))
     await session.execute(delete(LearnedSkillCandidate).where(LearnedSkillCandidate.source_run_id == run_id))
+    # AgentTask has a nullable self-reference; clear it before deleting the
+    # run's task tree so sibling/child tasks cannot block the parent delete.
+    await session.execute(
+        update(AgentTask).where(AgentTask.run_id == run_id).values(created_by_task_id=None)
+    )
+    await session.execute(delete(AgentTask).where(AgentTask.run_id == run_id))
     await session.execute(delete(SolveRun).where(SolveRun.id == run_id))
 
 

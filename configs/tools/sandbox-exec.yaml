@@ -9,5 +9,7 @@ parameters:
   args: {type: array, items: {type: string}, required: false}
   cwd: {type: string, required: false}
   network_mode: {type: string, required: false}
+  validation_mode: {type: string, required: false}
+  path: {type: string, required: false}
 limits: {timeout_seconds: 30, max_output_bytes: 1048576}
 permissions: {workspace_only: true, shell_forbidden: true, network_wrapper_only: true}
