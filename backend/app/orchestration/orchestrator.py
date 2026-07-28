@@ -69,6 +69,7 @@ from app.services.reports import ReproductionPlanner, report_service
 from app.services.run_attempts import run_attempt_service
 from app.services.runner_client import runner_client
 from app.services.solver_state import solver_state_service
+from app.services.tool_manifest import refresh_runtime_tool_manifest
 from app.services.tool_permissions import effective_tools_for
 from app.tools.gateway import tool_gateway
 from app.tools.registry import load_tool_definitions
@@ -173,6 +174,8 @@ class SolveOrchestrator:
                     "lease_token": lease.lease_token if lease else None,
                     "master_lease_token": lease.lease_token if lease else None,
                     "mcp_required": codex_preflight_service.is_ready(run.id),
+                    "recovery_checkpoint": run.recovery_checkpoint_json or {},
+                    "available_tools": list((codex_preflight_service.last_result() or {}).get("mcp_tool_names") or []),
                 },
             )
         if run.engine_type == "openai_compatible":
@@ -227,6 +230,51 @@ class SolveOrchestrator:
     async def _recover_no_progress(self, session, run: SolveRun, challenge: Challenge, no_progress_count: int) -> bool:
         if no_progress_count < 2:
             return False
+        state = await solver_state_service.load(session, run.id)
+        ledger = state.capability_ledger_json if state else {}
+        boolean_confirmed = any(
+            key in ledger for key in ("matched_boolean_oracle_confirmed", "boolean_oracle_confirmed")
+        )
+        flag_verified = bool(
+            await session.scalar(
+                select(FlagCandidate.id).where(
+                    FlagCandidate.run_id == run.id,
+                    FlagCandidate.verified.is_(True),
+                    FlagCandidate.review_state == "VALID",
+                )
+            )
+        )
+        if boolean_confirmed and not flag_verified:
+            if no_progress_count == 2:
+                await event_service.append(
+                    session,
+                    run.id,
+                    "agent.required_action",
+                    {
+                        "required_action": "BOUNDED_EXTRACTION",
+                        "preferred_tools": ["boolean_config_extract", "script_run"],
+                        "reason": "boolean_oracle_confirmed_without_verified_flag",
+                    },
+                )
+            elif no_progress_count == 3:
+                await solver_state_service.require_plan_action(session, run.id, True)
+                await event_service.append(
+                    session,
+                    run.id,
+                    "agent.extraction_task_forced",
+                    {"tool": "boolean_config_extract", "fallback": "script_run"},
+                )
+            elif no_progress_count >= 4:
+                run.last_error_code = "METHOD_ACTION_REQUIRED"
+                run.last_error_message = "A confirmed boolean oracle requires a bounded extraction action."
+                await self._transition(session, run, RunStatus.PAUSED_CHECKPOINT)
+                await event_service.append(
+                    session,
+                    run.id,
+                    "agent.recovery_checkpoint",
+                    {"code": "METHOD_ACTION_REQUIRED", "current_phase": run.current_phase, "next_required_action": "BOUNDED_EXTRACTION"},
+                )
+                return True
         stages = {
             2: ("RECLASSIFY_REPLAN", "重新分类当前结果并重规划"),
             4: ("SWITCH_TOOL_DIMENSION", "切换工具维度"),
@@ -559,6 +607,8 @@ class SolveOrchestrator:
                 run = await session.scalar(select(SolveRun).where(SolveRun.id == run_id))
                 if not run:
                     return
+                if run.engine_type == "codex_sdk":
+                    await solver_state_service.ensure_confirmed_boolean_checkpoint(session, run)
                 if run.engine_type == "codex_sdk" and not codex_preflight_service.is_ready(run.id):
                     result = codex_preflight_service.last_result() or {}
                     run.last_error_code = str(result.get("error_code") or "PREFLIGHT_REQUIRED")[:100]
@@ -570,6 +620,23 @@ class SolveOrchestrator:
                     return
                 try:
                     attempt, lease = await run_attempt_service.begin(session, run)
+                    challenge_for_manifest = await session.get(Challenge, run.challenge_id)
+                    if challenge_for_manifest is not None:
+                        preflight_catalog = codex_preflight_service.last_result() or {}
+                        manifest = await refresh_runtime_tool_manifest(
+                            session,
+                            run,
+                            attempt,
+                            challenge_for_manifest,
+                            mcp_tools=preflight_catalog.get("mcp_tools") or [],
+                        )
+                        await session.commit()
+                        await event_service.append(
+                            session,
+                            run.id,
+                            "attempt.tool_manifest_refreshed",
+                            {"manifest_id": manifest.id, "manifest_sha256": manifest.manifest_sha256, "missing_expected_tools": manifest.missing_expected_tools},
+                        )
                     heartbeat_task = asyncio.create_task(self._lease_heartbeat_loop(run.id, attempt.id, lease.id))
                     if run.status == RunStatus.PAUSED_DEPLOYMENT:
                         run.last_error_code = None
@@ -1631,6 +1698,7 @@ class SolveOrchestrator:
                 },
             )
             return
+        recovery_nudge_count = 0
         while True:
             await run_attempt_service.heartbeat(session, attempt, lease)
             auto_turns += 1
@@ -1638,6 +1706,7 @@ class SolveOrchestrator:
             await session.commit()
             before_progress = await self._codex_progress_snapshot(session, run.id)
             turn_tool_refs: set[str] = set()
+            recovery_intercepted = False
             max_tools_per_turn = int((run.role_snapshot_json or {}).get("max_tools_per_turn") or 8)
             async for item in iterator:
                 if item.event_type in {"tool.requested", "tool.started", "tool.completed", "tool.failed"}:
@@ -1724,7 +1793,18 @@ class SolveOrchestrator:
                     # adapters filter this in the normal path; keep the
                     # orchestrator defensive because old Bridge processes or
                     # concurrent resumes can still forward that stale event.
-                    if not (
+                    actionable_checkpoint = (
+                        isinstance(run.recovery_checkpoint_json, dict)
+                        and run.recovery_checkpoint_json.get("next_required_action")
+                        and run.current_phase == "FLAG_SEARCH"
+                    )
+                    if incoming_status == RunStatus.WAITING_USER and actionable_checkpoint:
+                        # A provider clarification turn is not a valid reason to
+                        # stop a controller-owned recovery checkpoint. Preserve
+                        # the provider event for audit, but immediately nudge the
+                        # live Codex thread with the required bounded action.
+                        recovery_intercepted = True
+                    elif not (
                         RunStatus(run.status) == RunStatus.PLANNING
                         and incoming_status == RunStatus.ANALYZING
                     ):
@@ -1829,6 +1909,25 @@ class SolveOrchestrator:
             else:
                 no_progress_turns = 0
             current_status = RunStatus(run.status)
+            if recovery_intercepted and recovery_nudge_count < 3:
+                recovery_nudge_count += 1
+                if current_status != RunStatus.PLANNING:
+                    await self._transition(session, run, RunStatus.PLANNING)
+                await event_service.append(
+                    session,
+                    run.id,
+                    "agent.recovery_nudge",
+                    {
+                        "code": "WAITING_USER_INTERCEPTED",
+                        "nudge": recovery_nudge_count,
+                        "required_action": "BOUNDED_EXTRACTION",
+                    },
+                )
+                iterator = engine.continue_run(
+                    run.id,
+                    "Controller directive: continue autonomously now. Execute the checkpoint's bounded extraction; do not ask for user input or model configuration.",
+                )
+                continue
             if current_status in TERMINAL or current_status in {RunStatus.WAITING_USER, RunStatus.WAITING_CONFIGURATION}:
                 return
             if run.engine_type != "codex_sdk":

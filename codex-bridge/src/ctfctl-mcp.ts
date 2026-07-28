@@ -53,7 +53,7 @@ async function toolDefinitions() {
   const catalog = await backend("list_tools", {});
   const candidateRows: unknown = catalog?.tools;
   const rows: unknown[] = Array.isArray(candidateRows) ? candidateRows : [];
-  const rejected: Array<{ name: string; errors: string[] }> = [];
+  const rejected: Array<{ name: string; errors: string[]; fallback_used: boolean }> = [];
   const definitions = rows
     .filter((item: unknown): item is Record<string, unknown> => Boolean(item) && typeof item === "object" && typeof (item as Record<string, unknown>).name === "string")
     .map((item: Record<string, unknown>) => ({
@@ -71,17 +71,14 @@ async function toolDefinitions() {
       destructiveHint: false,
       openWorldHint: false,
     },
-    // The backend remains the authoritative argument/schema validator.  A
-    // permissive object schema avoids native CLI incompatibilities with
-    // nested/union JSON Schema while keeping the advertised tool surface
-    // MCP-valid; invalid arguments are rejected by the gateway.
-    inputSchema: { type: "object", additionalProperties: true },
+    inputSchema: parametersToInputSchema(item.parameters, String(item.name)),
   }))
     .filter((item) => {
       const errors = validateMcpInputSchema(item.inputSchema);
       if (errors.length) {
-        rejected.push({ name: item.name, errors });
-        return false;
+        rejected.push({ name: item.name, errors, fallback_used: true });
+        // A malformed definition must not poison unrelated tools.
+        item.inputSchema = { type: "object", additionalProperties: true };
       }
       return true;
     });

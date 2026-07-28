@@ -315,6 +315,11 @@ export function WorkspacePage() {
               label: "解题引擎",
               children: run.data?.engine_type === "mock" ? "模拟引擎" : run.data?.engine_type,
             },
+            {
+              key: "solver-mode",
+              label: "解题架构",
+              children: run.data?.solver_mode === "multi_agent_v1" ? "Multi-Agent v1" : "Single-Agent 兼容模式",
+            },
             { key: "model", label: "模型", children: run.data?.model_name ?? "—" },
             {
               key: "phase",

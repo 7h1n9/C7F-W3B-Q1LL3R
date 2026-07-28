@@ -116,6 +116,22 @@ async def _workspace_logical_call(session: AsyncSession, run: SolveRun, payload:
     from app.services.effective_logical_tool_calls import effective_logical_tool_call_service
     from app.services.run_budget_guard import run_budget_guard
 
+    # Validate file existence before creating or reserving a logical call.
+    # Negative results are cached per run workspace revision so repeated model
+    # reads become cheap FILE_NOT_FOUND_CACHED responses.
+    if tool_name in {"workspace_read", "workspace_stat"} and isinstance(payload, ReadRequest):
+        policy = policy_for(payload, Path(run.workspace_path).resolve())
+        relative = str(payload.path).replace("\\", "/")
+        cache_key = f"{run.workspace_revision}:{relative}"
+        negative = dict(run.workspace_negative_cache_json or {})
+        if cache_key in negative:
+            raise DomainError("FILE_NOT_FOUND_CACHED", "Requested workspace path does not exist.", {"path": relative, "counts_toward_budget": False}, 404)
+        target, normalized = policy.path(payload.path, operation="read", allow_missing=True)
+        if not target.is_file():
+            negative[cache_key] = {"path": normalized, "workspace_revision": run.workspace_revision}
+            run.workspace_negative_cache_json = negative
+            await session.commit()
+            raise DomainError("FILE_NOT_FOUND", "Requested workspace path does not exist.", {"path": normalized, "counts_toward_budget": False}, 404)
     turn_id = run.active_turn_id or payload.scope.turn_id or payload.scope.model_turn_id
     turn_started_at = await session.scalar(select(AgentTurn.turn_started_at).where(AgentTurn.id == turn_id, AgentTurn.run_id == run.id)) if turn_id else None
     logical_id = payload.scope.logical_tool_call_id or f"workspace:{turn_id or 'legacy'}:{tool_name}:{uuid.uuid4()}"
@@ -139,6 +155,12 @@ async def _workspace_logical_call(session: AsyncSession, run: SolveRun, payload:
     await effective_logical_tool_call_service.trace(
         session, logical, execution_layer="ctfctl", event_type="completed", external_id=payload.scope.logical_tool_call_id or logical_id
     )
+    await session.commit()
+
+
+async def _workspace_changed(session: AsyncSession, run: SolveRun) -> None:
+    run.workspace_revision = int(run.workspace_revision or 0) + 1
+    run.workspace_negative_cache_json = {}
     await session.commit()
 
 
@@ -333,6 +355,7 @@ async def workspace_write_note(payload: WriteRequest, x_ctfctl_access_key: str |
         raise DomainError("FILE_EXISTS", "Destination exists and overwrite=false.", {"path": relative}, 409)
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(payload.content, encoding=payload.encoding)
+    await _workspace_changed(session, run)
     synced = True
     try:
         await workspace_sync_service.sync_to_runner(payload.scope.run_id, root)
@@ -368,6 +391,7 @@ async def workspace_patch_file(payload: PatchRequest, x_ctfctl_access_key: str |
     else:
         raise DomainError("PATCH_INVALID", "Provide old_text or start_line/end_line.", status_code=422)
     target.write_text(updated, encoding=payload.encoding)
+    await _workspace_changed(session, run)
     await workspace_sync_service.sync_to_runner(payload.scope.run_id, root)
     raw = target.read_bytes()
     return {"data": {"relative_path": relative, "size": len(raw), "sha256": hashlib.sha256(raw).hexdigest(), "runner_synced": True}}
@@ -379,6 +403,7 @@ async def workspace_mkdir(payload: MkdirRequest, x_ctfctl_access_key: str | None
     await _workspace_logical_call(session, run, payload, "workspace_mkdir")
     target, relative = policy_for(payload, root).writable(payload.path)
     target.mkdir(parents=True, exist_ok=True)
+    await _workspace_changed(session, run)
     return {"data": {"relative_path": relative, "created": True}}
 
 
@@ -395,6 +420,7 @@ async def workspace_copy(payload: CopyRequest, x_ctfctl_access_key: str | None =
         raise DomainError("FILE_EXISTS", "Destination exists and overwrite=false.", {"path": destination_relative}, 409)
     destination.parent.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(source, destination)
+    await _workspace_changed(session, run)
     await workspace_sync_service.sync_to_runner(payload.scope.run_id, root)
     raw = destination.read_bytes()
     return {"data": {"relative_path": destination_relative, "size": len(raw), "sha256": hashlib.sha256(raw).hexdigest(), "runner_synced": True}}
@@ -412,6 +438,7 @@ async def workspace_move_generated(payload: MoveGeneratedRequest, x_ctfctl_acces
         raise DomainError("FILE_NOT_FOUND", "Generated source does not exist.", {"path": source_relative}, 404)
     destination.parent.mkdir(parents=True, exist_ok=True)
     shutil.move(str(source), str(destination))
+    await _workspace_changed(session, run)
     await workspace_sync_service.sync_to_runner(payload.scope.run_id, root)
     return {"data": {"source": source_relative, "destination": destination.relative_to(root).as_posix(), "runner_synced": True}}
 
@@ -427,6 +454,7 @@ async def workspace_delete_generated(payload: DeleteGeneratedRequest, x_ctfctl_a
         shutil.rmtree(target)
     else:
         raise DomainError("FILE_NOT_FOUND", "Generated path does not exist.", {"path": relative}, 404)
+    await _workspace_changed(session, run)
     await workspace_sync_service.sync_to_runner(payload.scope.run_id, root)
     return {"data": {"relative_path": relative, "deleted": True}}
 
@@ -485,6 +513,7 @@ async def workspace_extract_archive(payload: ExtractArchiveRequest, x_ctfctl_acc
     except (zipfile.BadZipFile, tarfile.TarError) as error:
         raise DomainError("ARCHIVE_INVALID", "Unsupported or invalid archive.", {"error": str(error)}, 422) from error
     await workspace_sync_service.sync_to_runner(payload.scope.run_id, root)
+    await _workspace_changed(session, run)
     return {"data": {"extracted": names, "file_count": count, "total_bytes": total, "runner_synced": True}}
 
 

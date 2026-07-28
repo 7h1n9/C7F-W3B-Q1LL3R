@@ -218,7 +218,8 @@ class RunAttemptService:
                             aborted_attempts += 1
                         if run and stale_owner and not expired and RunStatus(run.status) not in TERMINAL:
                             run.status = RunStatus.PAUSED_DEPLOYMENT.value
-                            run.current_phase = RunStatus.PAUSED_DEPLOYMENT.value
+                            if str(run.current_phase or "") not in {"INTAKE", "BASELINE", "MAPPING", "HYPOTHESIS", "TESTING", "CHAINING", "FLAG_SEARCH", "FLAG_VERIFICATION", "REPORTING", "COMPLETED_SOLVED"}:
+                                run.current_phase = RunStatus.PAUSED_DEPLOYMENT.value
                             await event_service.append(session, run.id, "run.paused_deployment", {"code": "PAUSED_DEPLOYMENT"})
                 # Tickets reference the lease by foreign key.  Reconcile
                 # stale leases in dependency order so one orphaned ticket

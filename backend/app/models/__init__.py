@@ -26,6 +26,7 @@ from app.models.multi_agent import (
 )
 from app.models.run import (
     Artifact,
+    AttemptToolManifest,
     CleanupManifest,
     CompactionLease,
     EvidenceSnapshot,
@@ -72,6 +73,7 @@ __all__ = [
     "RunExecutionLease",
     "RunUserInput",
     "Artifact",
+    "AttemptToolManifest",
     "CleanupManifest",
     "Observation",
     "Hypothesis",

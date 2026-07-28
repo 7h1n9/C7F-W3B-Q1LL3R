@@ -23,6 +23,7 @@ from app.models.model_config import ModelConfig
 from app.models.run import (
     AgentTurn,
     Artifact,
+    AttemptToolManifest,
     FlagCandidate,
     Hypothesis,
     LogicalToolCall,
@@ -43,7 +44,7 @@ from app.orchestration.state_machine import TERMINAL, RunStatus, transition
 from app.orchestration.state_machine import restart as restart_state
 from app.schemas.compaction import CompactionDecisionAction
 from app.schemas.flag import FlagReviewUpdate
-from app.schemas.run import RunCreate, RunRead
+from app.schemas.run import RunBatchDelete, RunCreate, RunRead
 from app.schemas.solver_state import SolverStateRead
 from app.services.assistance import classify_user_input
 from app.services.codex_materializer import codex_materializer
@@ -131,12 +132,21 @@ async def read_with_summary(
             "diagnostic_summary": item.last_error_message,
         }
     )
+    is_codex = item.engine_type == "codex_sdk"
+    is_openai = item.engine_type == "openai_compatible"
+    bridge_ready = bool(codex_preflight_service.last_result() and codex_preflight_service.last_result().get("ready")) if is_codex else False
+    preflight_ready = codex_preflight_service.is_ready(item.id) if is_codex else False
     payload = {
         **item.__dict__,
         "challenge_name": challenge.name if challenge else None,
         "challenge_type": challenge.challenge_type if challenge else None,
         "target_summary": challenge.target_url if challenge and challenge.target_url else None,
         "model_name": model.name if model else None,
+        "model_source": "CODEX_BRIDGE" if is_codex else ("OPENAI_COMPATIBLE" if is_openai else None),
+        "model_config_required": is_openai,
+        "model_config_applicable": is_openai,
+        "bridge_ready": bridge_ready,
+        "preflight_ready": preflight_ready,
         "active_skill_names": active_skill_names,
         "diagnostic_tags": diagnostics["diagnostic_tags"],
         "diagnostic_summary": diagnostics["diagnostic_summary"],
@@ -340,6 +350,7 @@ async def _delete_run_records(session: AsyncSession, run_id: str) -> None:
         SolverState,
         RunExecutionLease,
         RunAttempt,
+        AttemptToolManifest,
     ):
         await session.execute(delete(model).where(model.run_id == run_id))
     from app.models.learned_skill import (
@@ -357,22 +368,45 @@ async def _delete_run_records(session: AsyncSession, run_id: str) -> None:
     await session.execute(delete(SolveRun).where(SolveRun.id == run_id))
 
 
-@router.delete("/runs/{run_id}", status_code=204)
-async def delete_run(run_id: str, session: AsyncSession = Depends(get_session)) -> None:
-    run = await require_run(run_id, session)
-    task = orchestrator.active_tasks.get(run_id)
+async def _delete_run(session: AsyncSession, run: SolveRun) -> None:
+    task = orchestrator.active_tasks.get(run.id)
     if task and task is not asyncio.current_task():
         task.cancel()
-        # A running Codex task may already have a failed transaction (for
-        # example after a duplicate materialization record).  Cancellation
-        # must not turn an otherwise valid delete into HTTP 500.
+        # A running Codex task may already have a failed transaction.  Roll
+        # back after cancellation so the delete can use a clean transaction.
         with contextlib.suppress(asyncio.CancelledError, Exception):
             await task
         await session.rollback()
     with contextlib.suppress(Exception):
-        await runner_client.delete_workspace(run_id)
+        await runner_client.delete_workspace(run.id)
     _remove_local_workspace(run.workspace_path)
-    await _delete_run_records(session, run_id)
+    await _delete_run_records(session, run.id)
+
+
+@router.delete("/runs/batch")
+async def delete_runs(payload: RunBatchDelete, session: AsyncSession = Depends(get_session)) -> dict:
+    run_ids = list(dict.fromkeys(payload.run_ids))
+    runs = list((await session.scalars(select(SolveRun).where(SolveRun.id.in_(run_ids)))).all())
+    found_ids = {run.id for run in runs}
+    missing_ids = [run_id for run_id in run_ids if run_id not in found_ids]
+    if missing_ids:
+        raise DomainError(
+            "RUN_NOT_FOUND",
+            "One or more selected Runs do not exist.",
+            {"missing_run_ids": missing_ids},
+            status_code=404,
+        )
+    runs_by_id = {run.id: run for run in runs}
+    for run_id in run_ids:
+        await _delete_run(session, runs_by_id[run_id])
+    await session.commit()
+    return {"data": {"deleted_count": len(run_ids), "run_ids": run_ids}}
+
+
+@router.delete("/runs/{run_id}", status_code=204)
+async def delete_run(run_id: str, session: AsyncSession = Depends(get_session)) -> None:
+    run = await require_run(run_id, session)
+    await _delete_run(session, run)
     await session.commit()
 
 
@@ -421,6 +455,17 @@ async def get_solver_state(run_id: str, session: AsyncSession = Depends(get_sess
     }
 
 
+@router.get("/runs/{run_id}/tool-manifest")
+async def get_run_tool_manifest(run_id: str, session: AsyncSession = Depends(get_session)) -> dict:
+    run = await require_run(run_id, session)
+    item = await session.scalar(
+        select(AttemptToolManifest).where(AttemptToolManifest.run_id == run.id).order_by(AttemptToolManifest.created_at.desc())
+    )
+    if not item:
+        raise DomainError("TOOL_MANIFEST_NOT_FOUND", "No Attempt Tool Manifest has been recorded.", status_code=404)
+    return {"data": {"id": item.id, "run_id": item.run_id, "attempt_id": item.attempt_id, "role_snapshot_tools": item.role_snapshot_tools, "challenge_allowed_tools": item.challenge_allowed_tools, "backend_registry_tools": item.backend_registry_tools, "runner_capability_tools": item.runner_capability_tools, "mcp_advertised_tools": item.mcp_advertised_tools, "effective_tools": item.effective_tools, "missing_expected_tools": item.missing_expected_tools, "schema_hashes": item.schema_hashes, "manifest_sha256": item.manifest_sha256, "created_at": item.created_at.isoformat()}}
+
+
 @router.post("/runs/{run_id}/start")
 async def start_run(run_id: str, session: AsyncSession = Depends(get_session)) -> dict:
     run = await require_run(run_id, session)
@@ -428,10 +473,16 @@ async def start_run(run_id: str, session: AsyncSession = Depends(get_session)) -
     active_lease = await session.scalar(select(RunExecutionLease).where(RunExecutionLease.run_id == run.id))
     if active_lease:
         raise DomainError("RUN_ALREADY_EXECUTING", "Run already has an active execution lease.", status_code=409)
-    if run.status not in {RunStatus.CREATED, RunStatus.PAUSED_RECOVERY, RunStatus.PAUSED_DEPLOYMENT, RunStatus.PAUSED_CHECKPOINT, RunStatus.WAITING_CONFIGURATION}:
+    checkpoint_recovery = (
+        run.status == RunStatus.WAITING_USER
+        and isinstance(run.recovery_checkpoint_json, dict)
+        and bool(run.recovery_checkpoint_json.get("next_required_action"))
+        and run.current_phase == "FLAG_SEARCH"
+    )
+    if run.status not in {RunStatus.CREATED, RunStatus.PAUSED_RECOVERY, RunStatus.PAUSED_DEPLOYMENT, RunStatus.PAUSED_CHECKPOINT, RunStatus.WAITING_CONFIGURATION} and not checkpoint_recovery:
         raise DomainError(
             "RUN_INVALID_STATE",
-            "Only created or paused recoverable runs can be started.",
+            "Only created or controller-recoverable runs can be started.",
             {"current_state": run.status},
         )
     if run.status == RunStatus.PAUSED_CHECKPOINT and run.started_at:

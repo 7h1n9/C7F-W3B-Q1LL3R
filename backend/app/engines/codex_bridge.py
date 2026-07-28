@@ -14,25 +14,6 @@ CODEX_CONTROL_PROTOCOL = (
     "[[C7F_WAITING_USER]]；没有这个标记就不要停下来。"
 )
 
-AUTONOMOUS_CAMPAIGN_PROMPT = (
-    "Run this authorized Web CTF autonomously to a verified solution. After one "
-    "baseline and one stable true/false differential confirm a boolean SQL oracle, "
-    "stop manual probing and invoke exactly one bounded batch tool: "
-    "ctfctl.boolean_config_extract. Give it a complete POST JSON RequestSpec for "
-    "the challenge endpoint from challenge.json plus /api/warranty/check, "
-    "test_field=department, baseline_value=OPS, control_fields={asset_no:PC-2026-013}, "
-    "oracle={json_field:matched,true_value:true,false_value:false}. Do not bulk-search "
-    "or repeatedly reread the workspace. The prior bounded authorized metadata "
-    "extraction established the target configuration table service_settings and "
-    "the warranty_message setting. After the oracle check, invoke exactly one "
-    "bounded batch extraction with target_expression exactly SELECT substr((SELECT "
-    "group_concat(setting_value) FROM service_settings),10,64); use max_length=64 "
-    "and the same complete RequestSpec/oracle. Use its verified evidence to identify "
-    "the flag candidate, perform one minimal fresh authorized verification, and run "
-    "fresh reproduction. Do not ask the user for the next step. "
-)
-
-
 class BridgeRateLimitError(RuntimeError):
     pass
 
@@ -60,6 +41,35 @@ class CodexSdkEngine(SolveEngine):
         self.max_attempts = 5
         self.initial_thread_id = thread_id
         self.scope = scope or {}
+
+    def _campaign_prompt(self) -> str:
+        """Build recovery guidance from controller-owned durable state."""
+        checkpoint = self.scope.get("recovery_checkpoint")
+        if not isinstance(checkpoint, dict):
+            return (
+                "Continue this authorized CTF autonomously. Read the workspace and "
+                "challenge description, choose one bounded next action, and record "
+                "reviewable evidence. Do not ask the user to choose a probe."
+            )
+        available = {
+            str(item) for item in (self.scope.get("available_tools") or []) if item
+        }
+        preferred = "boolean_config_extract" if "boolean_config_extract" in available else "script_run"
+        checkpoint_json = json.dumps(checkpoint, ensure_ascii=False, sort_keys=True)
+        return (
+            "Resume from the controller-owned structured checkpoint below. This is "
+            "an autonomous continuation: do not ask the user for configuration, "
+            "model settings, schema clarification, or the next step. The Codex SDK "
+            "source is CODEX_BRIDGE; a null model_config_id is valid. Do not repeat "
+            "anything listed in do_not_repeat. The next required action is one "
+            "bounded extraction using the complete request and oracle from the "
+            f"checkpoint. Preferred tool: {preferred}. If the preferred batch tool "
+            "is unavailable, create a generic run-scoped script under "
+            "scripts/generated/ from the checkpoint and challenge metadata, then "
+            "invoke script_run once. Do not enumerate unrelated tables or invent a "
+            "flag. After the bounded result, perform only minimal fresh verification "
+            "and fresh reproduction.\nCHECKPOINT:\n" + checkpoint_json
+        )
 
     def _thread_for(self, run_id: str) -> str | None:
         if run_id not in self.thread_ids and self.initial_thread_id:
@@ -187,7 +197,7 @@ class CodexSdkEngine(SolveEngine):
         prompt = prompt or (
             "Analyze only this authorized CTF workspace. "
             "Read the challenge description and workspace files before taking the next step. "
-            + AUTONOMOUS_CAMPAIGN_PROMPT
+            + self._campaign_prompt()
         )
         prompt = f"{prompt}{CODEX_CONTROL_PROTOCOL}"
         async with httpx.AsyncClient(timeout=300, trust_env=False) as client:
@@ -224,7 +234,7 @@ class CodexSdkEngine(SolveEngine):
         try:
             async for event in self._stream_events(
                 f"{self.bridge_url}/threads/{thread_id}/run",
-                {"prompt": f"{message} {AUTONOMOUS_CAMPAIGN_PROMPT}{CODEX_CONTROL_PROTOCOL}"},
+                {"prompt": f"{message} {self._campaign_prompt()}{CODEX_CONTROL_PROTOCOL}"},
             ):
                 yield event
         except httpx.HTTPStatusError as error:
@@ -265,7 +275,7 @@ class CodexSdkEngine(SolveEngine):
                 run_id,
                 "Resume the authorized CTF analysis from the existing workspace. "
                 "Read prior evidence and artifacts before taking the next step. "
-                + AUTONOMOUS_CAMPAIGN_PROMPT,
+                + self._campaign_prompt(),
             ):
                 # A recreated Bridge thread reports its bootstrap state as
                 # ANALYZING. The orchestrator has already moved a resumed Run
@@ -279,7 +289,7 @@ class CodexSdkEngine(SolveEngine):
         try:
             async for event in self._stream_events(
                 f"{self.bridge_url}/threads/{thread_id}/resume",
-                {"prompt": f"Resume the authorized analysis. {AUTONOMOUS_CAMPAIGN_PROMPT}{CODEX_CONTROL_PROTOCOL}"},
+                {"prompt": f"Resume the authorized analysis. {self._campaign_prompt()}{CODEX_CONTROL_PROTOCOL}"},
             ):
                 yield event
         except httpx.HTTPStatusError as error:
@@ -292,7 +302,7 @@ class CodexSdkEngine(SolveEngine):
                 run_id,
                 "Resume the authorized CTF analysis from the existing workspace. "
                 "Read prior evidence and artifacts before taking the next step. "
-                + AUTONOMOUS_CAMPAIGN_PROMPT,
+                + self._campaign_prompt(),
             ):
                 # A recreated Bridge thread reports its bootstrap state as
                 # ANALYZING. The orchestrator has already moved a resumed Run

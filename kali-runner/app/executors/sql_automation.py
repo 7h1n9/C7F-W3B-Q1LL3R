@@ -76,7 +76,20 @@ def _signature(result: dict[str, Any]) -> dict[str, Any]:
 
 
 def _observation(label: str, value: str, result: dict[str, Any]) -> dict[str, Any]:
-    return {"label": label, "payload": value, "signature": _signature(result)}
+    return {"label": label, "payload": value, "signature": _signature(result), "result": result}
+
+
+def _extract_json_path(result: dict[str, Any], path: str) -> Any:
+    body = str(result.get("body") or result.get("body_excerpt") or "")
+    try:
+        current: Any = json.loads(body)
+    except json.JSONDecodeError:
+        return None
+    for part in str(path or "").split("."):
+        if not part or not isinstance(current, dict) or part not in current:
+            return None
+        current = current[part]
+    return current
 
 
 def _conditions(args: dict[str, Any]) -> tuple[str, str]:
@@ -127,6 +140,16 @@ async def sql_boolean_compare(request: JobRequest) -> dict:
     spec = _base_spec(args)
     if not field or not spec.get("url"):
         raise HTTPException(422, detail="request.url and test_field are required")
+    oracle = dict(args.get("oracle") or {})
+    json_field = str(oracle.get("json_field") or "").strip()
+    if not json_field:
+        raise HTTPException(422, detail="oracle.json_field is required")
+    expected_true = oracle.get("true_value", True)
+    expected_false = oracle.get("false_value", False)
+    if int(args.get("max_requests") or 5) < 5:
+        raise HTTPException(422, detail="TOOL_BUDGET_TOO_SMALL")
+    for name, value in dict(args.get("control_fields") or {}).items():
+        spec = _put_field(spec, str(name), str(value))
     base = str(args.get("baseline_value") or "")
     true_suffix, false_suffix = _conditions(args)
     observations = []
@@ -135,13 +158,22 @@ async def sql_boolean_compare(request: JobRequest) -> dict:
             observations.append(_observation(label, value, await _send(request, _put_field(spec, field, value))))
     true_rows = [item for item in observations if item["label"] == "TRUE"]
     false_rows = [item for item in observations if item["label"] == "FALSE"]
-    stable_true = len({json.dumps(item["signature"], sort_keys=True) for item in true_rows}) == 1
-    stable_false = len({json.dumps(item["signature"], sort_keys=True) for item in false_rows}) == 1
-    differential = stable_true and stable_false and true_rows[0]["signature"] != false_rows[0]["signature"]
+    true_values = [_extract_json_path(item["result"], json_field) for item in true_rows]
+    false_values = [_extract_json_path(item["result"], json_field) for item in false_rows]
+    for item in observations:
+        item["oracle_value"] = _extract_json_path(item["result"], json_field)
+    stable_true = len(true_values) == 2 and all(value == expected_true for value in true_values)
+    stable_false = len(false_values) == 2 and all(value == expected_false for value in false_values)
+    differential = stable_true and stable_false and expected_true != expected_false
     return {"status": "COMPLETED", "summary": "Boolean SQL differential completed", "structured_result": {
         "observations": observations, "method": spec["method"], "endpoint": spec["url"], "test_field": field,
+        "control_fields": dict(args.get("control_fields") or {}),
+        "oracle": {"json_field": json_field, "true_value": expected_true, "false_value": expected_false},
+        "baseline": next((item for item in observations if item["label"] == "BASELINE"), {}),
+        "true_results": true_rows, "false_results": false_rows,
+        "stable_true": stable_true, "stable_false": stable_false,
         "true_false_differential": differential, "boolean_oracle_confirmed": differential,
-        "sql_injection_confirmed": differential,
+        "sql_injection_confirmed": differential, "subrequest_count": len(observations),
     }}
 
 

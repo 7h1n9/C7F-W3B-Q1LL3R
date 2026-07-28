@@ -18,6 +18,7 @@ from app.models.run import (
     ToolCall,
 )
 from app.models.skill import RunSkillSnapshot, Skill
+from app.schemas.run import RunBatchDelete
 
 
 @pytest.mark.asyncio
@@ -63,4 +64,32 @@ async def test_delete_run_records_and_workspace(tmp_path, monkeypatch: pytest.Mo
         await session.commit()
         assert await session.get(SolveRun, run_id) is None
         assert not (await session.scalars(select(RunEvent).where(RunEvent.run_id == run_id))).first()
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_batch_delete_runs_reuses_full_cleanup(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    engine = create_async_engine("sqlite+aiosqlite://", poolclass=StaticPool)
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    root = tmp_path / "workspaces"
+    monkeypatch.setattr(runs_api, "get_settings", lambda: SimpleNamespace(workspace_root=root))
+
+    async def fake_delete_workspace(_: str) -> None:
+        return None
+
+    monkeypatch.setattr(runs_api.runner_client, "delete_workspace", fake_delete_workspace)
+    async with sessions() as session:
+        challenge = Challenge(name="batch-delete", target_url="http://test.local", allowed_hosts=["test.local"])
+        session.add(challenge)
+        await session.flush()
+        first = SolveRun(challenge_id=challenge.id, workspace_path=str(root / "first"))
+        second = SolveRun(challenge_id=challenge.id, workspace_path=str(root / "second"))
+        session.add_all([first, second])
+        await session.flush()
+        result = await runs_api.delete_runs(RunBatchDelete(run_ids=[first.id, second.id, second.id]), session)
+        assert result["data"]["deleted_count"] == 2
+        assert await session.get(SolveRun, first.id) is None
+        assert await session.get(SolveRun, second.id) is None
     await engine.dispose()

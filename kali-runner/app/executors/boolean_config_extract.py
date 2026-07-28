@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import time
 from datetime import UTC, datetime
@@ -50,6 +51,10 @@ def _oracle(result: dict[str, Any], oracle: dict[str, Any]) -> bool | None:
     return None
 
 
+def _hash(value: Any) -> str:
+    return hashlib.sha256(json.dumps(value, ensure_ascii=False, sort_keys=True, default=str).encode()).hexdigest()
+
+
 async def boolean_config_extract(request: JobRequest) -> dict[str, Any]:
     args = dict(request.arguments)
     spec = _spec(args)
@@ -77,6 +82,30 @@ async def boolean_config_extract(request: JobRequest) -> dict[str, Any]:
     responses = 0
     last_request = 0.0
     progress: list[dict[str, Any]] = []
+    request_spec_hash = _hash(spec)
+    expression_hash = _hash(expression)
+    oracle_hash = _hash(oracle_config)
+    chars: list[str] = []
+    checkpoint = {}
+    if bool(args.get("resume")) and checkpoint_path.is_file():
+        try:
+            checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            checkpoint = {}
+        compatible = all(
+            checkpoint.get(key) == value
+            for key, value in {
+                "run_id": request.run_id,
+                "target_expression_hash": expression_hash,
+                "request_spec_hash": request_spec_hash,
+                "test_field": field,
+                "oracle_hash": oracle_hash,
+            }.items()
+        )
+        if compatible:
+            partial = str(checkpoint.get("partial") or "")
+            chars = list(partial)
+            responses = int(checkpoint.get("requests") or 0)
 
     async def probe(condition: str) -> bool:
         nonlocal responses, last_request
@@ -122,7 +151,7 @@ async def boolean_config_extract(request: JobRequest) -> dict[str, Any]:
         if true_state == false_state:
             raise RuntimeError("ORACLE_NOT_DIFFERENTIAL")
         length = 0
-        hi = int(args.get("max_length") or 256)
+        hi = min(int(args.get("max_length") or 64), 64)
         low = 0
         while low < hi:
             mid = (low + hi + 1) // 2
@@ -131,8 +160,7 @@ async def boolean_config_extract(request: JobRequest) -> dict[str, Any]:
             else:
                 hi = mid - 1
         length = low
-        chars: list[str] = []
-        for position in range(1, length + 1):
+        for position in range(len(chars) + 1, length + 1):
             # Extract independent bits concurrently. This preserves the
             # bounded request count while avoiding a long serial binary search
             # for every character on a high-latency target.
@@ -145,12 +173,19 @@ async def boolean_config_extract(request: JobRequest) -> dict[str, Any]:
             entry = {"position": position, "value": "".join(chars), "requests": responses, "at": datetime.now(UTC).isoformat()}
             progress.append(entry)
             progress_path.write_text("".join(json.dumps(item, ensure_ascii=False) + "\n" for item in progress), encoding="utf-8")
-            checkpoint_path.write_text(json.dumps({"position": position, "partial": "".join(chars), "requests": responses}, ensure_ascii=False, indent=2), encoding="utf-8")
+            checkpoint_path.write_text(json.dumps({"status": "PARTIAL", "run_id": request.run_id, "target_expression_hash": expression_hash, "request_spec_hash": request_spec_hash, "test_field": field, "oracle_hash": oracle_hash, "position": position, "partial": "".join(chars), "requests": responses, "length": length}, ensure_ascii=False, indent=2), encoding="utf-8")
         extracted = "".join(chars)
-        result = {"status": "COMPLETED", "summary": "Boolean configuration extraction completed", "structured_result": {"extracted_value": extracted, "length": length, "requests": responses, "oracle": {"true": true_state, "false": false_state}, "target_expression": expression}, "artifact_paths": [str(progress_path.relative_to(root)).replace("\\", "/"), str(checkpoint_path.relative_to(root)).replace("\\", "/"), str(result_path.relative_to(root)).replace("\\", "/"), str(oracle_path.relative_to(root)).replace("\\", "/")], "progress_path": str(progress_path.relative_to(root)).replace("\\", "/"), "checkpoint_path": str(checkpoint_path.relative_to(root)).replace("\\", "/")}
+        result = {"status": "COMPLETED", "summary": "Boolean configuration extraction completed", "structured_result": {"extracted_value": extracted, "length": length, "requests": responses, "oracle_verified": True, "oracle": {"true": true_state, "false": false_state}, "target_expression": expression, "result_path": str(result_path.relative_to(root)).replace("\\", "/"), "checkpoint_path": str(checkpoint_path.relative_to(root)).replace("\\", "/"), "progress_path": str(progress_path.relative_to(root)).replace("\\", "/")}, "artifact_paths": [str(progress_path.relative_to(root)).replace("\\", "/"), str(checkpoint_path.relative_to(root)).replace("\\", "/"), str(result_path.relative_to(root)).replace("\\", "/"), str(oracle_path.relative_to(root)).replace("\\", "/")], "progress_path": str(progress_path.relative_to(root)).replace("\\", "/"), "checkpoint_path": str(checkpoint_path.relative_to(root)).replace("\\", "/"), "result_path": str(result_path.relative_to(root)).replace("\\", "/")}
+        checkpoint_path.write_text(json.dumps({"status": "COMPLETED", "run_id": request.run_id, "target_expression_hash": expression_hash, "request_spec_hash": request_spec_hash, "test_field": field, "oracle_hash": oracle_hash, "position": length, "partial": extracted, "requests": responses, "length": length}, ensure_ascii=False, indent=2), encoding="utf-8")
         result_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
         oracle_path.write_text(json.dumps({"json_field": oracle_config.get("json_field", "matched"), "true_value": true_state, "false_value": false_state, "requests": responses}, ensure_ascii=False, indent=2), encoding="utf-8")
         return result
     except RuntimeError as error:
-        checkpoint_path.write_text(json.dumps({"status": "FAILED", "error_code": str(error), "requests": responses, "partial": "".join(progress[-1:][0]["value"] if progress else "")}, ensure_ascii=False, indent=2), encoding="utf-8")
+        partial = "".join(chars)
+        status = "PARTIAL" if str(error) == "MAX_REQUESTS_REACHED" else "FAILED"
+        checkpoint_path.write_text(json.dumps({"status": status, "error_code": str(error), "run_id": request.run_id, "target_expression_hash": expression_hash, "request_spec_hash": request_spec_hash, "test_field": field, "oracle_hash": oracle_hash, "position": len(chars), "requests": responses, "partial": partial}, ensure_ascii=False, indent=2), encoding="utf-8")
+        if status == "PARTIAL":
+            result = {"status": "PARTIAL", "summary": "Boolean configuration extraction reached its request budget", "structured_result": {"extracted_value": partial, "length": len(partial), "requests": responses, "oracle_verified": True, "target_expression": expression, "result_path": str(result_path.relative_to(root)).replace("\\", "/"), "checkpoint_path": str(checkpoint_path.relative_to(root)).replace("\\", "/"), "progress_path": str(progress_path.relative_to(root)).replace("\\", "/")}, "artifact_paths": [str(checkpoint_path.relative_to(root)).replace("\\", "/"), str(progress_path.relative_to(root)).replace("\\", "/")], "checkpoint_path": str(checkpoint_path.relative_to(root)).replace("\\", "/"), "progress_path": str(progress_path.relative_to(root)).replace("\\", "/"), "result_path": str(result_path.relative_to(root)).replace("\\", "/")}
+            result_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+            return result
         raise HTTPException(422, detail=str(error)) from error

@@ -78,6 +78,57 @@ class SolverStateService:
         await session.commit()
         return state
 
+    async def ensure_confirmed_boolean_checkpoint(self, session: AsyncSession, run: SolveRun) -> dict | None:
+        """Promote durable SQL-oracle evidence into a compact resume checkpoint."""
+        state = await self.load(session, run.id)
+        if not state:
+            return None
+        selected = None
+        for fact in state.confirmed_facts_json or []:
+            arguments = fact.get("facts", {}).get("arguments", {}) if isinstance(fact, dict) else {}
+            if fact.get("source") == "sql_boolean_compare" and isinstance(arguments, dict):
+                if isinstance(arguments.get("request"), dict) and isinstance(arguments.get("oracle"), dict):
+                    selected = (fact, arguments)
+        if selected is None:
+            return run.recovery_checkpoint_json or None
+        fact, arguments = selected
+        request = dict(arguments.get("request") or {})
+        oracle = dict(arguments.get("oracle") or {})
+        evidence_ref = fact.get("facts", {}).get("artifact_path")
+        capabilities = {
+            "target_reachable": {"confirmed": True, "source": evidence_ref},
+            "warranty_endpoint_identified": {"confirmed": True, "source": evidence_ref},
+            "department_boolean_sqli_confirmed": {"confirmed": True, "source": evidence_ref},
+            "matched_boolean_oracle_confirmed": {"confirmed": True, "source": evidence_ref},
+        }
+        state.capability_ledger_json = {**(state.capability_ledger_json or {}), **capabilities}
+        state.current_phase = "FLAG_SEARCH"
+        state.run_plan_json = {
+            **(state.run_plan_json or {}),
+            "current_phase": "FLAG_SEARCH",
+            "confirmed_capabilities": sorted(capabilities),
+            "next_actions": ["boolean_config_extract", "script_run"],
+        }
+        checkpoint = {
+            "checkpoint_type": "CONFIRMED_BOOLEAN_ORACLE",
+            "run_id": run.id,
+            "current_phase": "FLAG_SEARCH",
+            "confirmed_capabilities": sorted(capabilities),
+            "evidence_refs": [{"path": evidence_ref, "purpose": "boolean_oracle_confirmation"}] if evidence_ref else [],
+            "request_spec": request,
+            "test_field": arguments.get("test_field"),
+            "control_fields": arguments.get("control_fields") or {},
+            "oracle": oracle,
+            "baseline_value": arguments.get("baseline_value"),
+            "do_not_repeat": ["recon", "connectivity_probe", "sql_boolean_compare", "workspace_read:notes/oracle-confirmation.md"],
+            "next_required_action": {"type": "BOUNDED_EXTRACTION", "preferred_tools": ["boolean_config_extract", "script_run"]},
+            "success_condition": "verified_flag_candidate",
+        }
+        run.recovery_checkpoint_json = checkpoint
+        run.current_phase = "FLAG_SEARCH"
+        await session.commit()
+        return checkpoint
+
     async def check_consistency(self, session: AsyncSession, run: SolveRun) -> dict:
         state = await self.load(session, run.id)
         if not state:

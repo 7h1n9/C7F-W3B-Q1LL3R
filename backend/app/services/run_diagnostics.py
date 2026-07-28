@@ -11,6 +11,7 @@ from app.models.model_config import ModelConfig
 from app.models.run import Artifact, FlagCandidate, Observation, SolveRun, ToolCall
 from app.models.skill import Skill
 from app.orchestration.state_machine import RunStatus
+from app.services.codex_preflight import codex_preflight_service
 from app.services.events import event_service
 from app.services.solver_state import solver_state_service
 
@@ -202,6 +203,23 @@ class RunDiagnosticsService:
             )
 
         tags = [item["code"] for item in anomalies]
+        is_codex = run.engine_type == "codex_sdk"
+        is_openai = run.engine_type == "openai_compatible"
+        model_source = "CODEX_BRIDGE" if is_codex else ("OPENAI_COMPATIBLE" if is_openai else None)
+        model_config_required = is_openai
+        model_config_applicable = is_openai
+        bridge_ready = bool(codex_preflight_service.last_result() and codex_preflight_service.last_result().get("ready")) if is_codex else False
+        preflight_ready = codex_preflight_service.is_ready(run.id) if is_codex else False
+        if is_codex and run.model_config_id:
+            _append_anomaly(
+                anomalies,
+                code="MODEL_CONFIG_NOT_APPLICABLE",
+                severity="high",
+                title="Codex SDK 不适用 ModelConfig",
+                summary="Codex SDK 的模型来源是 Codex Bridge，Run 不应绑定 ModelConfig。",
+                evidence=[f"model_config_id={run.model_config_id}"],
+                suggestion="清除该 Run 的 ModelConfig 绑定，并通过 Codex Bridge 运行。",
+            )
         if run.last_error_code:
             tags.append(run.last_error_code)
         if no_progress_count:
@@ -229,6 +247,11 @@ class RunDiagnosticsService:
             "engine": {
                 "engine_type": run.engine_type,
                 "model_name": model.name if model else None,
+                "model_source": model_source,
+                "model_config_required": model_config_required,
+                "model_config_applicable": model_config_applicable,
+                "bridge_ready": bridge_ready,
+                "preflight_ready": preflight_ready,
             },
         }
 

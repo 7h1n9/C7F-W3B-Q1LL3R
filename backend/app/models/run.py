@@ -20,9 +20,12 @@ class SolveRun(UUIDTimestampMixin, Base):
     __tablename__ = "solve_runs"
     challenge_id: Mapped[str] = mapped_column(ForeignKey("challenges.id"), nullable=False)
     engine_type: Mapped[str] = mapped_column(String(40), default="mock")
-    # The legacy single-agent loop remains the default.  multi_agent_v1 is
-    # opt-in until its controller has accepted a task/result transition.
-    solver_mode: Mapped[str] = mapped_column(String(30), default="single_agent", nullable=False)
+    # New Runs default to the structured multi-agent controller.  Existing
+    # rows keep their persisted mode, and single_agent remains supported as an
+    # explicit compatibility mode.
+    solver_mode: Mapped[str] = mapped_column(
+        String(30), default="multi_agent_v1", server_default="multi_agent_v1", nullable=False
+    )
     controller_revision: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     model_config_id: Mapped[str | None] = mapped_column(ForeignKey("model_configs.id"))
     role_name: Mapped[str | None] = mapped_column(String(120))
@@ -82,6 +85,9 @@ class SolveRun(UUIDTimestampMixin, Base):
     reserved_tool_calls_by_turn_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
     assistance_level: Mapped[str] = mapped_column(String(30), default="AUTONOMOUS")
     assistance_sources_json: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    recovery_checkpoint_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    workspace_revision: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    workspace_negative_cache_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
     last_compacted_event_id: Mapped[int] = mapped_column(BigInteger, default=0)
     last_compacted_tool_created_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_compacted_observation_created_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
@@ -146,6 +152,34 @@ class RunAttempt(UUIDTimestampMixin, Base):
     # well so MySQL receives a value on the very first insert of an attempt.
     # Without this field a newly started run fails before the orchestrator can
     # transition it out of CREATED.
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(UTC),
+        onupdate=lambda: datetime.now(UTC),
+    )
+
+
+class AttemptToolManifest(UUIDTimestampMixin, Base):
+    """Effective tool catalog captured for one Attempt.
+
+    Historical role snapshots remain immutable; this records what was
+    actually available after policy, Runner and MCP intersection.
+    """
+
+    __tablename__ = "attempt_tool_manifests"
+    __table_args__ = (UniqueConstraint("attempt_id", name="uq_attempt_tool_manifest_attempt"),)
+
+    run_id: Mapped[str] = mapped_column(ForeignKey("solve_runs.id"), nullable=False, index=True)
+    attempt_id: Mapped[str] = mapped_column(ForeignKey("run_attempts.id"), nullable=False, index=True)
+    role_snapshot_tools: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    challenge_allowed_tools: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    backend_registry_tools: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    runner_capability_tools: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    mcp_advertised_tools: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    effective_tools: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    missing_expected_tools: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    schema_hashes: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    manifest_sha256: Mapped[str] = mapped_column(String(64), nullable=False, default="")
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=lambda: datetime.now(UTC),

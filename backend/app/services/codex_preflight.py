@@ -153,6 +153,33 @@ class CodexPreflightService:
                     schema_errors.extend(validate_mcp_input_schema(item.get("inputSchema"), f"tools.{item.get('name')}"))
             if schema_errors:
                 raise PreflightFailure("MCP_SCHEMA_VALIDATION", "MCP_SCHEMA_INVALID", "; ".join(schema_errors[:8]))
+            critical_schema_errors: list[str] = []
+            by_name = {str(item.get("name")): item for item in mcp_tools if isinstance(item, dict)}
+            missing_critical: list[str] = []
+            for name in ("sql_boolean_compare", "boolean_config_extract", "oracle_probe_matrix"):
+                if name not in by_name:
+                    missing_critical.append(name)
+                    continue
+                schema = (by_name.get(name) or {}).get("inputSchema") or {}
+                properties = schema.get("properties") if isinstance(schema, dict) else None
+                if not isinstance(properties, dict) or not properties:
+                    critical_schema_errors.append(f"{name}: MCP_SCHEMA_DEGRADED")
+            if critical_schema_errors:
+                raise PreflightFailure("MCP_SCHEMA_VALIDATION", "MCP_SCHEMA_DEGRADED", "; ".join(critical_schema_errors))
+            if missing_critical:
+                stages.append(
+                    {
+                        "stage": "MCP_TOOL_CATALOG",
+                        "ok": False,
+                        "details": {
+                            "code": "TOOL_CATALOG_DRIFT",
+                            "expected": ["sql_boolean_compare", "boolean_config_extract", "oracle_probe_matrix"],
+                            "mcp_advertised": sorted(by_name),
+                            "missing_expected_tools": missing_critical,
+                            "recommended_action": "restart_backend_runner_bridge_or_use_script_run",
+                        },
+                    }
+                )
             # The MCP handshake mints one-shot tickets for list/read calls.
             # Remove those temporary rows before the explicit ticket test and
             # before deleting the temporary run in the finally block.
@@ -172,7 +199,7 @@ class CodexPreflightService:
             if consumed.rowcount != 1:
                 raise PreflightFailure("TICKET_CONSUME", "TICKET_ALREADY_USED", "Ticket was not consumed atomically.")
             stages.append({"stage": "TICKET_CREATE_CONSUME", "ok": True, "details": {"used_at_persisted": True}})
-            result = {"ready": True, "sdk_version": sdk_version, "bridge_version": bridge.get("version", ""), "failed_stage": None, "error_code": None, "diagnostic_artifact": None, "stages": stages, "feature_flags": settings.feature_flags}
+            result = {"ready": True, "sdk_version": sdk_version, "bridge_version": bridge.get("version", ""), "failed_stage": None, "error_code": None, "diagnostic_artifact": None, "stages": stages, "feature_flags": settings.feature_flags, "mcp_tools": mcp_tools, "mcp_tool_names": sorted(advertised_names), "mcp_schema_hashes": {str(item.get("name")): hashlib.sha256(json.dumps(item.get("inputSchema"), sort_keys=True, default=str).encode()).hexdigest() for item in mcp_tools if isinstance(item, dict) and item.get("name")}}
             self._last_result = result
             if run_id:
                 self._ready_runs.add(run_id)

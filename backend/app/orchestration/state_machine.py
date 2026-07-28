@@ -37,6 +37,10 @@ TERMINAL = {status for status in RunStatus if status.name.startswith(("COMPLETED
     RunStatus.CANCELLED,
     RunStatus.POLICY_BLOCKED,
 }
+SOLVER_PHASES = {
+    "INTAKE", "BASELINE", "MAPPING", "HYPOTHESIS", "TESTING", "CHAINING",
+    "FLAG_SEARCH", "FLAG_VERIFICATION", "REPORTING", "COMPLETED_SOLVED",
+}
 RESTARTABLE = {
     RunStatus.WAITING_USER,
     RunStatus.FAILED_ENGINE,
@@ -177,7 +181,14 @@ def transition(run: object, target: RunStatus) -> None:
             "The run cannot be transitioned from its current state.",
             {"current_state": current, "requested_state": target},
         )
-    run.status, run.current_phase = target.value, target.value
+    run.status = target.value
+    # Lifecycle pauses/configuration states must not overwrite the solver's
+    # phase.  Legacy runs may still carry a lifecycle value as phase; retain
+    # the old mirroring behavior only until a real solver phase exists.
+    if target == RunStatus.COMPLETED_SOLVED:
+        run.current_phase = target.value
+    elif str(getattr(run, "current_phase", "")) not in SOLVER_PHASES:
+        run.current_phase = target.value
     if target == RunStatus.PREPARING and not getattr(run, "started_at"):
         run.started_at = datetime.now(UTC)
     if target in TERMINAL:
@@ -194,7 +205,8 @@ def restart(run: object) -> RunStatus:
             {"current_state": current},
         )
     run.status = RunStatus.WAITING_USER.value
-    run.current_phase = RunStatus.WAITING_USER.value
+    if str(getattr(run, "current_phase", "")) not in SOLVER_PHASES:
+        run.current_phase = RunStatus.WAITING_USER.value
     run.finished_at = None
     # Restart creates a fresh Attempt but must never erase durable Run totals.
     # Legacy counters mirror the current Attempt for compatibility.

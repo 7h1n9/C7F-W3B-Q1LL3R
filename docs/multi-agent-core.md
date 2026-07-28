@@ -1,15 +1,24 @@
 # Multi-agent core loop (phase 1)
 
-The multi-agent path is opt-in per Run:
+New Runs use the multi-agent path by default.  The legacy path remains
+available as an explicit compatibility choice:
 
 ```text
-solver_mode=single_agent    # default; existing orchestrator path
-solver_mode=multi_agent_v1  # structured controller path
+solver_mode=multi_agent_v1  # default; structured controller path
+solver_mode=single_agent    # explicit legacy compatibility path
 ```
 
 `single_agent` remains unchanged and is covered by the existing regression
 suite.  The multi-agent API is under `/api/v1/multi-agent` and only accepts
-runs explicitly created with `multi_agent_v1`.
+runs whose persisted `solver_mode` is `multi_agent_v1`.
+
+The current phase-1 implementation provides the controller, durable task and
+evidence contracts, role policies, promotion gate, and inspectable API.  The
+ordinary Run orchestrator still executes the existing engine loop; automatic
+Planner-to-Verify worker dispatch is not yet wired into `orchestrator.start`.
+Selecting `multi_agent_v1` therefore enables the new data/control contract and
+API surface, but should not be described as a fully autonomous multi-agent
+execution until that dispatch integration is completed.
 
 ## Ownership and state flow
 

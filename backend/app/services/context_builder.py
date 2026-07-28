@@ -227,6 +227,7 @@ class ContextBuilder:
             "RunPlan": (snapshot_data.get("current_exploit_plan") if snapshot_data else None) or (state.run_plan_json if state else {}),
             "AttackChainPlan": (snapshot_data.get("attack_chain") if snapshot_data else None) or (state.attack_chain_plan_json if state else {}),
             "Capability Ledger": (snapshot_data.get("confirmed_capabilities") if snapshot_data else None) or (state.capability_ledger_json if state else {}),
+            "Recovery Checkpoint": run.recovery_checkpoint_json or {},
             "Solver State": {
                 "current_phase": state.current_phase if state else run.current_phase,
                 "confirmed_facts": (snapshot_data.get("canonical_facts") if snapshot_data else None) or (state.confirmed_facts_json if state else []),

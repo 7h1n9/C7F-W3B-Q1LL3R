@@ -3,7 +3,9 @@ from pydantic import BaseModel, Field
 
 class RunCreate(BaseModel):
     engine_type: str = Field(default="mock", pattern="^(mock|openai_compatible|codex_sdk)$")
-    solver_mode: str = Field(default="single_agent", pattern="^(single_agent|multi_agent_v1)$")
+    # New Runs use the structured controller by default.  The legacy loop is
+    # still available as an explicit compatibility choice.
+    solver_mode: str = Field(default="multi_agent_v1", pattern="^(single_agent|multi_agent_v1)$")
     model_config_id: str | None = None
     max_agent_steps: int = Field(default=120, ge=1, le=300)
     max_tool_calls: int = Field(default=120, ge=0, le=300)
@@ -15,6 +17,10 @@ class RunCreate(BaseModel):
     conversation_id: str | None = None
 
 
+class RunBatchDelete(BaseModel):
+    run_ids: list[str] = Field(min_length=1, max_length=500)
+
+
 class RunRead(BaseModel):
     id: str
     challenge_id: str
@@ -22,9 +28,16 @@ class RunRead(BaseModel):
     challenge_type: str | None = None
     target_summary: str | None = None
     engine_type: str
-    solver_mode: str = "single_agent"
+    solver_mode: str = "multi_agent_v1"
     model_config_id: str | None
     model_name: str | None = None
+    model_source: str | None = None
+    model_config_required: bool = False
+    model_config_applicable: bool = False
+    bridge_ready: bool = False
+    preflight_ready: bool = False
+    recovery_checkpoint_json: dict = Field(default_factory=dict)
+    workspace_revision: int = 0
     role_name: str | None
     role_version: str | None
     role_snapshot_json: dict

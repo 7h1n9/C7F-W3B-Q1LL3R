@@ -14,7 +14,7 @@ function normalizeParameterSchema(value: unknown): Record<string, unknown> {
   if (!isRecord(value)) return {};
   // Accept a complete JSON Schema when a future backend version supplies one.
   if (value.type === "object" || value.properties || value.$ref || value.anyOf || value.oneOf) {
-    return value;
+    return { ...value };
   }
   const schema: Record<string, unknown> = {};
   for (const [key, item] of Object.entries(value)) {
