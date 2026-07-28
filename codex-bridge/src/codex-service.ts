@@ -223,7 +223,7 @@ export function resolveCtfctlMcpLaunch(): { command: string; args: string[] } {
   throw new Error("CTFCTL_MCP_ENTRYPOINT_NOT_FOUND");
 }
 
-type CtfctlScope = { run_id: string; challenge_id: string; workspace_root: string; allowed_hosts: string[]; attempt_id: string; lease_token: string; master_lease_token?: string; mcp_required?: boolean; thread_id?: string; model_turn_id?: string };
+type CtfctlScope = { run_id: string; challenge_id: string; workspace_root: string; allowed_hosts: string[]; attempt_id: string; lease_token: string; master_lease_token?: string; mcp_required?: boolean; thread_id?: string; model_turn_id?: string; turn_id?: string; agent_task_id?: string; agent_role?: string; task_lease_token?: string; allowed_tools?: string[] };
 
 function normalizeScope(input: ThreadRequest): CtfctlScope {
   const raw = input.scope ?? {};
@@ -240,6 +240,11 @@ function normalizeScope(input: ThreadRequest): CtfctlScope {
     mcp_required: typeof raw.mcp_required === "boolean" ? raw.mcp_required : undefined,
     thread_id: typeof raw.thread_id === "string" ? raw.thread_id : undefined,
     model_turn_id: typeof raw.model_turn_id === "string" ? raw.model_turn_id : undefined,
+    turn_id: typeof raw.turn_id === "string" ? raw.turn_id : undefined,
+    agent_task_id: typeof raw.agent_task_id === "string" ? raw.agent_task_id : undefined,
+    agent_role: typeof raw.agent_role === "string" ? raw.agent_role : undefined,
+    task_lease_token: typeof raw.task_lease_token === "string" ? raw.task_lease_token : undefined,
+    allowed_tools: Array.isArray(raw.allowed_tools) ? raw.allowed_tools.filter((item): item is string => typeof item === "string") : undefined,
   };
 }
 

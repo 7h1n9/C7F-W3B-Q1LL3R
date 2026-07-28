@@ -24,6 +24,15 @@ class AgentTaskStatus(StrEnum):
     CANCELLED = "CANCELLED"
 
 
+class AgentTaskKind(StrEnum):
+    PLANNING = "PLANNING"
+    PLAN_REVIEW = "PLAN_REVIEW"
+    RECON = "RECON"
+    EXPLOIT = "EXPLOIT"
+    RESULT_REVIEW = "RESULT_REVIEW"
+    VERIFY = "VERIFY"
+
+
 class TaskBudget(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -66,6 +75,7 @@ class AgentTaskContract(BaseModel):
     task_id: str = Field(min_length=1, max_length=80)
     run_id: str = Field(min_length=1, max_length=80)
     agent_role: AgentRole
+    task_kind: AgentTaskKind = AgentTaskKind.RECON
     objective: str = Field(min_length=1, max_length=4000)
     known_fact_ids: list[str] = Field(default_factory=list, max_length=500)
     active_hypothesis_ids: list[str] = Field(default_factory=list, max_length=500)
@@ -83,6 +93,7 @@ class AgentTaskContract(BaseModel):
     retry_count: int = Field(default=0, ge=0, le=100)
     input_snapshot_version: int = Field(default=0, ge=0)
     result_schema_version: str = "v1"
+    context: dict[str, Any] = Field(default_factory=dict)
 
 
 class FailureClassification(BaseModel):
@@ -147,6 +158,7 @@ class PlannerProposalContract(BaseModel):
     proposal_id: str = Field(min_length=1, max_length=80)
     run_id: str = Field(min_length=1, max_length=80)
     current_stage: str = Field(min_length=1, max_length=40)
+    decision_question: str = Field(default="", max_length=2000)
     next_agent: AgentRole
     objective: str = Field(min_length=1, max_length=4000)
     input_fact_ids: list[str] = Field(default_factory=list, max_length=500)
@@ -171,6 +183,7 @@ class AnalysisReviewContract(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     proposal_id: str = Field(min_length=1, max_length=80)
+    task_kind: Literal["PLAN_REVIEW", "RESULT_REVIEW"] = "PLAN_REVIEW"
     decision: AnalysisDecision
     confidence: int = Field(default=0, ge=0, le=100)
     question_being_tested: str = ""
@@ -182,6 +195,7 @@ class AnalysisReviewContract(BaseModel):
     recommended_tool: str | None = None
     reason: str = ""
     audit_reason: str = ""
+    approved_arguments: dict[str, Any] = Field(default_factory=dict)
 
 
 class PromotionStatus(StrEnum):

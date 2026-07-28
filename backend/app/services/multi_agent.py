@@ -45,7 +45,7 @@ DEFAULT_POLICIES: tuple[AgentRolePolicyContract, ...] = (
     AgentRolePolicyContract(
         role=AgentRole.PLANNER,
         system_prompt="Plan one bounded next stage from verified facts.",
-        readable_memory_types=["WORKING", "VERIFIED_FACT", "HYPOTHESIS", "FAILURE"],
+        readable_memory_types=["WORKING", "VERIFIED_FACT", "HYPOTHESIS", "EVIDENCE", "FAILURE"],
         allowed_tool_types=[], allowed_tools=[], allowed_outputs=["PLANNER_PROPOSAL"],
         forbidden_operations=["RUNNER_CALL", "FLAG_SUBMIT", "RUN_STATUS_CHANGE"],
     ),
@@ -350,12 +350,14 @@ class DeterministicController:
             raise DomainError("AGENT_BUDGET_EXCEEDED", "Task budget exceeds the role policy.")
         item = AgentTask(
             id=task.task_id, run_id=task.run_id, agent_role=task.agent_role.value, objective=task.objective,
+            task_kind=task.task_kind.value,
             known_fact_ids_json=task.known_fact_ids, active_hypothesis_ids_json=task.active_hypothesis_ids,
             allowed_tools_json=task.allowed_tools, budget_json=budget, success_condition=task.success_condition,
             stop_conditions_json=task.stop_conditions, evidence_snapshot_id=task.evidence_snapshot_id,
             created_by_task_id=task.created_by_task_id, status=AgentTaskStatus.PENDING.value,
             timeout_seconds=task.timeout_seconds, input_snapshot_version=task.input_snapshot_version,
             result_schema_version=task.result_schema_version,
+            context_json=task.context,
         )
         session.add(item)
         await session.flush()
@@ -551,8 +553,14 @@ class DeterministicController:
         if proposal.proposal_id != review.proposal_id:
             raise DomainError("ANALYSIS_REVIEW_MISMATCH", "Review does not belong to proposal.")
         if review.decision == AnalysisDecision.APPROVE:
+            if not review.question_being_tested.strip():
+                raise DomainError("ANALYSIS_QUESTION_REQUIRED", "An approved review must state the decision question.")
             if not review.supporting_evidence_ids:
                 raise DomainError("ANALYSIS_EVIDENCE_REQUIRED", "An approved proposal requires supporting evidence.")
+            if not review.expected_true_signal or not review.expected_false_signal:
+                raise DomainError("ANALYSIS_SIGNAL_CONTROLS_REQUIRED", "An approved review must define both true and false signals.")
+            if review.recommended_tool and review.recommended_tool not in proposal.allowed_tools:
+                raise DomainError("ANALYSIS_TOOL_NOT_IN_PROPOSAL", "The approved tool must be declared by the planner.")
             if review.independent_variable and review.independent_variable in review.required_controls:
                 raise DomainError("ANALYSIS_CONTROL_VARIABLE_INVALID", "The independent variable cannot also be a control.")
             if any(not str(value).strip() for value in review.required_controls.values()):

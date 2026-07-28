@@ -128,6 +128,8 @@ class SolveRun(UUIDTimestampMixin, Base):
 class AgentTurn(UUIDTimestampMixin, Base):
     __tablename__ = "agent_turns"
     run_id: Mapped[str] = mapped_column(ForeignKey("solve_runs.id"), nullable=False, index=True)
+    agent_task_id: Mapped[str | None] = mapped_column(ForeignKey("agent_tasks.id"), index=True)
+    agent_role: Mapped[str | None] = mapped_column(String(30), index=True)
     step_number: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     model_config_id: Mapped[str | None] = mapped_column(ForeignKey("model_configs.id"))
     action_protocol: Mapped[str] = mapped_column(String(30), nullable=False, default="json_schema")
@@ -292,6 +294,7 @@ class ToolCall(UUIDTimestampMixin, Base):
     provider_tool_name: Mapped[str | None] = mapped_column(String(120))
     effective_tool_name: Mapped[str | None] = mapped_column(String(120))
     turn_id: Mapped[str | None] = mapped_column(String(36), index=True)
+    agent_task_id: Mapped[str | None] = mapped_column(ForeignKey("agent_tasks.id"), index=True)
 
 
 class LogicalToolCall(UUIDTimestampMixin, Base):

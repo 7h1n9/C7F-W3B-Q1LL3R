@@ -20,6 +20,7 @@ from app.core.config import get_settings
 from app.core.database import get_session
 from app.core.exceptions import DomainError
 from app.models.challenge import Challenge
+from app.models.multi_agent import AgentTask
 from app.models.run import AgentTurn, RunAttempt, RunExecutionLease, SolveRun, ToolInvocationTicket
 from app.orchestration.state_machine import RunStatus, transition
 from app.services.events import event_service
@@ -53,6 +54,10 @@ class Scope(BaseModel):
     logical_tool_call_id: str | None = None
     turn_id: str | None = None
     turn_started_at: str | None = None
+    agent_task_id: str | None = None
+    agent_role: str | None = None
+    task_lease_token: str | None = None
+    allowed_tools: list[str] = Field(default_factory=list)
 
 
 class Request(BaseModel):
@@ -241,6 +246,18 @@ async def scoped_run(payload: Request, access_key: str | None, session: AsyncSes
         or (expires_at and expires_at <= now)
     ):
         raise DomainError("CTFCTL_LEASE_INVALID", "Thread execution lease is no longer active.", {"attempt_id": payload.scope.attempt_id}, 409)
+    if payload.scope.agent_task_id:
+        task = await session.get(AgentTask, payload.scope.agent_task_id)
+        if (
+            not task
+            or task.run_id != run.id
+            or task.status != "RUNNING"
+            or task.lease_token != payload.scope.task_lease_token
+            or (payload.scope.agent_role and task.agent_role != payload.scope.agent_role)
+        ):
+            raise DomainError("AGENT_SCOPE_INVALID", "The ctfctl scope is not owned by the running AgentTask.", {"agent_task_id": payload.scope.agent_task_id}, 403)
+        if payload.scope.allowed_tools and sorted(payload.scope.allowed_tools) != sorted(task.allowed_tools_json or []):
+            raise DomainError("AGENT_SCOPE_INVALID", "The ctfctl tool allowlist does not match the AgentTask contract.", {"agent_task_id": task.id}, 403)
     if ticket_valid:
         await session.commit()
     return run, challenge, root
@@ -610,9 +627,13 @@ async def invoke_tool(payload: InvokeRequest, x_ctfctl_access_key: str | None = 
         challenge,
         payload.tool,
         payload.arguments,
+        execution_layer="multi_agent" if payload.scope.agent_task_id else "ctfctl",
         logical_tool_call_id=payload.scope.logical_tool_call_id,
         turn_id=run.active_turn_id or payload.scope.turn_id or payload.scope.model_turn_id,
         provider_tool_name=f"ctfctl.{payload.tool}",
+        agent_task_id=payload.scope.agent_task_id,
+        agent_role=payload.scope.agent_role,
+        task_lease_token=payload.scope.task_lease_token,
     )
     if RunStatus(run.status) == RunStatus.EXECUTING:
         transition(run, RunStatus.EVALUATING)

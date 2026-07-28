@@ -706,7 +706,7 @@ class SolveOrchestrator:
                 engine = await self.build_engine(run, session, attempt, lease)
                 self.active_engines[run_id] = engine
                 if run.solver_mode == "multi_agent_v1":
-                    await multi_agent_orchestrator.run(session, run, await session.get(Challenge, run.challenge_id), attempt, lease)
+                    await multi_agent_orchestrator.run(session, run, await session.get(Challenge, run.challenge_id), attempt, lease, engine=engine)
                 elif run.engine_type == "openai_compatible":
                     await self._run_openai(session, run, engine, user_message, attempt, lease)
                 else:

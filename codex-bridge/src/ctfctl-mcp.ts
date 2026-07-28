@@ -9,7 +9,7 @@ import { appendFileSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { parametersToInputSchema, validateMcpInputSchema } from "./mcp-schema.js";
 
-type Scope = { run_id: string; challenge_id: string; workspace_root: string; allowed_hosts: string[]; attempt_id: string; lease_token: string; master_lease_token?: string; thread_id?: string; model_turn_id?: string; turn_id?: string };
+type Scope = { run_id: string; challenge_id: string; workspace_root: string; allowed_hosts: string[]; attempt_id: string; lease_token: string; master_lease_token?: string; thread_id?: string; model_turn_id?: string; turn_id?: string; agent_task_id?: string; agent_role?: string; task_lease_token?: string; allowed_tools?: string[] };
 let scope = JSON.parse(process.env.CTFCTL_SCOPE ?? "{}") as Scope;
 const masterScope = { ...scope, master_lease_token: scope.master_lease_token ?? scope.lease_token };
 const backendUrl = (process.env.CTFCTL_BACKEND_URL ?? "http://127.0.0.1:8000").replace(/\/$/, "");

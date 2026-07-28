@@ -129,6 +129,9 @@ class ToolGateway:
         provider_tool_name: str | None = None, logical_kind: str = "TOOL",
         required_action: bool = False,
         required_action_kind: str | None = None,
+        agent_task_id: str | None = None,
+        agent_role: str | None = None,
+        task_lease_token: str | None = None,
     ) -> dict:
         definition = load_tool_definitions().get(name)
         if not definition or not definition.enabled:
@@ -138,7 +141,11 @@ class ToolGateway:
         # A model turn can arrive while the Run is moving through one of the
         # short-lived execution stages.  Only terminal/explicit pause states
         # are rejected here; attempt/lease freshness is checked in one place.
-        coordinated = await tool_invocation_coordinator.validate(session, run)
+        coordinated = await tool_invocation_coordinator.validate(
+            session, run, agent_task_id=agent_task_id, task_lease_token=task_lease_token, tool_name=name
+        )
+        if agent_task_id and agent_role and coordinated["task"].agent_role != agent_role:
+            raise DomainError("AGENT_SCOPE_INVALID", "The task role does not match the tool-call scope.", {"agent_task_id": agent_task_id, "agent_role": agent_role}, 403)
         lease = coordinated["lease"]
         permitted_tools = await effective_tools_for(session, run, challenge)
         if name not in permitted_tools:
@@ -249,6 +256,7 @@ class ToolGateway:
             provider_tool_name=provider_tool_name or name,
             effective_tool_name=name,
             turn_id=turn_id,
+            agent_task_id=agent_task_id,
         )
         session.add(call)
         await session.commit()

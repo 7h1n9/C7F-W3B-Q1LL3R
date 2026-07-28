@@ -46,6 +46,7 @@ class AgentTask(UUIDTimestampMixin, Base):
 
     run_id: Mapped[str] = mapped_column(ForeignKey("solve_runs.id"), nullable=False, index=True)
     agent_role: Mapped[str] = mapped_column(String(30), nullable=False, index=True)
+    task_kind: Mapped[str] = mapped_column(String(30), nullable=False, default="RECON", index=True)
     objective: Mapped[str] = mapped_column(Text, nullable=False)
     known_fact_ids_json: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
     active_hypothesis_ids_json: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
@@ -66,6 +67,7 @@ class AgentTask(UUIDTimestampMixin, Base):
     input_snapshot_version: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     result_schema_version: Mapped[str] = mapped_column(String(30), nullable=False, default="v1")
     runtime_path: Mapped[str | None] = mapped_column(String(1024))
+    context_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)
 
 
@@ -91,6 +93,7 @@ class PlannerProposal(UUIDTimestampMixin, Base):
     run_id: Mapped[str] = mapped_column(ForeignKey("solve_runs.id"), nullable=False, index=True)
     proposal_id: Mapped[str] = mapped_column(String(80), nullable=False)
     current_stage: Mapped[str] = mapped_column(String(40), nullable=False)
+    decision_question: Mapped[str] = mapped_column(Text, nullable=False, default="")
     next_agent: Mapped[str] = mapped_column(String(30), nullable=False)
     objective: Mapped[str] = mapped_column(Text, nullable=False)
     input_fact_ids_json: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
@@ -106,7 +109,9 @@ class PlannerProposal(UUIDTimestampMixin, Base):
 
 class AnalysisReview(UUIDTimestampMixin, Base):
     __tablename__ = "analysis_reviews"
-    proposal_id: Mapped[str] = mapped_column(ForeignKey("planner_proposals.id"), nullable=False, unique=True)
+    __table_args__ = (UniqueConstraint("proposal_id", "task_kind", name="uq_analysis_review_kind"),)
+    proposal_id: Mapped[str] = mapped_column(ForeignKey("planner_proposals.id"), nullable=False)
+    task_kind: Mapped[str] = mapped_column(String(30), nullable=False, default="PLAN_REVIEW")
     decision: Mapped[str] = mapped_column(String(30), nullable=False)
     confidence: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     question_being_tested: Mapped[str] = mapped_column(Text, nullable=False, default="")
@@ -118,6 +123,7 @@ class AnalysisReview(UUIDTimestampMixin, Base):
     recommended_tool: Mapped[str | None] = mapped_column(String(100))
     reason: Mapped[str] = mapped_column(Text, nullable=False, default="")
     audit_reason: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    approved_arguments_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
 
 
 class VerifiedFact(UUIDTimestampMixin, Base):
