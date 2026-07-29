@@ -176,9 +176,14 @@ class SolveOrchestrator:
                     "attempt_id": attempt.id if attempt else None,
                     "lease_token": lease.lease_token if lease else None,
                     "master_lease_token": lease.lease_token if lease else None,
-                    "mcp_required": codex_preflight_service.is_ready(run.id),
+                    # multi_agent_v1 owns the tool loop in the backend.  The
+                    # role model only emits a contract/RoleAction and must
+                    # never depend on an MCP catalog or preflight cache.
+                    "execution_mode": "controller_tool_loop",
+                    "mcp_enabled": False,
+                    "mcp_required": False,
                     "recovery_checkpoint": run.recovery_checkpoint_json or {},
-                    "available_tools": list((codex_preflight_service.last_result() or {}).get("mcp_tool_names") or []),
+                    "available_tools": [],
                 },
             )
         if run.engine_type == "openai_compatible":
@@ -627,26 +632,19 @@ class SolveOrchestrator:
                     return
                 if run.engine_type == "codex_sdk":
                     await solver_state_service.ensure_confirmed_boolean_checkpoint(session, run)
-                if run.engine_type == "codex_sdk" and not codex_preflight_service.is_ready(run.id):
-                    result = codex_preflight_service.last_result() or {}
-                    run.last_error_code = str(result.get("error_code") or "PREFLIGHT_REQUIRED")[:100]
-                    run.last_error_message = str(result.get("failed_stage") or "Codex preflight must pass before starting.")[:4000]
-                    if RunStatus(run.status) != RunStatus.WAITING_CONFIGURATION:
-                        await self._transition(session, run, RunStatus.WAITING_CONFIGURATION)
-                    await session.commit()
-                    await event_service.append(session, run.id, "run.configuration_blocked", {"code": run.last_error_code, "failed_stage": result.get("failed_stage") or "NOT_RUN", "diagnostic_artifact": result.get("diagnostic_artifact")})
-                    return
                 try:
                     attempt, lease = await run_attempt_service.begin(session, run)
                     challenge_for_manifest = await session.get(Challenge, run.challenge_id)
                     if challenge_for_manifest is not None:
-                        preflight_catalog = codex_preflight_service.last_result() or {}
                         manifest = await refresh_runtime_tool_manifest(
                             session,
                             run,
                             attempt,
                             challenge_for_manifest,
-                            mcp_tools=preflight_catalog.get("mcp_tools") or [],
+                            # Controller-owned loop: effective tools come from
+                            # role policy, challenge policy, backend registry
+                            # and Runner capability only.
+                            mcp_tools=[],
                         )
                         await session.commit()
                         await event_service.append(

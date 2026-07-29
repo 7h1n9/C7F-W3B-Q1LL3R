@@ -66,14 +66,17 @@ async def refresh_runtime_tool_manifest(
         }
     except Exception:
         runner = set()
-    advertised_rows = [item for item in (mcp_tools or []) if isinstance(item, dict)]
+    # MCP is deliberately not part of the multi_agent_v1 controller loop.
+    # Keep the argument for compatibility with the manual diagnostic path,
+    # but never let an advertised catalog gate an Attempt.
+    advertised_rows = []
     advertised = {str(item.get("name")) for item in advertised_rows if item.get("name")}
     schema_hashes = {
         str(item["name"]): _digest(item.get("inputSchema"))
         for item in advertised_rows
         if item.get("name")
     }
-    effective = role & challenge_tools & backend & runner & advertised if advertised else set()
+    effective = role & challenge_tools & backend & runner
     expected = role & challenge_tools & backend
     missing = sorted(expected - effective)
     runner_tool_rows = {str(item.get("name")): item for item in (capability_payload.get("tools") or []) if isinstance(item, dict)}
@@ -89,7 +92,9 @@ async def refresh_runtime_tool_manifest(
         "challenge_allowed_tools": sorted(challenge_tools),
         "backend_registry_tools": sorted(backend),
         "runner_capability_tools": sorted(runner),
-        "mcp_advertised_tools": sorted(advertised),
+        "mcp_advertised_tools": [],
+        "execution_mode": "controller_tool_loop",
+        "mcp_required": False,
         "effective_tools": sorted(effective),
         "missing_expected_tools": missing,
         "schema_hashes": schema_hashes,
@@ -99,7 +104,7 @@ async def refresh_runtime_tool_manifest(
     attempt.runtime_build_manifest_json = {
         "backend": backend_build_manifest(),
         "runner": runner_health.get("build") if isinstance(runner_health, dict) else {},
-        "bridge": {"mcp_schema_version": "mcp-v1", "build_id": str((mcp_tools or [{}])[0].get("server_build_id") or "") if mcp_tools else ""},
+        "bridge": {"mcp_enabled": False, "mcp_required": False},
     }
     item = await session.scalar(select(AttemptToolManifest).where(AttemptToolManifest.attempt_id == attempt.id))
     if item is None:

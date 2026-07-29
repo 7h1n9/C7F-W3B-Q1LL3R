@@ -1,5 +1,7 @@
 """Inspectable API for the opt-in multi-agent core loop."""
 
+import uuid
+
 from fastapi import APIRouter, Depends
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -116,7 +118,7 @@ async def create_proposal(run_id: str, payload: PlannerProposalContract, session
     await deterministic_controller.seed_policies(session)
     if payload.next_agent.value == "PLANNER" or "sqlmap_run" in payload.allowed_tools:
         raise DomainError("PLANNER_TOOL_FORBIDDEN", "Planner proposals cannot directly schedule forbidden execution.")
-    item = PlannerProposal(id=payload.proposal_id, run_id=run_id, proposal_id=payload.proposal_id, current_stage=payload.current_stage, next_agent=payload.next_agent.value, objective=payload.objective, input_fact_ids_json=payload.input_fact_ids, required_capabilities_json=payload.required_capabilities, allowed_tools_json=payload.allowed_tools, budget_json=payload.budget.model_dump(), success_condition=payload.success_condition, stop_conditions_json=payload.stop_conditions, fallback=payload.fallback)
+    item = PlannerProposal(id=str(uuid.uuid4()), run_id=run_id, proposal_id=payload.proposal_id, current_stage=payload.current_stage, next_agent=payload.next_agent.value, objective=payload.objective, input_fact_ids_json=payload.input_fact_ids, required_capabilities_json=payload.required_capabilities, allowed_tools_json=payload.allowed_tools, budget_json=payload.budget.model_dump(), success_condition=payload.success_condition, stop_conditions_json=payload.stop_conditions, fallback=payload.fallback)
     session.add(item)
     await session.commit()
     return {"data": {"proposal_id": item.proposal_id, "status": item.status}}

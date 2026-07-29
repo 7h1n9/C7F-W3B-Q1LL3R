@@ -148,7 +148,6 @@ export class CodexService {
 
   private createRealThread(input: ThreadRequest): SdkThread {
     const scope = normalizeScope(input);
-    const mcpLaunch = resolveCtfctlMcpLaunch();
     const controllerToolLoop = scope.execution_mode === "controller_tool_loop";
     // SDK 0.144.1 exposes MCP registration through Codex.config, which it
     // serializes into native CLI configuration. The scope is supplied as
@@ -159,22 +158,25 @@ export class CodexService {
       const sourceHome = process.env.CODEX_HOME ?? join(process.env.USERPROFILE ?? tmpdir(), ".codex");
       try { copyFileSync(join(sourceHome, "auth.json"), join(isolatedCodexHome, "auth.json")); } catch { /* auth may be keychain-backed */ }
     }
+    const mcpLaunch = controllerToolLoop ? undefined : resolveCtfctlMcpLaunch();
     const codex = new Codex({
       ...(process.env.CODEX_DISABLE_MCP === "true" ? { env: { CODEX_HOME: isolatedCodexHome } } : {}),
       config: process.env.CODEX_DISABLE_MCP === "true" ? {
-        mcp_servers: {
-          ctfctl: { enabled: false, command: process.execPath, args: ["-e", "process.exit(0)"] },
-        },
+        mcp_servers: {},
       } : {
-        mcp_servers: {
+        // A controller-owned role thread must not register ctfctl at all.
+        // The backend executes the one approved RoleAction through its own
+        // ToolGateway; an empty catalog also prevents inherited MCP config
+        // from becoming a hidden dependency of the role model.
+        mcp_servers: controllerToolLoop ? {} : {
           ctfctl: {
-            enabled: !controllerToolLoop,
+            enabled: true,
             // Keep the SDK turn alive when the native CLI rejects a malformed
             // optional catalog entry during MCP startup.  Backend scope and
             // gateway policy still enforce every actual ctfctl invocation.
             required: false,
-            command: mcpLaunch.command,
-            args: mcpLaunch.args,
+            command: mcpLaunch!.command,
+            args: mcpLaunch!.args,
             env: {
               CTFCTL_SCOPE: JSON.stringify(scope),
               CTFCTL_BACKEND_URL: process.env.CTFCTL_BACKEND_URL ?? "http://127.0.0.1:8000",

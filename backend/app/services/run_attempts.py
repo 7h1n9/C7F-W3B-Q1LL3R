@@ -34,7 +34,12 @@ class RunAttemptService:
     # heartbeat still renews this lease every 15s, while the larger window
     # prevents a transient scheduler delay from turning a healthy Run into
     # STALE_MODEL_TURN during Verify.
-    lease_ttl_seconds = 300
+    # The multi-agent controller can legitimately spend several minutes in
+    # bounded Planner -> Analysis -> Role turns before it reaches a tool.
+    # Keep the execution lease above the maximum configured Run duration;
+    # startup reconciliation still interrupts active task leases immediately
+    # after a process restart.
+    lease_ttl_seconds = 3600
     owner_instance_id = f"{socket.gethostname()}:{os.getpid()}"
 
     async def reclaim_expired_lease(self, session: AsyncSession, run_id: str) -> None:

@@ -92,6 +92,7 @@ class ApprovedAction(UUIDTimestampMixin, Base):
     used_logical_calls: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="ACTIVE", index=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)
 
 
 class AgentTaskResult(UUIDTimestampMixin, Base):

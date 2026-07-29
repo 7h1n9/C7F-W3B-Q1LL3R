@@ -525,7 +525,7 @@ async def get_run_tool_manifest(run_id: str, session: AsyncSession = Depends(get
     )
     if not item:
         raise DomainError("TOOL_MANIFEST_NOT_FOUND", "No Attempt Tool Manifest has been recorded.", status_code=404)
-    return {"data": {"id": item.id, "run_id": item.run_id, "attempt_id": item.attempt_id, "role_snapshot_tools": item.role_snapshot_tools, "challenge_allowed_tools": item.challenge_allowed_tools, "backend_registry_tools": item.backend_registry_tools, "runner_capability_tools": item.runner_capability_tools, "mcp_advertised_tools": item.mcp_advertised_tools, "effective_tools": item.effective_tools, "missing_expected_tools": item.missing_expected_tools, "schema_hashes": item.schema_hashes, "manifest_sha256": item.manifest_sha256, "created_at": item.created_at.isoformat()}}
+    return {"data": {"id": item.id, "run_id": item.run_id, "attempt_id": item.attempt_id, "role_snapshot_tools": item.role_snapshot_tools, "challenge_allowed_tools": item.challenge_allowed_tools, "backend_registry_tools": item.backend_registry_tools, "runner_capability_tools": item.runner_capability_tools, "mcp_advertised_tools": item.mcp_advertised_tools, "execution_mode": item.execution_mode, "mcp_required": item.mcp_required, "effective_tools": item.effective_tools, "missing_expected_tools": item.missing_expected_tools, "schema_hashes": item.schema_hashes, "manifest_sha256": item.manifest_sha256, "created_at": item.created_at.isoformat()}}
 
 
 @router.post("/runs/{run_id}/start")
@@ -560,19 +560,6 @@ async def start_run(run_id: str, session: AsyncSession = Depends(get_session)) -
                 "任务累计运行时间已达到上限，请点击“重启任务”开启新的运行窗口。",
                 {"max_total_runtime_seconds": run.max_total_runtime_seconds},
                 status_code=409,
-            )
-    # Preflight readiness is process-local, so a backend restart used to turn
-    # every recoverable Codex run into a permanent WAITING_CONFIGURATION
-    # state until the user found the separate readiness endpoint. Starting a
-    # recoverable run should perform that prerequisite automatically.
-    if run.engine_type == "codex_sdk" and not codex_preflight_service.is_ready(run.id):
-        result = await codex_preflight_service.run(session, run.id)
-        if not result.get("ready"):
-            raise DomainError(
-                "PREFLIGHT_REQUIRED",
-                "Codex preflight did not pass; check the readiness diagnostics before starting.",
-                {"failed_stage": result.get("failed_stage"), "error_code": result.get("error_code")},
-                status_code=503,
             )
     asyncio.create_task(orchestrator.start(run.id))
     return {"data": {"run_id": run.id, "status": "STARTING"}}

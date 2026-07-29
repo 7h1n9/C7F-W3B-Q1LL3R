@@ -16,6 +16,7 @@ from typing import Any
 from pydantic import TypeAdapter
 from sqlalchemy import func, select
 
+from app.challenge_adapters import adapter_for
 from app.engines.codex_bridge import CodexSdkEngine
 from app.engines.openai_compatible import OpenAICompatibleEngine
 from app.models.challenge import Challenge
@@ -101,6 +102,7 @@ class RoleAgentRuntime:
         await session.commit()
 
     def _prompt(self, task: AgentTask, policy: AgentRolePolicy, memory: dict, challenge: Challenge) -> str:
+        adapter = adapter_for(challenge)
         context = {
             "run_id": task.run_id, "agent_task_id": task.id, "role": task.agent_role,
             "task_kind": task.task_kind, "objective": task.objective,
@@ -109,16 +111,21 @@ class RoleAgentRuntime:
             "allowed_tools": task.allowed_tools_json or [], "task_context": task.context_json or {},
             "memory": memory,
             "challenge": {"name": challenge.name, "description": challenge.description, "target_url": challenge.target_url, "allowed_hosts": challenge.allowed_hosts, "metadata": challenge.metadata_json or {}},
+            "challenge_adapter": adapter.context(challenge) if adapter else None,
         }
         if task.agent_role == AgentRole.PLANNER.value:
             schema = {"proposal": PlannerProposalContract.model_json_schema()}
             instruction = "Output only PlannerProposalContract, either as the object itself or wrapped in {proposal: ...}. Do not output AgentTaskResult, status, new_facts, or proposed_next_action. allowed_tools must contain only exact names from the Controller catalog: http_request, content_discovery, sql_boolean_compare, oracle_probe_matrix, sqlite_metadata_discovery, boolean_config_extract, script_run, http_compare."
+            if adapter:
+                instruction += " For the asset_warranty adapter, use only http_request for RECON proposals. Schedule exactly one bounded request per proposal; never use http_compare, never put a requests array in approved_arguments, and do not combine valid and invalid controls under max_logical_calls=1. Read the endpoint, method, fields, and control values from challenge_adapter."
         elif task.agent_role == AgentRole.ANALYSIS.value:
             schema = {"review": AnalysisReviewContract.model_json_schema()}
             instruction = "Output only AnalysisReviewContract, either as the object itself or wrapped in {review: ...}. task_kind must be PLAN_REVIEW or RESULT_REVIEW."
         else:
             schema = {"one_of": {"tool": {"type": "tool", "tool_name": "string", "arguments": "object", "purpose": "string", "expected_signal": "object", "stop_if": ["string"]}, "finish": {"type": "finish", "result": "AgentTaskResultContract"}}}
             instruction = "Output exactly one RoleAction. A tool action is one tool request only; a finish action must contain the complete AgentTaskResultContract. Never call MCP, never emit multiple actions, and never do another role's work."
+            if adapter and task.agent_role == AgentRole.RECON.value:
+                instruction += " For the asset_warranty adapter, an http_request arguments object MUST use method, url, and a string body (JSON-encode the documented fields); never emit a requests array or multiple requests. A single logical call is one HTTP request. If the objective needs a valid-vs-invalid comparison, emit one valid request now and finish with its evidence so the Planner can schedule the invalid control as a separate bounded proposal."
         return (
             f"{policy.system_prompt}\nYou are executing a bounded {task.agent_role} role task, not the whole CTF. "
             "The Controller owns tools, evidence, facts, capabilities, leases, and lifecycle state. "

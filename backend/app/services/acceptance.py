@@ -29,7 +29,12 @@ async def evaluate_asset_warranty_run(session: AsyncSession, run_id: str) -> dic
     batches = await session.scalar(select(ToolBatchSummary.id).where(ToolBatchSummary.run_id == run.id).limit(1))
     strings = [run.workspace_path, *(item.file_path for item in artifacts)]
     forbidden_source_audit = not any(marker in value for marker in FORBIDDEN_SOURCE_MARKERS for value in strings)
-    challenge_is_asset_warranty = bool(challenge and all(term in f"{challenge.name} {challenge.target_url}".lower() for term in ("asset", "warranty")))
+    metadata = challenge.metadata_json if challenge else {}
+    challenge_is_asset_warranty = bool(
+        challenge
+        and isinstance(metadata, dict)
+        and metadata.get("adapter") == "asset_warranty"
+    )
     roles = {task.agent_role for task in tasks}
     autonomous_proof = any(item.source_is_autonomous and item.verification_source_type == "FRESH_REPRODUCTION" for item in proven)
     checks = {

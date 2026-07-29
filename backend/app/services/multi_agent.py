@@ -612,6 +612,29 @@ class DeterministicController:
                 raise DomainError("ANALYSIS_CONTROL_VARIABLE_INVALID", "The independent variable cannot also be a control.")
             if any(not str(value).strip() for value in review.required_controls.values()):
                 raise DomainError("ANALYSIS_CONTROL_INVALID", "Every experiment control must have a concrete value.")
+            # A plan must be executable within its declared logical budget.
+            # Models sometimes describe two baseline requests while leaving
+            # max_logical_calls at one; approving that contract strands the
+            # controller between Review and dispatch.
+            requested_calls = review.required_controls.get("required_minimum_calls") or review.required_controls.get("requests_exactly")
+            approved_bodies = review.approved_arguments.get("bodies") if isinstance(review.approved_arguments, dict) else None
+            if requested_calls is None and isinstance(approved_bodies, list):
+                requested_calls = len(approved_bodies)
+            approved_requests = review.approved_arguments.get("requests") if isinstance(review.approved_arguments, dict) else None
+            if requested_calls is None and isinstance(approved_requests, list):
+                requested_calls = len(approved_requests)
+            if requested_calls is not None:
+                try:
+                    requested_calls = int(requested_calls)
+                except (TypeError, ValueError) as error:
+                    raise DomainError("PLAN_BUDGET_INCONSISTENT", "required request count must be an integer.") from error
+                max_calls = int(proposal.budget.max_logical_calls)
+                if requested_calls > max_calls:
+                    raise DomainError(
+                        "PLAN_BUDGET_INCONSISTENT",
+                        "The proposal budget is smaller than the minimum logical requests required by the review.",
+                        {"required_minimum_calls": requested_calls, "max_logical_calls": max_calls},
+                    )
         if "sqlmap_run" in proposal.allowed_tools:
             raise DomainError("PLANNER_TOOL_FORBIDDEN", "Planner cannot schedule direct exploitation execution.")
 

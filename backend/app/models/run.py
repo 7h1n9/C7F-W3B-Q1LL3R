@@ -201,6 +201,8 @@ class AttemptToolManifest(UUIDTimestampMixin, Base):
     backend_registry_tools: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
     runner_capability_tools: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
     mcp_advertised_tools: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    execution_mode: Mapped[str] = mapped_column(String(40), nullable=False, default="controller_tool_loop")
+    mcp_required: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     effective_tools: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
     missing_expected_tools: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
     schema_hashes: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
