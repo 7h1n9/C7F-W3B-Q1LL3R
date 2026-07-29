@@ -1,3 +1,5 @@
+import hashlib
+import json
 from pathlib import Path
 
 import yaml
@@ -25,6 +27,15 @@ class ToolDefinition(BaseModel):
     parameters: dict[str, dict] = Field(default_factory=dict)
     limits: dict[str, int] = Field(default_factory=dict)
     permissions: dict[str, bool] = Field(default_factory=dict)
+
+    def schema_hash(self) -> str:
+        payload = {
+            "name": self.name,
+            "parameters": self.parameters,
+            "limits": self.limits,
+            "permissions": self.permissions,
+        }
+        return hashlib.sha256(json.dumps(payload, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode()).hexdigest()
 
     def validate_arguments(self, arguments: dict) -> dict:
         """Validate invocation input from the declarative YAML parameter schema."""
@@ -57,6 +68,7 @@ class ToolDefinition(BaseModel):
                     {"tool": self.name, "unknown": invalid_enum, "expected_schema": self.parameters},
                     422,
                 )
+                self._validate_nested(specification, value, name)
             return validated
         except ValidationError as error:
             raise DomainError(
@@ -65,6 +77,29 @@ class ToolDefinition(BaseModel):
                 {"tool": self.name, "errors": error.errors()},
                 422,
             ) from error
+
+    @classmethod
+    def _validate_nested(cls, specification: dict, value: object, path: str) -> None:
+        """Apply the useful nested subset of the declarative schema too."""
+        if not isinstance(specification, dict):
+            return
+        properties = specification.get("properties") if isinstance(value, dict) else None
+        if isinstance(properties, dict):
+            required = specification.get("required") or []
+            missing = [name for name in required if name not in value]
+            unknown = [] if specification.get("additionalProperties", True) else [name for name in value if name not in properties]
+            if missing or unknown:
+                raise DomainError("TOOL_INVALID_ARGUMENT", "Nested tool arguments do not match the declared schema.", {"path": path, "missing": missing, "unknown": unknown}, 422)
+            for name, child in properties.items():
+                if name in value:
+                    cls._validate_nested(child, value[name], f"{path}.{name}")
+        if specification.get("type") == "array" and isinstance(value, list) and isinstance(specification.get("items"), dict):
+            for index, item in enumerate(value):
+                cls._validate_nested(specification["items"], item, f"{path}[{index}]")
+        declared = specification.get("type")
+        strict = {"string": StrictStr, "integer": StrictInt, "boolean": StrictBool, "object": dict, "array": list}.get(declared)
+        if strict is not None and not isinstance(value, strict):
+            raise DomainError("TOOL_INVALID_ARGUMENT", "Nested tool argument has the wrong type.", {"path": path, "expected": declared}, 422)
 
 
 def load_tool_definitions(root: Path | None = None) -> dict[str, ToolDefinition]:

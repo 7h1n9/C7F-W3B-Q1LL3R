@@ -10,14 +10,20 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import DomainError
 from app.models.challenge import Challenge
-from app.models.multi_agent import AnalysisReview, ApprovedAction, EvidenceLedger, VerifiedFact
+from app.models.multi_agent import (
+    AgentTask,
+    AnalysisReview,
+    ApprovedAction,
+    EvidenceLedger,
+    VerifiedFact,
+)
 from app.models.run import (
+    SCRIPT_RECORD_STATUSES,
     AgentTurn,
     Artifact,
-    Observation,
     Hypothesis,
+    Observation,
     RunExecutionLease,
-    SCRIPT_RECORD_STATUSES,
     ScriptRecord,
     SolveRun,
     ToolCall,
@@ -31,8 +37,8 @@ from app.services.flags import flag_service
 from app.services.infrastructure import clear_failure, record_failure
 from app.services.run_budget_guard import run_budget_guard
 from app.services.runner_client import runner_client
-from app.services.sql_provenance import validate_sql_expression_provenance
 from app.services.solver_state import solver_state_service
+from app.services.sql_provenance import validate_sql_expression_provenance
 from app.services.tool_argument_adapter import adapt_arguments
 from app.services.tool_invocation_coordinator import tool_invocation_coordinator
 from app.services.tool_permissions import effective_tools_for
@@ -206,6 +212,19 @@ class ToolGateway:
             if error.code == "TOOL_INVALID_ARGUMENT":
                 details = dict(error.details or {})
                 details.update({"missing_fields": details.get("errors", []), "unknown_fields": [], "expected_schema": definition.parameters, "corrected_example": adapt_arguments(name, arguments), "available_operations": [name]})
+                if approved_action_id:
+                    approved = await session.get(ApprovedAction, approved_action_id)
+                    task = await session.get(AgentTask, agent_task_id) if agent_task_id else None
+                    if approved is not None:
+                        approved.status = "REJECTED"
+                        approved.compile_status = "REJECTED"
+                        approved.compile_error_json = {"code": error.code, "details": details}
+                    if task is not None:
+                        task.status = "NEED_REPLAN"
+                    run.status = "PAUSED_CHECKPOINT"
+                    run.last_error_code = "TOOL_INVALID_ARGUMENT"
+                    run.last_error_message = error.message[:4000]
+                    await session.commit()
                 raise DomainError(error.code, error.message, details, error.status_code) from error
             raise
         enforce_tool_policy(name, arguments, challenge.allowed_hosts)
@@ -519,6 +538,14 @@ class ToolGateway:
             lifecycle = "BLOCKED_DEPLOYMENT" if failed_code in {"TARGET_NETWORK_ENFORCEMENT_UNAVAILABLE", "SCRIPT_TARGET_NETWORK_UNAVAILABLE"} else "PARTIAL" if result.get("status") == "PARTIAL" else "FAILED"
             await self._set_script_record_status(session, run, script_record, lifecycle, execution_error=None if lifecycle == "PARTIAL" else failed_code)
         unified = self._unified_result(result, artifact, permitted_tools)
+        if approved_action_id:
+            approved = await session.get(ApprovedAction, approved_action_id)
+            if approved is not None:
+                if unified.status == "COMPLETED" and int(approved.used_logical_calls or 0) >= int(approved.max_logical_calls or 1):
+                    approved.status = "CONSUMED"
+                elif unified.status != "COMPLETED":
+                    approved.status = "REJECTED"
+                await session.flush()
         facts = self._facts(name, result, relative.replace("\\", "/"))
         facts["tool_model_view"] = unified.model_view.model_dump()
         observation = Observation(

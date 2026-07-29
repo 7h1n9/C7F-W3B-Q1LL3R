@@ -10,6 +10,7 @@ parameters:
   headers: {type: object, required: false}
   query: {type: object, required: false}
   body: {type: string, required: false}
+  json: {type: object, required: false}
   follow_redirects: {type: boolean, required: false}
   timeout: {type: integer, required: false}
   final_verification: {type: boolean, required: false}

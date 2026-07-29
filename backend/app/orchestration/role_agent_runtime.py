@@ -17,10 +17,11 @@ from pydantic import TypeAdapter
 from sqlalchemy import func, select
 
 from app.challenge_adapters import adapter_for
+from app.core.exceptions import DomainError
 from app.engines.codex_bridge import CodexSdkEngine
 from app.engines.openai_compatible import OpenAICompatibleEngine
 from app.models.challenge import Challenge
-from app.models.multi_agent import AgentRolePolicy, AgentTask
+from app.models.multi_agent import AgentRolePolicy, AgentTask, ApprovedAction
 from app.models.run import AgentTurn, RunAttempt, SolveRun
 from app.schemas.multi_agent import (
     AgentRole,
@@ -99,6 +100,11 @@ class RoleAgentRuntime:
         await deterministic_controller.touch_task(session, task.id)
         run.run_total_agent_steps = int(run.run_total_agent_steps or 0) + 1
         run.attempt_agent_steps = int(run.attempt_agent_steps or 0) + 1
+        run.agent_step_count = int(run.agent_step_count or 0) + 1
+        attempt = await session.scalar(select(RunAttempt).where(RunAttempt.run_id == run.id).order_by(RunAttempt.created_at.desc()))
+        if attempt is not None:
+            attempt.agent_steps = int(attempt.agent_steps or 0) + 1
+            attempt.attempt_agent_steps = int(attempt.attempt_agent_steps or 0) + 1
         await session.commit()
 
     def _prompt(self, task: AgentTask, policy: AgentRolePolicy, memory: dict, challenge: Challenge) -> str:
@@ -171,14 +177,18 @@ class RoleAgentRuntime:
             return AgentTaskResultContract(task_id=task.id, status=AgentTaskStatus.COMPLETED, proposed_next_action={"proposal": proposal.model_dump(mode="json")}, handoff_summary="Mock Planner emitted a valid proposal."), {"provider_request_id": f"mock:{task.id}", "action": proposal.model_dump(mode="json")}
         if task.task_kind in {AgentTaskKind.PLAN_REVIEW.value, AgentTaskKind.RESULT_REVIEW.value}:
             proposal = (task.context_json or {}).get("proposal") or {}
-            review = AnalysisReviewContract(proposal_id=str(proposal.get("proposal_id") or ""), task_kind=task.task_kind, decision="APPROVE", confidence=90, question_being_tested=str(proposal.get("decision_question") or "bounded question"), independent_variable="request_arguments", required_controls={"fresh_request": True}, expected_true_signal={"new_artifact": True}, expected_false_signal={"different_response": True}, recommended_tool=(proposal.get("allowed_tools") or [None])[0], reason="Mock review approved the declared bounded action.", audit_reason="mock", approved_arguments=(task.context_json or {}).get("approved_arguments") or {}, next_phase="MAPPING")
+            candidates = list((task.context_json or {}).get("candidate_facts") or [])
+            review = AnalysisReviewContract(proposal_id=str(proposal.get("proposal_id") or ""), task_kind=task.task_kind, decision="APPROVE", confidence=90, question_being_tested=str(proposal.get("decision_question") or "bounded question"), independent_variable="request_arguments", required_controls={"fresh_request": True}, expected_true_signal={"new_artifact": True}, expected_false_signal={"different_response": True}, recommended_tool=(proposal.get("allowed_tools") or [None])[0], reason="Mock review approved the declared bounded action.", audit_reason="mock", approved_arguments=(task.context_json or {}).get("approved_arguments") or {}, approved_fact_indexes=list(range(len(candidates))) if task.task_kind == AgentTaskKind.RESULT_REVIEW.value and candidates else [], capabilities_added=["request_contract_confirmed"] if task.task_kind == AgentTaskKind.RESULT_REVIEW.value and not candidates else [], solution_step_accepted=task.task_kind == AgentTaskKind.RESULT_REVIEW.value and not candidates, next_phase="MAPPING")
             return AgentTaskResultContract(task_id=task.id, status=AgentTaskStatus.COMPLETED, proposed_next_action={"review": review.model_dump(mode="json")}, handoff_summary="Mock Analysis emitted a valid review."), {"provider_request_id": f"mock:{task.id}", "action": review.model_dump(mode="json")}
         # Mock still follows the controller loop shape: one tool followed by a finish.
         if self.tool_invoker is None:
             raise RuntimeError("ROLE_RUNTIME_TOOL_INVOKER_REQUIRED")
         tool_name = str((task.context_json or {}).get("tool") or (task.allowed_tools_json or ["http_request"])[0])
-        arguments = dict((task.context_json or {}).get("approved_arguments") or self._baseline_request(challenge, task))
-        result = await self.tool_invoker(session, run, challenge, tool_name, arguments, execution_layer="multi_agent", logical_tool_call_id=f"mcp:{run.id}:{attempt.id}:agent-task:{task.id}:{uuid.uuid4().hex[:8]}", agent_task_id=task.id, agent_role=task.agent_role, task_lease_token=lease_token, approved_action_id=(task.context_json or {}).get("approved_action_id"))
+        approved = await session.get(ApprovedAction, str((task.context_json or {}).get("approved_action_id") or ""))
+        if approved is None or approved.compile_status != "COMPILED" or not approved.compiled_arguments_json:
+            raise DomainError("APPROVED_ACTION_NOT_COMPILED", "Production task has no compiled ApprovedAction.")
+        tool_name = approved.tool_name
+        result = await self.tool_invoker(session, run, challenge, tool_name, dict(approved.compiled_arguments_json), execution_layer="multi_agent", logical_tool_call_id=f"mcp:{run.id}:{attempt.id}:agent-task:{task.id}:{uuid.uuid4().hex[:8]}", agent_task_id=task.id, agent_role=task.agent_role, task_lease_token=lease_token, approved_action_id=approved.id)
         finish = AgentTaskResultContract(task_id=task.id, status=AgentTaskStatus.COMPLETED if str(result.get("status") or "").upper() == "COMPLETED" else AgentTaskStatus.PARTIAL, evidence_ids=[], handoff_summary="Mock role finished after the controller executed one action.")
         if finish.status == AgentTaskStatus.PARTIAL:
             finish = finish.model_copy(update={"failure_classification": {"fingerprint": "mock-tool-failure", "classification": "TOOL_FAILURE", "retryable": True, "reason": str(result.get("error") or result.get("summary") or "tool failed"), "next_allowed_condition": "replan"}})
@@ -279,6 +289,7 @@ class RoleAgentRuntime:
             engine = CodexSdkEngine(engine.bridge_url, engine.workspace_path, scope=scope)
         max_turns = max(1, int((task.budget_json or {}).get("max_internal_requests", 1)))
         used_calls = 0
+        last_tool_result: dict[str, Any] | None = None
         for _ in range(max_turns):
             turn_prompt = prompt if not continuation else "Tool execution is complete for this step. Review the compact result below and output exactly one next RoleAction."
             if continuation:
@@ -296,12 +307,18 @@ class RoleAgentRuntime:
                 return self._failure(task.id, "MODEL_OUTPUT_SCHEMA_INVALID", f"RoleAction was invalid: {_errors(error)}"), {"parse_error_code": "ROLE_ACTION_SCHEMA_INVALID"}
             if isinstance(action, RoleFinishAction):
                 return action.result, trace
-            if action.tool_name not in (task.allowed_tools_json or []):
+            approved_id = (task.context_json or {}).get("approved_action_id")
+            approved = await session.get(ApprovedAction, str(approved_id or ""))
+            if approved is None or approved.compile_status != "COMPILED" or not approved.compiled_arguments_json:
+                raise DomainError("APPROVED_ACTION_NOT_COMPILED", "Production task has no compiled ApprovedAction.")
+            if action.tool_name != approved.tool_name or action.tool_name not in (task.allowed_tools_json or []):
                 return self._failure(task.id, "ROLE_TOOL_SCOPE_INVALID", f"{action.tool_name} is outside the task contract", status=AgentTaskStatus.NEED_REPLAN), trace
             if self.tool_invoker is None:
                 raise RuntimeError("ROLE_RUNTIME_TOOL_INVOKER_REQUIRED")
-            approved_id = (task.context_json or {}).get("approved_action_id")
-            result = await self.tool_invoker(session, run, challenge, action.tool_name, action.arguments, execution_layer="multi_agent", logical_tool_call_id=f"mcp:{run.id}:{attempt.id}:agent-task:{task.id}:{uuid.uuid4().hex[:8]}", agent_task_id=task.id, agent_role=task.agent_role, task_lease_token=lease_token, approved_action_id=approved_id)
+            # The model's arguments are intentionally ignored.  They are a
+            # semantic suggestion, not an executable capability.
+            result = await self.tool_invoker(session, run, challenge, approved.tool_name, dict(approved.compiled_arguments_json), execution_layer="multi_agent", logical_tool_call_id=f"mcp:{run.id}:{attempt.id}:agent-task:{task.id}:{uuid.uuid4().hex[:8]}", agent_task_id=task.id, agent_role=task.agent_role, task_lease_token=lease_token, approved_action_id=approved.id)
+            last_tool_result = result
             await deterministic_controller.touch_task(session, task.id)
             compact = {"tool": action.tool_name, "status": result.get("status"), "summary": result.get("summary"), "error_code": result.get("error_code"), "model_view": result.get("model_view"), "artifact_id": result.get("artifact_id"), "observation_id": result.get("observation_id")}
             messages.extend([{"role": "assistant", "content": json.dumps(action.model_dump(mode="json"), ensure_ascii=False)}, {"role": "user", "content": json.dumps({"tool_result": compact}, ensure_ascii=False, default=str)}])
@@ -309,6 +326,14 @@ class RoleAgentRuntime:
             used_calls += 1
             if used_calls >= int((task.budget_json or {}).get("max_logical_calls", 0)):
                 break
+        # A one-call atomic task is complete as soon as its ToolCall result is
+        # durable.  Controller normalization supplies the handoff; waiting
+        # for a model Finalizer must not turn a successful task into PARTIAL.
+        if int((task.budget_json or {}).get("max_logical_calls", 0)) <= 1 and used_calls == 1:
+            completed = str((last_tool_result or {}).get("status") or "").upper() == "COMPLETED"
+            if completed:
+                return AgentTaskResultContract(task_id=task.id, status=AgentTaskStatus.COMPLETED, handoff_summary="One approved tool action completed and produced durable evidence."), {"controller_finalized": True}
+            return self._failure(task.id, "TOOL_FAILURE", str((last_tool_result or {}).get("error") or (last_tool_result or {}).get("summary") or "The approved tool action failed."), status=AgentTaskStatus.PARTIAL), {"controller_finalized": True}
         # Budget/success boundary: one finalizer turn with no tools in scope.
         finalizer_prompt = "工具执行阶段已经结束。不得再调用任何工具。仅依据以下 Task、Tool Result、Evidence 和 Artifact 摘要输出 RoleFinishAction。\n" + json.dumps(messages[-2:], ensure_ascii=False, default=str)
         final_turn = await self._new_turn(session, run, task, finalizer_prompt)

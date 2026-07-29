@@ -189,6 +189,7 @@ class PlannerProposalContract(BaseModel):
     next_agent: AgentRole
     objective: str = Field(min_length=1, max_length=4000)
     input_fact_ids: list[str] = Field(default_factory=list, max_length=500)
+    input_evidence_ids: list[str] = Field(default_factory=list, max_length=500)
     required_capabilities: list[str] = Field(default_factory=list, max_length=100)
     allowed_tools: list[str] = Field(default_factory=list, max_length=100)
     budget: TaskBudget = Field(default_factory=TaskBudget)
@@ -243,7 +244,27 @@ class ApprovedActionContract(BaseModel):
     argument_constraints: dict[str, Any] = Field(default_factory=dict)
     max_logical_calls: int = Field(default=1, ge=1, le=1000)
     expires_at: str
-    status: Literal["ACTIVE", "EXPIRED", "CONSUMED", "REVOKED"] = "ACTIVE"
+    status: Literal["PENDING_COMPILE", "COMPILED", "ACTIVE", "CONSUMED", "REJECTED", "EXPIRED", "REVOKED"] = "ACTIVE"
+
+
+class CompiledApprovedAction(BaseModel):
+    """Controller-owned, schema-ready execution capability.
+
+    This is deliberately separate from ``AnalysisReview.approved_arguments``:
+    the latter is semantic approval input, while this object is the only
+    allowed source for Runner arguments.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    tool_name: str
+    arguments: dict[str, Any]
+    arguments_digest: str
+    tool_schema_hash: str
+    compiler_name: str
+    compiler_version: str
+    source_review_id: str
+    source_proposal_id: str
 
 
 class PromotionStatus(StrEnum):

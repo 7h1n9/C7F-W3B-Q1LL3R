@@ -1,5 +1,7 @@
 """Run/Attempt/Lease checks shared by all tool invocation paths."""
 
+import hashlib
+import json
 from datetime import UTC, datetime
 
 from sqlalchemy import func, select
@@ -9,6 +11,7 @@ from app.models.multi_agent import AgentTask, ApprovedAction
 from app.models.run import LogicalToolCall, RunAttempt, RunExecutionLease, SolveRun, ToolCall
 from app.orchestration.state_machine import TERMINAL, RunStatus
 from app.services.infrastructure import INFRASTRUCTURE_STATES, reject_infrastructure
+from app.tools.registry import load_tool_definitions
 
 
 class ToolInvocationCoordinator:
@@ -74,6 +77,23 @@ class ToolInvocationCoordinator:
             if not approved_action_id:
                 raise DomainError("APPROVED_ACTION_REQUIRED", "A production tool call requires an active ApprovedAction.", {"agent_task_id": agent_task_id}, 403)
             approved = await session.get(ApprovedAction, approved_action_id)
+            if approved is not None and approved.compile_status != "COMPILED":
+                approved.status = "REJECTED"
+                task.status = "NEED_REPLAN"
+                run.status = "PAUSED_CHECKPOINT"
+                run.current_phase = run.current_phase or "PLANNING"
+                await session.flush()
+                raise DomainError("APPROVED_ACTION_NOT_COMPILED", "The production task has no compiled ApprovedAction.", {"approved_action_id": approved_action_id}, 409)
+            if approved is not None:
+                definition = load_tool_definitions().get(approved.tool_name)
+                current_schema_hash = definition.schema_hash() if definition else None
+                if current_schema_hash != approved.tool_schema_hash:
+                    approved.status = "REJECTED"
+                    task.status = "NEED_REPLAN"
+                    run.status = "PAUSED_CHECKPOINT"
+                    run.last_error_code = "TOOL_SCHEMA_VERSION_CHANGED"
+                    await session.flush()
+                    raise DomainError("TOOL_SCHEMA_VERSION_CHANGED", "The tool schema changed after ApprovedAction compilation.", {"approved_action_id": approved_action_id, "compiled_schema_hash": approved.tool_schema_hash, "current_schema_hash": current_schema_hash}, 409)
             if (
                 approved is None
                 or approved.run_id != run.id
@@ -83,8 +103,14 @@ class ToolInvocationCoordinator:
                 or (approved.expires_at and (approved.expires_at.replace(tzinfo=UTC) if approved.expires_at.tzinfo is None else approved.expires_at) <= now)
             ):
                 raise DomainError("APPROVED_ACTION_INVALID", "The ApprovedAction is missing, expired, revoked, or out of scope.", {"approved_action_id": approved_action_id}, 403)
-            if not self._constraints_match(arguments, approved.argument_constraints_json):
-                raise DomainError("APPROVED_ARGUMENT_CONSTRAINTS_FAILED", "Tool arguments do not satisfy the Analysis-approved constraints.", {"approved_action_id": approved_action_id, "tool": tool_name}, 422)
+            digest = hashlib.sha256(json.dumps(arguments or {}, sort_keys=True, ensure_ascii=False, separators=(",", ":"), default=str).encode()).hexdigest()
+            if digest != approved.compiled_arguments_digest or arguments != approved.compiled_arguments_json:
+                approved.status = "REJECTED"
+                task.status = "NEED_REPLAN"
+                run.status = "PAUSED_CHECKPOINT"
+                run.last_error_code = "APPROVED_ARGUMENT_DIGEST_MISMATCH"
+                await session.flush()
+                raise DomainError("APPROVED_ARGUMENT_DIGEST_MISMATCH", "Tool arguments are not the compiled ApprovedAction payload.", {"approved_action_id": approved_action_id}, 409)
             tool_rows = int(await session.scalar(select(func.count(ToolCall.id)).where(ToolCall.agent_task_id == task.id, ToolCall.counts_toward_budget.is_(True))) or 0)
             logical_rows = int(await session.scalar(select(func.count(LogicalToolCall.id)).where(LogicalToolCall.run_id == run.id, LogicalToolCall.id.like(f"%agent-task:{task.id}%"), LogicalToolCall.counts_toward_budget.is_(True))) or 0)
             used = max(tool_rows, logical_rows)

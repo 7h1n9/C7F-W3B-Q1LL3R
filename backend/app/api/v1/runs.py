@@ -30,6 +30,7 @@ from app.models.multi_agent import (
     AgentTask,
     AgentTaskResult,
     AnalysisReview,
+    ApprovedAction,
     EvidenceLedger,
     FailureSignature,
     MemorySnapshot,
@@ -49,8 +50,8 @@ from app.models.run import (
     Hypothesis,
     LogicalToolCall,
     Observation,
-    RunCompactionCheckpoint,
     RunAttempt,
+    RunCompactionCheckpoint,
     RunEvent,
     RunExecutionLease,
     RunUserInput,
@@ -374,6 +375,14 @@ async def _delete_run_records(session: AsyncSession, run_id: str) -> None:
     # These tables reference run-scoped task/proposal/candidate rows rather
     # than carrying run_id themselves.
     await session.execute(delete(AgentTaskResult).where(AgentTaskResult.task_id.in_(task_ids)))
+    # ApprovedAction points to both the review and proposal, while ToolCall
+    # points back to ApprovedAction. Clear the nullable ToolCall reference
+    # before removing ApprovedAction; ToolCall itself is deleted below after
+    # its artifact/observation dependencies.
+    await session.execute(
+        update(ToolCall).where(ToolCall.run_id == run_id).values(approved_action_id=None)
+    )
+    await session.execute(delete(ApprovedAction).where(ApprovedAction.run_id == run_id))
     await session.execute(delete(AnalysisReview).where(AnalysisReview.proposal_id.in_(proposal_ids)))
     await session.execute(
         delete(LearnedSkillCandidateSource).where(LearnedSkillCandidateSource.candidate_id.in_(candidate_ids))

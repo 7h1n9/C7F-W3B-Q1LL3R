@@ -1,3 +1,4 @@
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
@@ -8,6 +9,7 @@ from sqlalchemy.pool import StaticPool
 from app.api.v1 import runs as runs_api
 from app.models.base import Base
 from app.models.challenge import Challenge
+from app.models.multi_agent import AnalysisReview, ApprovedAction, PlannerProposal
 from app.models.run import (
     Artifact,
     FlagCandidate,
@@ -92,4 +94,62 @@ async def test_batch_delete_runs_reuses_full_cleanup(monkeypatch: pytest.MonkeyP
         assert result["data"]["deleted_count"] == 2
         assert await session.get(SolveRun, first.id) is None
         assert await session.get(SolveRun, second.id) is None
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_batch_delete_removes_approved_action_dependencies(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    engine = create_async_engine("sqlite+aiosqlite://", poolclass=StaticPool)
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+        await connection.exec_driver_sql("PRAGMA foreign_keys=ON")
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    root = tmp_path / "workspaces"
+    monkeypatch.setattr(runs_api, "get_settings", lambda: SimpleNamespace(workspace_root=root))
+
+    async def fake_delete_workspace(_: str) -> None:
+        return None
+
+    monkeypatch.setattr(runs_api.runner_client, "delete_workspace", fake_delete_workspace)
+    async with sessions() as session:
+        challenge = Challenge(name="batch-delete-approved", target_url="http://test.local", allowed_hosts=["test.local"])
+        session.add(challenge)
+        await session.flush()
+        run = SolveRun(challenge_id=challenge.id, workspace_path=str(root / "run"))
+        session.add(run)
+        await session.flush()
+        proposal = PlannerProposal(
+            run_id=run.id,
+            proposal_id="P-DELETE-1",
+            current_stage="HYPOTHESIS",
+            next_agent="ANALYSIS",
+            objective="delete dependency test",
+            success_condition="done",
+        )
+        session.add(proposal)
+        await session.flush()
+        review = AnalysisReview(proposal_id=proposal.id, decision="APPROVE")
+        session.add(review)
+        await session.flush()
+        approved = ApprovedAction(
+            run_id=run.id,
+            approved_action_id="AA-DELETE-1",
+            proposal_id=proposal.id,
+            analysis_review_id=review.id,
+            agent_role="RECON",
+            tool_name="http_request",
+            expires_at=datetime.now(UTC) + timedelta(minutes=5),
+        )
+        session.add(approved)
+        await session.flush()
+        session.add(ToolCall(run_id=run.id, tool_name="http_request", approved_action_id=approved.id))
+        await session.commit()
+
+        result = await runs_api.delete_runs(RunBatchDelete(run_ids=[run.id]), session)
+
+        assert result["data"]["deleted_count"] == 1
+        assert await session.get(SolveRun, run.id) is None
+        assert await session.get(ApprovedAction, approved.id) is None
+        assert await session.get(AnalysisReview, review.id) is None
+        assert await session.get(PlannerProposal, proposal.id) is None
     await engine.dispose()

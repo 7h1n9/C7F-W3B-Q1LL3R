@@ -8,9 +8,9 @@ list as an automatic Analysis approval.
 
 from __future__ import annotations
 
-import uuid
 import asyncio
 import logging
+import uuid
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -18,8 +18,24 @@ from sqlalchemy import func, select
 
 from app.core.exceptions import DomainError
 from app.models.challenge import Challenge
-from app.models.multi_agent import AnalysisReview, AgentTask, ApprovedAction, EvidenceLedger, PlannerProposal, VerifiedFact
-from app.models.run import Artifact, FlagCandidate, Hypothesis, Observation, RunAttempt, RunExecutionLease, SolveRun, ToolCall
+from app.models.multi_agent import (
+    AgentTask,
+    AnalysisReview,
+    ApprovedAction,
+    EvidenceLedger,
+    PlannerProposal,
+    VerifiedFact,
+)
+from app.models.run import (
+    Artifact,
+    FlagCandidate,
+    Hypothesis,
+    Observation,
+    RunAttempt,
+    RunExecutionLease,
+    SolveRun,
+    ToolCall,
+)
 from app.orchestration.role_agent_runtime import RoleAgentRuntime
 from app.orchestration.state_machine import RunStatus, transition
 from app.schemas.multi_agent import (
@@ -34,9 +50,12 @@ from app.schemas.multi_agent import (
     PlannerProposalContract,
     TaskBudget,
 )
+from app.services.action_fingerprint import fingerprint_compiled_action
+from app.services.approved_action_compiler import approved_action_compiler
 from app.services.events import event_service
 from app.services.multi_agent import deterministic_controller
 from app.services.solver_state import solver_state_service
+from app.services.tool_result_fact_reducer import tool_result_fact_reducer
 from app.tools.gateway import tool_gateway
 
 logger = logging.getLogger(__name__)
@@ -135,6 +154,9 @@ class MultiAgentOrchestrator:
         evidence_ids, pairs = await self._evidence_for_task(session, run, task)
         if evidence_ids:
             result = result.model_copy(update={"evidence_ids": sorted(set((result.evidence_ids or []) + evidence_ids))})
+        candidates = await tool_result_fact_reducer.reduce(session, run, await session.get(Challenge, run.challenge_id), task, result.evidence_ids)
+        if candidates:
+            result = result.model_copy(update={"new_facts": [*(result.new_facts or []), *candidates]})
         await deterministic_controller.complete_task(session, task.id, result, token)
         await event_service.append(session, run.id, "agent.task.completed", {"task_id": task.id, "agent_role": task.agent_role, "task_kind": task.task_kind, "status": result.status.value, "evidence_ids": result.evidence_ids})
         return result
@@ -148,7 +170,11 @@ class MultiAgentOrchestrator:
         # The model-visible proposal_id may repeat on a later Run.  The
         # relational key must stay globally unique because Review and
         # ApprovedAction reference the PlannerProposal row.
-        row = PlannerProposal(id=str(uuid.uuid4()), run_id=run.id, proposal_id=contract.proposal_id, current_stage=contract.current_stage, decision_question=contract.decision_question, next_agent=contract.next_agent.value, objective=contract.objective, input_fact_ids_json=contract.input_fact_ids, required_capabilities_json=contract.required_capabilities, allowed_tools_json=contract.allowed_tools, budget_json=contract.budget.model_dump(), success_condition=contract.success_condition, stop_conditions_json=contract.stop_conditions, fallback=contract.fallback, created_by_task_id=task.id)
+        facts = set((await session.scalars(select(VerifiedFact.id).where(VerifiedFact.run_id == run.id, VerifiedFact.id.in_(contract.input_fact_ids)))).all()) if contract.input_fact_ids else set()
+        evidence = set((await session.scalars(select(EvidenceLedger.id).where(EvidenceLedger.run_id == run.id, EvidenceLedger.id.in_(contract.input_evidence_ids)))).all()) if contract.input_evidence_ids else set()
+        if len(facts) != len(set(contract.input_fact_ids)) or len(evidence) != len(set(contract.input_evidence_ids)):
+            raise DomainError("PLANNER_REFERENCE_TYPE_INVALID", "Planner references must use VerifiedFact IDs and EvidenceLedger IDs in separate fields.", {"input_fact_ids": contract.input_fact_ids, "input_evidence_ids": contract.input_evidence_ids})
+        row = PlannerProposal(id=str(uuid.uuid4()), run_id=run.id, proposal_id=contract.proposal_id, current_stage=contract.current_stage, decision_question=contract.decision_question, next_agent=contract.next_agent.value, objective=contract.objective, input_fact_ids_json=contract.input_fact_ids, input_evidence_ids_json=contract.input_evidence_ids, required_capabilities_json=contract.required_capabilities, allowed_tools_json=contract.allowed_tools, budget_json=contract.budget.model_dump(), success_condition=contract.success_condition, stop_conditions_json=contract.stop_conditions, fallback=contract.fallback, created_by_task_id=task.id)
         session.add(row)
         await session.flush()
         return row
@@ -159,33 +185,61 @@ class MultiAgentOrchestrator:
             contract = AnalysisReviewContract.model_validate(raw)
         except Exception as error:
             raise DomainError("MODEL_OUTPUT_SCHEMA_INVALID", f"AnalysisReviewContract is invalid: {error}", {"task_id": task.id}) from error
-        proposal_contract = PlannerProposalContract(proposal_id=proposal.proposal_id, run_id=run.id, current_stage=proposal.current_stage, decision_question=proposal.decision_question, next_agent=proposal.next_agent, objective=proposal.objective, input_fact_ids=proposal.input_fact_ids_json, required_capabilities=proposal.required_capabilities_json, allowed_tools=proposal.allowed_tools_json, budget=proposal.budget_json, success_condition=proposal.success_condition, stop_conditions=proposal.stop_conditions_json, fallback=proposal.fallback)
+        proposal_contract = PlannerProposalContract(proposal_id=proposal.proposal_id, run_id=run.id, current_stage=proposal.current_stage, decision_question=proposal.decision_question, next_agent=proposal.next_agent, objective=proposal.objective, input_fact_ids=proposal.input_fact_ids_json, input_evidence_ids=proposal.input_evidence_ids_json, required_capabilities=proposal.required_capabilities_json, allowed_tools=proposal.allowed_tools_json, budget=proposal.budget_json, success_condition=proposal.success_condition, stop_conditions=proposal.stop_conditions_json, fallback=proposal.fallback)
         try:
             deterministic_controller.validate_review(proposal_contract, contract)
         except DomainError as error:
             if contract.decision == AnalysisDecision.APPROVE:
                 contract = contract.model_copy(update={"decision": AnalysisDecision.REVISE, "audit_reason": error.code, "reason": error.message})
-        row = AnalysisReview(proposal_id=proposal.id, task_kind=contract.task_kind, decision=contract.decision.value, confidence=contract.confidence, question_being_tested=contract.question_being_tested, supporting_evidence_ids_json=contract.supporting_evidence_ids, independent_variable=contract.independent_variable, required_controls_json=contract.required_controls, expected_true_signal_json=contract.expected_true_signal, expected_false_signal_json=contract.expected_false_signal, recommended_tool=contract.recommended_tool, reason=contract.reason, audit_reason=contract.audit_reason, approved_arguments_json=contract.approved_arguments, approved_fact_indexes_json=contract.approved_fact_indexes, approved_evidence_ids_json=contract.approved_evidence_ids, approved_hypothesis_updates_json=contract.approved_hypothesis_updates, capabilities_added_json=contract.capabilities_added, solution_step_accepted=contract.solution_step_accepted, next_phase=contract.next_phase)
-        session.add(row)
+        row = await session.scalar(select(AnalysisReview).where(AnalysisReview.proposal_id == proposal.id, AnalysisReview.task_kind == contract.task_kind))
+        values = dict(decision=contract.decision.value, confidence=contract.confidence, question_being_tested=contract.question_being_tested, supporting_evidence_ids_json=contract.supporting_evidence_ids, independent_variable=contract.independent_variable, required_controls_json=contract.required_controls, expected_true_signal_json=contract.expected_true_signal, expected_false_signal_json=contract.expected_false_signal, recommended_tool=contract.recommended_tool, reason=contract.reason, audit_reason=contract.audit_reason, approved_arguments_json=contract.approved_arguments, approved_fact_indexes_json=contract.approved_fact_indexes, approved_evidence_ids_json=contract.approved_evidence_ids, approved_hypothesis_updates_json=contract.approved_hypothesis_updates, capabilities_added_json=contract.capabilities_added, solution_step_accepted=contract.solution_step_accepted, next_phase=contract.next_phase)
+        if row is None:
+            row = AnalysisReview(proposal_id=proposal.id, task_kind=contract.task_kind, **values)
+            session.add(row)
+        else:
+            for key, value in values.items():
+                setattr(row, key, value)
         await session.flush()
         return row
 
-    async def _approved_action(self, session, run: SolveRun, proposal: PlannerProposal, review: AnalysisReview) -> ApprovedAction:
+    async def _approved_action(self, session, run: SolveRun, challenge: Challenge, proposal: PlannerProposal, review: AnalysisReview) -> ApprovedAction:
         if review.decision != AnalysisDecision.APPROVE.value:
             raise DomainError("PLAN_REVIEW_NOT_APPROVED", "Only an APPROVE PLAN_REVIEW can issue an ApprovedAction.")
         budget = proposal.budget_json or {}
         approved_id = f"AA-{uuid.uuid4().hex[:12]}"
+        tool_name = review.recommended_tool or (proposal.allowed_tools_json or [""])[0]
         item = ApprovedAction(
             id=approved_id, run_id=run.id, approved_action_id=approved_id,
             proposal_id=proposal.id, analysis_review_id=review.id, agent_role=proposal.next_agent,
-            tool_name=(review.recommended_tool or (proposal.allowed_tools_json or [""])[0]),
-            argument_constraints_json=review.approved_arguments_json or {},
+            tool_name=tool_name,
+            argument_constraints_json={}, compile_status="PENDING_COMPILE",
             max_logical_calls=max(1, int(budget.get("max_logical_calls") or 1)),
-            expires_at=datetime.now(UTC) + timedelta(seconds=min(300, int(budget.get("max_runtime_seconds") or 300))), status="ACTIVE",
+            expires_at=datetime.now(UTC) + timedelta(seconds=min(300, int(budget.get("max_runtime_seconds") or 300))), status="PENDING_COMPILE",
         )
-        # The row is attached by _persist_plan_review after the production
-        # task has been constructed.  This lets SQLAlchemy order all parent
-        # and child inserts in one explicit flush on MySQL.
+        try:
+            compiled = await approved_action_compiler.compile(session, run, challenge, proposal, review, tool_name)
+        except DomainError as error:
+            item.status = "REJECTED"
+            item.compile_status = "REJECTED"
+            item.compile_error_json = {"code": error.code, "message": error.message, "details": error.details or {}}
+            session.add(item)
+            await session.flush()
+            raise
+        state = await solver_state_service.load(session, run.id)
+        experiment_fingerprint = fingerprint_compiled_action(tool_name, compiled.arguments_digest, proposal.success_condition)
+        prior = (state.action_fingerprints_json if state else {}).get(experiment_fingerprint)
+        if isinstance(prior, dict) and str(prior.get("status") or "").upper() in {"COMPLETED", "CONFIRMED"}:
+            raise DomainError("EXPERIMENT_ALREADY_CONFIRMED", "The same compiled experiment was already completed and approved.", {"fingerprint": experiment_fingerprint, "tool": tool_name})
+        item.compiled_arguments_json = compiled.arguments
+        item.compiled_arguments_digest = compiled.arguments_digest
+        item.tool_schema_hash = compiled.tool_schema_hash
+        item.compiler_name = compiled.compiler_name
+        item.compiler_version = compiled.compiler_version
+        item.compile_status = "COMPILED"
+        # Constraints are an audit copy only.  Runtime execution uses the
+        # immutable compiled payload below, never this semantic review object.
+        item.argument_constraints_json = {"compiled_arguments_digest": compiled.arguments_digest}
+        item.argument_constraints_json = {**item.argument_constraints_json, "experiment_fingerprint": experiment_fingerprint, "success_condition": proposal.success_condition}
         return item
 
     async def _memory(self, session, run: SolveRun, *, stage: str, task: AgentTask, working: dict) -> None:
@@ -250,6 +304,7 @@ class MultiAgentOrchestrator:
         self,
         session,
         run: SolveRun,
+        challenge: Challenge,
         proposal: PlannerProposal,
         plan_task: AgentTask,
         plan_token: str,
@@ -288,7 +343,15 @@ class MultiAgentOrchestrator:
                 raise DomainError("PROPOSAL_HAS_NO_EXECUTABLE_TOOL", "Approved proposal has no executable tool.")
             if review.decision == AnalysisDecision.APPROVE.value:
                 logger.warning("multi_agent.plan_review.approved_action.begin run_id=%s proposal_row_id=%s review_id=%s", run.id, proposal.id, review.id)
-                approved = await self._approved_action(session, run, proposal, review)
+                try:
+                    approved = await self._approved_action(session, run, challenge, proposal, review)
+                except DomainError as error:
+                    if error.code == "APPROVED_ACTION_COMPILE_FAILED":
+                        # Preserve the rejected ApprovedAction and completed
+                        # review audit row before the caller checkpoints.
+                        await deterministic_controller.complete_task(session, plan_task.id, plan_result, plan_token)
+                        await session.commit()
+                    raise
                 logger.warning("multi_agent.plan_review.approved_action.flushed run_id=%s approved_action_id=%s", run.id, approved.id)
                 task_kind = {AgentRole.RECON: AgentTaskKind.RECON, AgentRole.EXPLOIT: AgentTaskKind.EXPLOIT, AgentRole.VERIFY: AgentTaskKind.VERIFY}.get(role)
                 if task_kind is None:
@@ -305,8 +368,8 @@ class MultiAgentOrchestrator:
                     context={
                         "proposal_id": proposal.proposal_id,
                         "tool": tools[0],
-                        "approved_arguments": review.approved_arguments_json,
                         "approved_action_id": approved.id,
+                        "compiled_arguments_digest": approved.compiled_arguments_digest,
                         "logical_calls_used": 0,
                     },
                     budget=TaskBudget.model_validate(proposal.budget_json),
@@ -315,6 +378,8 @@ class MultiAgentOrchestrator:
                 )
                 logger.warning("multi_agent.plan_review.production_task_flushed run_id=%s analysis_task_id=%s production_task_id=%s", run.id, plan_task.id, production_task.id)
                 session.add(approved)
+                await session.flush()
+                approved.status = "ACTIVE"
                 await session.flush()
                 logger.warning("multi_agent.plan_review.approved_action.persisted run_id=%s approved_action_id=%s", run.id, approved.id)
 
@@ -376,6 +441,7 @@ class MultiAgentOrchestrator:
             "proposal": {"proposal_id": proposal.proposal_id, "current_stage": proposal.current_stage, "decision_question": proposal.decision_question, "next_agent": proposal.next_agent, "objective": proposal.objective, "allowed_tools": proposal.allowed_tools_json, "budget": proposal.budget_json, "success_condition": proposal.success_condition, "stop_conditions": proposal.stop_conditions_json},
             "plan_review": plan_review,
             "task_result": result.model_dump(mode="json"), "tool_calls": rows, "response_signatures": [row["model_view"] for row in rows],
+            "candidate_facts": [{"id": fact.id, "fact_key": fact.fact_key, "fact_type": fact.fact_type, "value": fact.value_json, "confidence": fact.confidence} for fact in list((await session.scalars(select(VerifiedFact).where(VerifiedFact.run_id == run.id, VerifiedFact.source_task_id == task.id, VerifiedFact.promotion_status == "CANDIDATE").order_by(VerifiedFact.created_at))).all())],
             "current_verified_facts": verified,
             "current_capabilities": state.capability_ledger_json if state else {},
             "current_hypotheses": hypotheses,
@@ -386,13 +452,24 @@ class MultiAgentOrchestrator:
         selected = review.approved_fact_indexes_json or []
         approved_ids: list[str] = []
         for index, fact in enumerate(facts):
-            if not selected or index in selected:
+            if index in selected:
                 if review.decision == AnalysisDecision.APPROVE.value:
                     fact.promotion_status = "VERIFIED"
                     approved_ids.append(fact.id)
+                    await self._record_verified_fact_capabilities(session, run, fact)
         if review.decision == AnalysisDecision.APPROVE.value:
+            if facts and not selected and not review.capabilities_added_json and not review.solution_step_accepted:
+                raise DomainError("RESULT_REVIEW_PROMOTION_EMPTY", "Approved RESULT_REVIEW selected no candidate fact, capability, or solution step.", {"task_id": producing_task.id, "candidate_fact_count": len(facts)})
+            if selected and any(index < 0 or index >= len(facts) for index in selected):
+                raise DomainError("RESULT_REVIEW_PROMOTION_EMPTY", "Approved fact indexes do not reference the producing task candidates.", {"task_id": producing_task.id, "approved_fact_indexes": selected, "candidate_fact_count": len(facts)})
             for capability in (review.capabilities_added_json or []):
                 await solver_state_service.record_capability(session, run.id, capability, evidence={"review_id": review.id})
+            action_id = str((producing_task.context_json or {}).get("approved_action_id") or "")
+            action = await session.get(ApprovedAction, action_id) if action_id else None
+            if action is not None:
+                fingerprint = (action.argument_constraints_json or {}).get("experiment_fingerprint")
+                if fingerprint:
+                    await solver_state_service.record_fingerprint(session, run.id, fingerprint, tool_name=action.tool_name, arguments={"compiled_arguments_digest": action.compiled_arguments_digest}, status="CONFIRMED")
         return approved_ids
 
     async def _candidate_gate(self, session, run: SolveRun) -> FlagCandidate | None:
@@ -411,6 +488,54 @@ class MultiAgentOrchestrator:
             return False
         path = Path(run.workspace_path, artifact.file_path)
         return path.is_file() and candidate.candidate in path.read_text(encoding="utf-8", errors="replace")
+
+    async def _record_verified_fact_capabilities(self, session, run: SolveRun, fact: VerifiedFact) -> None:
+        evidence = {"fact_id": fact.id, "fact_key": fact.fact_key, "evidence_ids": fact.evidence_ids_json, "value": fact.value_json}
+        if fact.fact_key == "asset_warranty.valid_baseline":
+            for capability in (
+                "warranty_endpoint_identified",
+                "request_contract_confirmed",
+                "valid_business_baseline_confirmed",
+            ):
+                await solver_state_service.record_capability(session, run.id, capability, evidence=evidence)
+        if fact.fact_key == "asset_warranty.invalid_baseline":
+            await solver_state_service.record_capability(session, run.id, "invalid_business_baseline_confirmed", evidence=evidence)
+        if fact.fact_key in {"asset_warranty.valid_baseline", "asset_warranty.invalid_baseline"}:
+            verified_keys = set(
+                (
+                    await session.scalars(
+                        select(VerifiedFact.fact_key).where(
+                            VerifiedFact.run_id == run.id,
+                            VerifiedFact.promotion_status == "VERIFIED",
+                            VerifiedFact.fact_key.in_(["asset_warranty.valid_baseline", "asset_warranty.invalid_baseline"]),
+                        )
+                    )
+                ).all()
+            )
+            if {"asset_warranty.valid_baseline", "asset_warranty.invalid_baseline"} <= verified_keys:
+                await solver_state_service.record_capability(
+                    session,
+                    run.id,
+                    "business_response_differential_confirmed",
+                    evidence={"fact_keys": sorted(verified_keys), "source": "controller_fact_promotion"},
+                )
+        if fact.fact_type == "BOOLEAN_ORACLE" and isinstance(fact.value_json, dict):
+            value = fact.value_json
+            stability = value.get("repeat_stability") if isinstance(value.get("repeat_stability"), dict) else {}
+            await solver_state_service.confirm_boolean_oracle(
+                session,
+                run,
+                request_spec=dict(value.get("request_contract") or {}),
+                test_field=str(value.get("test_field") or ""),
+                baseline_value=str(value.get("baseline_value") or ""),
+                control_fields=dict(value.get("control_fields") or {}),
+                oracle=dict(value.get("oracle") or {}),
+                evidence_ids=list(fact.evidence_ids_json or []),
+                fact_ids=[fact.id],
+                true_stable=stability.get("true") is not False,
+                false_stable=stability.get("false") is not False,
+                differential=value.get("response_differential") is not False,
+            )
 
     async def run(self, session, run: SolveRun, challenge: Challenge, attempt: RunAttempt, lease: RunExecutionLease, *, engine: object | None = None) -> dict:
         await deterministic_controller.seed_policies(session)
@@ -451,10 +576,10 @@ class MultiAgentOrchestrator:
                 plan_result = await self.runtime.execute(session, run, challenge, attempt, plan_task, plan_token)
                 try:
                     plan_review, approved, production_task, production_token = await asyncio.wait_for(
-                        self._persist_plan_review(session, run, proposal, plan_task, plan_token, plan_result),
+                        self._persist_plan_review(session, run, challenge, proposal, plan_task, plan_token, plan_result),
                         timeout=5.0,
                     )
-                except asyncio.TimeoutError as error:
+                except asyncio.TimeoutError:
                     await self._fail_plan_review_persistence(
                         session,
                         run.id,
@@ -497,8 +622,20 @@ class MultiAgentOrchestrator:
                 result_review_task, result_review_token = await self._task(session, run, AgentRole.ANALYSIS, AgentTaskKind.RESULT_REVIEW, "Review the complete producing task result, ToolCalls, Artifacts and Evidence.", [], parent=exec_task.id, context=result_payload)
                 result_review = await self._complete(session, run, result_review_task, result_review_token, await self.runtime.execute(session, run, challenge, attempt, result_review_task, result_review_token))
                 result_review_row = await self._review(session, run, proposal, result_review_task, result_review)
-                promoted = await self._apply_result_review(session, run, exec_task, result_review_row)
+                try:
+                    promoted = await self._apply_result_review(session, run, exec_task, result_review_row)
+                except DomainError as error:
+                    if error.code != "RESULT_REVIEW_PROMOTION_EMPTY":
+                        raise
+                    repair_task, repair_token = await self._task(session, run, AgentRole.ANALYSIS, AgentTaskKind.RESULT_REVIEW, "Repair the approved result review by selecting candidate facts or explicitly accepting a capability.", [], parent=result_review_task.id, context={**result_payload, "repair_attempt": True})
+                    repair_result = await self._complete(session, run, repair_task, repair_token, await self.runtime.execute(session, run, challenge, attempt, repair_task, repair_token))
+                    result_review_row = await self._review(session, run, proposal, repair_task, repair_result)
+                    promoted = await self._apply_result_review(session, run, exec_task, result_review_row)
                 next_phase = result_review_row.next_phase if result_review_row.decision == AnalysisDecision.APPROVE.value else "HYPOTHESIS"
+                run.current_phase = next_phase
+                state_after_review = await solver_state_service.load(session, run.id)
+                if state_after_review is not None:
+                    state_after_review.current_phase = next_phase
                 await self._memory(session, run, stage=next_phase, task=result_review_task, working={"last_role": role.value, "last_review": result_review_row.decision, "promoted_fact_ids": promoted, "last_evidence_ids": exec_result.evidence_ids, "candidate_seen": bool(await self._candidate_gate(session, run))})
                 if role == AgentRole.VERIFY:
                     candidate = await self._candidate_gate(session, run)
@@ -510,7 +647,7 @@ class MultiAgentOrchestrator:
                         await deterministic_controller.finalize_verified_candidate(session, run, candidate=candidate.candidate, verify_task_id=exec_task.id, source_artifact_id=artifact.id, producing_tool_call_id=call.id, evidence_ids=exec_result.evidence_ids, pattern_matched=True, fresh_reproduction=True, assistance_level=run.assistance_level or "AUTONOMOUS")
                         await session.commit()
                         return {"status": run.status, "agent_tasks": int(await session.scalar(select(func.count()).select_from(AgentTask).where(AgentTask.run_id == run.id)) or 0), "fresh_reproduction": True}
-                context = {"replan_reason": "RESULT_REVIEW_CONTINUE", "approved_review": {"proposal_id": proposal.proposal_id, "allowed_tools": proposal.allowed_tools_json, "approved_arguments": plan_review.approved_arguments_json}}
+                context = {"replan_reason": "RESULT_REVIEW_CONTINUE", "approved_review": {"proposal_id": proposal.proposal_id, "allowed_tools": proposal.allowed_tools_json, "compiled_arguments_digest": approved.compiled_arguments_digest if approved else None}}
                 await self._status(session, run, RunStatus.PLANNING)
             run.recovery_checkpoint_json = {"terminal_reason": "MAX_REPLAN_CYCLES_EXHAUSTED", "cycles": max_cycles, "candidate_gate": "not satisfied"}
             run.last_error_code = "MULTI_AGENT_TERMINAL"
@@ -524,7 +661,17 @@ class MultiAgentOrchestrator:
             run.last_error_code = error.code
             run.last_error_message = error.message[:4000]
             run.recovery_checkpoint_json = {"terminal_reason": error.code, "details": error.details or {}}
-            target = RunStatus.PAUSED_CHECKPOINT if error.code == "MODEL_OUTPUT_SCHEMA_INVALID" else RunStatus.PAUSED_DEPLOYMENT if error.code in {"TARGET_NETWORK_ENFORCEMENT_UNAVAILABLE", "SCRIPT_TARGET_NETWORK_UNAVAILABLE", "TOOL_CATALOG_DRIFT"} else RunStatus.PAUSED_RECOVERY if error.code in {"RUNNER_UNAVAILABLE", "CODEX_STREAM_INTERRUPTED"} else RunStatus.FAILED_ENGINE
+            control_errors = {"TOOL_INVALID_ARGUMENT", "APPROVED_ACTION_COMPILE_FAILED", "APPROVED_ACTION_NOT_COMPILED", "TOOL_SCHEMA_VERSION_CHANGED", "SQL_EXPRESSION_PROVENANCE_REQUIRED", "RESULT_REVIEW_PROMOTION_EMPTY", "APPROVED_ARGUMENT_DIGEST_MISMATCH", "EXPERIMENT_ALREADY_CONFIRMED"}
+            if error.code in control_errors:
+                active_tasks = list((await session.scalars(select(AgentTask).where(AgentTask.run_id == run.id, AgentTask.status == AgentTaskStatus.RUNNING.value))).all())
+                for active_task in active_tasks:
+                    active_task.status = AgentTaskStatus.NEED_REPLAN.value
+                actions = list((await session.scalars(select(ApprovedAction).where(ApprovedAction.run_id == run.id, ApprovedAction.status == "ACTIVE"))).all())
+                for action in actions:
+                    action.status = "REJECTED"
+                target = RunStatus.PAUSED_CHECKPOINT
+            else:
+                target = RunStatus.PAUSED_CHECKPOINT if error.code == "MODEL_OUTPUT_SCHEMA_INVALID" else RunStatus.PAUSED_DEPLOYMENT if error.code in {"TARGET_NETWORK_ENFORCEMENT_UNAVAILABLE", "SCRIPT_TARGET_NETWORK_UNAVAILABLE", "TOOL_CATALOG_DRIFT"} else RunStatus.PAUSED_RECOVERY if error.code in {"RUNNER_UNAVAILABLE", "CODEX_STREAM_INTERRUPTED"} else RunStatus.FAILED_ENGINE
             if RunStatus(run.status) not in {RunStatus.COMPLETED_SOLVED, RunStatus.COMPLETED_UNSOLVED, RunStatus.CANCELLED}:
                 await self._status(session, run, target)
             return {"status": run.status, "error_code": error.code, "agent_tasks": int(await session.scalar(select(func.count()).select_from(AgentTask).where(AgentTask.run_id == run.id)) or 0)}

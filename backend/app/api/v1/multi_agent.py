@@ -15,6 +15,7 @@ from app.models.multi_agent import (
     AnalysisReview,
     EvidenceLedger,
     PlannerProposal,
+    VerifiedFact,
 )
 from app.models.run import SolveRun, WebResearchRecord
 from app.schemas.multi_agent import (
@@ -118,7 +119,11 @@ async def create_proposal(run_id: str, payload: PlannerProposalContract, session
     await deterministic_controller.seed_policies(session)
     if payload.next_agent.value == "PLANNER" or "sqlmap_run" in payload.allowed_tools:
         raise DomainError("PLANNER_TOOL_FORBIDDEN", "Planner proposals cannot directly schedule forbidden execution.")
-    item = PlannerProposal(id=str(uuid.uuid4()), run_id=run_id, proposal_id=payload.proposal_id, current_stage=payload.current_stage, next_agent=payload.next_agent.value, objective=payload.objective, input_fact_ids_json=payload.input_fact_ids, required_capabilities_json=payload.required_capabilities, allowed_tools_json=payload.allowed_tools, budget_json=payload.budget.model_dump(), success_condition=payload.success_condition, stop_conditions_json=payload.stop_conditions, fallback=payload.fallback)
+    facts = set((await session.scalars(select(VerifiedFact.id).where(VerifiedFact.run_id == run_id, VerifiedFact.id.in_(payload.input_fact_ids)))).all()) if payload.input_fact_ids else set()
+    evidence = set((await session.scalars(select(EvidenceLedger.id).where(EvidenceLedger.run_id == run_id, EvidenceLedger.id.in_(payload.input_evidence_ids)))).all()) if payload.input_evidence_ids else set()
+    if len(facts) != len(set(payload.input_fact_ids)) or len(evidence) != len(set(payload.input_evidence_ids)):
+        raise DomainError("PLANNER_REFERENCE_TYPE_INVALID", "Planner references must use VerifiedFact IDs and EvidenceLedger IDs in separate fields.")
+    item = PlannerProposal(id=str(uuid.uuid4()), run_id=run_id, proposal_id=payload.proposal_id, current_stage=payload.current_stage, next_agent=payload.next_agent.value, objective=payload.objective, input_fact_ids_json=payload.input_fact_ids, input_evidence_ids_json=payload.input_evidence_ids, required_capabilities_json=payload.required_capabilities, allowed_tools_json=payload.allowed_tools, budget_json=payload.budget.model_dump(), success_condition=payload.success_condition, stop_conditions_json=payload.stop_conditions, fallback=payload.fallback)
     session.add(item)
     await session.commit()
     return {"data": {"proposal_id": item.proposal_id, "status": item.status}}
@@ -130,7 +135,7 @@ async def review_proposal(run_id: str, proposal_id: str, payload: AnalysisReview
     proposal = await session.scalar(select(PlannerProposal).where(PlannerProposal.run_id == run.id, PlannerProposal.proposal_id == proposal_id))
     if proposal is None:
         raise DomainError("PROPOSAL_NOT_FOUND", "Planner proposal does not exist.", status_code=404)
-    proposal_contract = PlannerProposalContract(proposal_id=proposal.proposal_id, run_id=run_id, current_stage=proposal.current_stage, next_agent=proposal.next_agent, objective=proposal.objective, input_fact_ids=proposal.input_fact_ids_json, required_capabilities=proposal.required_capabilities_json, allowed_tools=proposal.allowed_tools_json, budget=proposal.budget_json, success_condition=proposal.success_condition, stop_conditions=proposal.stop_conditions_json, fallback=proposal.fallback)
+    proposal_contract = PlannerProposalContract(proposal_id=proposal.proposal_id, run_id=run_id, current_stage=proposal.current_stage, next_agent=proposal.next_agent, objective=proposal.objective, input_fact_ids=proposal.input_fact_ids_json, input_evidence_ids=proposal.input_evidence_ids_json, required_capabilities=proposal.required_capabilities_json, allowed_tools=proposal.allowed_tools_json, budget=proposal.budget_json, success_condition=proposal.success_condition, stop_conditions=proposal.stop_conditions_json, fallback=proposal.fallback)
     deterministic_controller.validate_review(proposal_contract, payload)
     review = AnalysisReview(proposal_id=proposal.id, decision=payload.decision.value, confidence=payload.confidence, question_being_tested=payload.question_being_tested, supporting_evidence_ids_json=payload.supporting_evidence_ids, independent_variable=payload.independent_variable, required_controls_json=payload.required_controls, expected_true_signal_json=payload.expected_true_signal, expected_false_signal_json=payload.expected_false_signal, recommended_tool=payload.recommended_tool, reason=payload.reason, audit_reason=payload.audit_reason)
     proposal.status = "APPROVED" if payload.decision.value == "APPROVE" else "REVIEWED"

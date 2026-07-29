@@ -9,3 +9,8 @@ def canonical_json(value: object) -> str:
 def fingerprint_action(tool_name: str, arguments: dict) -> str:
     payload = f"{tool_name}:{canonical_json(arguments)}"
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def fingerprint_compiled_action(tool_name: str, compiled_arguments_digest: str, success_condition: str) -> str:
+    payload = f"{tool_name}:{compiled_arguments_digest}:{success_condition.strip()}"
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()

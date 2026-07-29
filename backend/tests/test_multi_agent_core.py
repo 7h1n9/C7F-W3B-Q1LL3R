@@ -10,6 +10,8 @@ from app.models import Base
 from app.models.challenge import Challenge
 from app.models.multi_agent import EvidenceLedger, VerifiedFact
 from app.models.run import Artifact, SolveRun, ToolCall
+from app.models.solver_state import SolverState
+from app.orchestration.multi_agent_orchestrator import MultiAgentOrchestrator
 from app.orchestration.state_machine import RunStatus
 from app.schemas.multi_agent import (
     AgentRole,
@@ -133,6 +135,45 @@ async def test_verify_isolated_task_is_the_only_terminal_promotion_path(session_
         candidate = await deterministic_controller.finalize_verified_candidate(session, run, candidate="flag{fresh}", verify_task_id=task.id, source_artifact_id=artifact.id, producing_tool_call_id=tool_call.id, evidence_ids=[evidence.id], pattern_matched=True, fresh_reproduction=True)
         assert candidate.verified is True
         assert run.status == RunStatus.COMPLETED_SOLVED.value
+
+
+@pytest.mark.asyncio
+async def test_asset_warranty_verified_baselines_advance_capability_ledger(session_factory) -> None:
+    async with session_factory() as session:
+        run = await _run(session)
+        state = SolverState(run_id=run.id, current_phase="BASELINE", capability_ledger_json={})
+        session.add(state)
+        valid = VerifiedFact(
+            run_id=run.id,
+            fact_key="asset_warranty.valid_baseline",
+            fact_type="BUSINESS_RESPONSE_BASELINE",
+            value_json={"response_signature": {"matched": True}},
+            confidence=90,
+            evidence_ids_json=["E-valid"],
+            promotion_status="VERIFIED",
+        )
+        invalid = VerifiedFact(
+            run_id=run.id,
+            fact_key="asset_warranty.invalid_baseline",
+            fact_type="BUSINESS_RESPONSE_BASELINE",
+            value_json={"response_signature": {"matched": False}},
+            confidence=90,
+            evidence_ids_json=["E-invalid"],
+            promotion_status="VERIFIED",
+        )
+        session.add_all([valid, invalid])
+        await session.flush()
+        orchestrator = MultiAgentOrchestrator()
+
+        await orchestrator._record_verified_fact_capabilities(session, run, valid)
+        await orchestrator._record_verified_fact_capabilities(session, run, invalid)
+
+        await session.refresh(state)
+        assert "warranty_endpoint_identified" in state.capability_ledger_json
+        assert "request_contract_confirmed" in state.capability_ledger_json
+        assert "valid_business_baseline_confirmed" in state.capability_ledger_json
+        assert "invalid_business_baseline_confirmed" in state.capability_ledger_json
+        assert "business_response_differential_confirmed" in state.capability_ledger_json
 
 
 def test_planner_cannot_schedule_execution_and_analysis_rejects_bad_controls() -> None:
