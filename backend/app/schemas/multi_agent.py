@@ -1,7 +1,7 @@
 """Public contracts for the structured multi-agent controller."""
 
 from enum import StrEnum
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -22,6 +22,8 @@ class AgentTaskStatus(StrEnum):
     BLOCKED = "BLOCKED"
     NEED_REPLAN = "NEED_REPLAN"
     CANCELLED = "CANCELLED"
+    PARTIAL = "PARTIAL"
+    INTERRUPTED = "INTERRUPTED"
 
 
 class AgentTaskKind(StrEnum):
@@ -38,7 +40,32 @@ class TaskBudget(BaseModel):
 
     max_logical_calls: int = Field(default=1, ge=0, le=1000)
     max_internal_requests: int = Field(default=8, ge=0, le=10000)
-    max_runtime_seconds: int = Field(default=120, ge=1, le=86400)
+    max_runtime_seconds: int = Field(default=300, ge=1, le=86400)
+
+
+class RoleToolAction(BaseModel):
+    """The only executable action a production role may propose per turn."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    type: Literal["tool"]
+    tool_name: str = Field(min_length=1, max_length=100)
+    arguments: dict[str, Any] = Field(default_factory=dict)
+    purpose: str = Field(min_length=1, max_length=2000)
+    expected_signal: dict[str, Any] = Field(default_factory=dict)
+    stop_if: list[str] = Field(default_factory=list, max_length=50)
+
+
+class RoleFinishAction(BaseModel):
+    """A role can finish only with the durable task result contract."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    type: Literal["finish"]
+    result: "AgentTaskResultContract"
+
+
+RoleAction = Annotated[RoleToolAction | RoleFinishAction, Field(discriminator="type")]
 
 
 class ScriptProposalContract(BaseModel):
@@ -196,6 +223,27 @@ class AnalysisReviewContract(BaseModel):
     reason: str = ""
     audit_reason: str = ""
     approved_arguments: dict[str, Any] = Field(default_factory=dict)
+    approved_fact_indexes: list[int] = Field(default_factory=list, max_length=200)
+    approved_evidence_ids: list[str] = Field(default_factory=list, max_length=500)
+    approved_hypothesis_updates: list[dict[str, Any]] = Field(default_factory=list, max_length=200)
+    capabilities_added: list[str] = Field(default_factory=list, max_length=100)
+    solution_step_accepted: bool = False
+    next_phase: str = Field(default="HYPOTHESIS", max_length=80)
+
+
+class ApprovedActionContract(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    approved_action_id: str = Field(min_length=1, max_length=80)
+    run_id: str = Field(min_length=1, max_length=80)
+    proposal_id: str = Field(min_length=1, max_length=80)
+    analysis_review_id: str = Field(min_length=1, max_length=80)
+    agent_role: AgentRole
+    tool_name: str = Field(min_length=1, max_length=100)
+    argument_constraints: dict[str, Any] = Field(default_factory=dict)
+    max_logical_calls: int = Field(default=1, ge=1, le=1000)
+    expires_at: str
+    status: Literal["ACTIVE", "EXPIRED", "CONSUMED", "REVOKED"] = "ACTIVE"
 
 
 class PromotionStatus(StrEnum):

@@ -35,13 +35,19 @@ async def lifespan(_: FastAPI):
         await deterministic_controller.seed_policies(session)
         await run_attempt_service.cleanup_tickets(session)
         await run_attempt_service.reconcile_startup(session)
-        runs = list((await session.scalars(select(SolveRun))).all())
-        for run in runs:
-            if RunStatus(run.status) not in TERMINAL and run.status not in {
-                RunStatus.CREATED,
-                RunStatus.PAUSED_RECOVERY,
-                RunStatus.PAUSED_DEPLOYMENT,
-            }:
+        recovery = await deterministic_controller.reconcile_startup(session)
+        for run_id in recovery.get("run_ids", []):
+            run = await session.get(SolveRun, run_id)
+            if run and RunStatus(run.status) not in TERMINAL:
+                run.status = RunStatus.PAUSED_RECOVERY.value
+                run.last_error_code = "SERVICE_RESTART_INTERRUPTED_TASK"
+                run.last_error_message = "A role task was interrupted by service restart; durable evidence is available for a fresh lease."
+                await event_service.append(session, run.id, "run.paused_recovery", {"classification": "SERVICE_RESTART_INTERRUPTED_TASK", "retryable": True})
+        await session.commit()
+        # Startup recovery is handled above by the durable task/attempt
+        # reconciler. Do not blanket-transition every run to deployment pause.
+        for run in ():
+            if False:
                 transition(run, RunStatus.PAUSED_DEPLOYMENT)
                 run.last_error_code, run.last_error_message = (
                     "PAUSED_DEPLOYMENT",

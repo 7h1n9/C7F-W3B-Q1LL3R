@@ -2,11 +2,11 @@
 
 from datetime import UTC, datetime
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from app.core.exceptions import DomainError
-from app.models.multi_agent import AgentTask
-from app.models.run import RunAttempt, RunExecutionLease, SolveRun
+from app.models.multi_agent import AgentTask, ApprovedAction
+from app.models.run import LogicalToolCall, RunAttempt, RunExecutionLease, SolveRun, ToolCall
 from app.orchestration.state_machine import TERMINAL, RunStatus
 from app.services.infrastructure import INFRASTRUCTURE_STATES, reject_infrastructure
 
@@ -14,7 +14,27 @@ from app.services.infrastructure import INFRASTRUCTURE_STATES, reject_infrastruc
 class ToolInvocationCoordinator:
     TRANSIENT_STAGES = {"ANALYZING", "PLANNING", "EXECUTING", "EVALUATING", "TESTING"}
 
-    async def validate(self, session, run: SolveRun, *, attempt_id: str | None = None, lease_id: str | None = None, agent_task_id: str | None = None, task_lease_token: str | None = None, tool_name: str | None = None) -> dict:
+    @staticmethod
+    def _constraints_match(arguments: dict | None, constraints: dict | None) -> bool:
+        args = arguments or {}
+        rules = constraints or {}
+        required = rules.get("required") or rules.get("required_fields") or {}
+        if isinstance(required, list) and any(key not in args for key in required):
+            return False
+        if isinstance(required, dict) and any(key not in args or (value is not None and args.get(key) != value) for key, value in required.items()):
+            return False
+        equals = rules.get("equals") or {}
+        if isinstance(equals, dict) and any(args.get(key) != value for key, value in equals.items()):
+            return False
+        allowed = rules.get("allowed_values") or {}
+        if isinstance(allowed, dict) and any(args.get(key) not in values for key, values in allowed.items() if isinstance(values, list)):
+            return False
+        forbidden = rules.get("forbidden_fields") or []
+        if isinstance(forbidden, list) and any(key in args for key in forbidden):
+            return False
+        return True
+
+    async def validate(self, session, run: SolveRun, *, attempt_id: str | None = None, lease_id: str | None = None, agent_task_id: str | None = None, task_lease_token: str | None = None, tool_name: str | None = None, agent_role: str | None = None, approved_action_id: str | None = None, arguments: dict | None = None) -> dict:
         if str(getattr(run, "infrastructure_state", "HEALTHY")) in INFRASTRUCTURE_STATES:
             reject_infrastructure(run)
         status = RunStatus(run.status)
@@ -42,8 +62,38 @@ class ToolInvocationCoordinator:
             task_expiry = task.lease_expires_at.replace(tzinfo=UTC) if task.lease_expires_at and task.lease_expires_at.tzinfo is None else task.lease_expires_at
             if task_expiry and task_expiry <= now:
                 raise DomainError("AGENT_TASK_LEASE_INVALID", "The AgentTask lease has expired.", {"agent_task_id": agent_task_id}, 409)
+            idle_expiry = task.idle_deadline_at.replace(tzinfo=UTC) if task.idle_deadline_at and task.idle_deadline_at.tzinfo is None else task.idle_deadline_at
+            if idle_expiry and idle_expiry <= now:
+                raise DomainError("ROLE_IDLE_TIMEOUT", "The role task has had no model or tool activity within its idle deadline.", {"agent_task_id": agent_task_id}, 408)
+            if agent_role and task.agent_role != agent_role:
+                raise DomainError("AGENT_SCOPE_INVALID", "The task role does not match the tool-call scope.", {"agent_task_id": agent_task_id, "agent_role": agent_role}, 403)
             if tool_name and tool_name not in (task.allowed_tools_json or []) and not tool_name.startswith("workspace_"):
                 raise DomainError("AGENT_TOOL_NOT_ALLOWED", "The task contract does not allow this tool.", {"agent_task_id": agent_task_id, "tool": tool_name}, 422)
+            # Production role calls are capability-bearing. A task lease alone
+            # is intentionally insufficient to execute a proposed action.
+            if not approved_action_id:
+                raise DomainError("APPROVED_ACTION_REQUIRED", "A production tool call requires an active ApprovedAction.", {"agent_task_id": agent_task_id}, 403)
+            approved = await session.get(ApprovedAction, approved_action_id)
+            if (
+                approved is None
+                or approved.run_id != run.id
+                or approved.status != "ACTIVE"
+                or approved.agent_role != task.agent_role
+                or (tool_name and approved.tool_name != tool_name)
+                or (approved.expires_at and (approved.expires_at.replace(tzinfo=UTC) if approved.expires_at.tzinfo is None else approved.expires_at) <= now)
+            ):
+                raise DomainError("APPROVED_ACTION_INVALID", "The ApprovedAction is missing, expired, revoked, or out of scope.", {"approved_action_id": approved_action_id}, 403)
+            if not self._constraints_match(arguments, approved.argument_constraints_json):
+                raise DomainError("APPROVED_ARGUMENT_CONSTRAINTS_FAILED", "Tool arguments do not satisfy the Analysis-approved constraints.", {"approved_action_id": approved_action_id, "tool": tool_name}, 422)
+            tool_rows = int(await session.scalar(select(func.count(ToolCall.id)).where(ToolCall.agent_task_id == task.id, ToolCall.counts_toward_budget.is_(True))) or 0)
+            logical_rows = int(await session.scalar(select(func.count(LogicalToolCall.id)).where(LogicalToolCall.run_id == run.id, LogicalToolCall.id.like(f"%agent-task:{task.id}%"), LogicalToolCall.counts_toward_budget.is_(True))) or 0)
+            used = max(tool_rows, logical_rows)
+            if used >= int((task.budget_json or {}).get("max_logical_calls", 0)):
+                raise DomainError("AGENT_TASK_TOOL_BUDGET_EXHAUSTED", "The AgentTask logical-call budget is exhausted.", {"agent_task_id": task.id, "used_calls": used})
+            if int(approved.used_logical_calls or 0) >= int(approved.max_logical_calls):
+                raise DomainError("APPROVED_ACTION_BUDGET_EXHAUSTED", "The ApprovedAction logical-call budget is exhausted.", {"approved_action_id": approved.id})
+            task.last_activity_at = now
+            task.heartbeat_at = now
         return {"attempt": attempt, "lease": lease, "task": task, "stage": str(run.current_phase or run.status).upper()}
 
 

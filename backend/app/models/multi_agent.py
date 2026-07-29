@@ -61,7 +61,11 @@ class AgentTask(UUIDTimestampMixin, Base):
     lease_token: Mapped[str | None] = mapped_column(String(120), unique=True)
     lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     optimistic_version: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    timeout_seconds: Mapped[int] = mapped_column(Integer, nullable=False, default=120)
+    timeout_seconds: Mapped[int] = mapped_column(Integer, nullable=False, default=300)
+    total_deadline_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    idle_deadline_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_activity_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     cancel_requested: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     retry_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     input_snapshot_version: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
@@ -69,6 +73,25 @@ class AgentTask(UUIDTimestampMixin, Base):
     runtime_path: Mapped[str | None] = mapped_column(String(1024))
     context_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)
+
+
+class ApprovedAction(UUIDTimestampMixin, Base):
+    """Controller-issued capability to execute one approved tool contract."""
+
+    __tablename__ = "approved_actions"
+    __table_args__ = (UniqueConstraint("run_id", "approved_action_id", name="uq_approved_action_run_id"),)
+
+    run_id: Mapped[str] = mapped_column(ForeignKey("solve_runs.id"), nullable=False, index=True)
+    approved_action_id: Mapped[str] = mapped_column(String(80), nullable=False)
+    proposal_id: Mapped[str] = mapped_column(ForeignKey("planner_proposals.id"), nullable=False)
+    analysis_review_id: Mapped[str] = mapped_column(ForeignKey("analysis_reviews.id"), nullable=False)
+    agent_role: Mapped[str] = mapped_column(String(30), nullable=False)
+    tool_name: Mapped[str] = mapped_column(String(100), nullable=False)
+    argument_constraints_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    max_logical_calls: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    used_logical_calls: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="ACTIVE", index=True)
 
 
 class AgentTaskResult(UUIDTimestampMixin, Base):
@@ -124,6 +147,12 @@ class AnalysisReview(UUIDTimestampMixin, Base):
     reason: Mapped[str] = mapped_column(Text, nullable=False, default="")
     audit_reason: Mapped[str] = mapped_column(Text, nullable=False, default="")
     approved_arguments_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    approved_fact_indexes_json: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    approved_evidence_ids_json: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    approved_hypothesis_updates_json: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    capabilities_added_json: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    solution_step_accepted: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    next_phase: Mapped[str] = mapped_column(String(80), nullable=False, default="HYPOTHESIS")
 
 
 class VerifiedFact(UUIDTimestampMixin, Base):

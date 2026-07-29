@@ -9,9 +9,12 @@ from pydantic import TypeAdapter, ValidationError
 from app.engines.action_adapter import validate_action
 from app.engines.retry import TRANSIENT_HTTP_STATUSES, backoff_delay, parse_retry_after
 from app.schemas.agent import AgentAction
+from app.schemas.multi_agent import RoleAction
 
 action_adapter = TypeAdapter(AgentAction)
 ACTION_SCHEMA = action_adapter.json_schema()
+ROLE_ACTION_ADAPTER = TypeAdapter(RoleAction)
+ROLE_ACTION_SCHEMA = ROLE_ACTION_ADAPTER.json_schema()
 
 
 class ModelRateLimitError(RuntimeError):
@@ -205,3 +208,60 @@ class OpenAICompatibleEngine:
                 await asyncio.sleep(backoff_delay(parse_attempts - 1, base=0.4, cap=4.0))
         self.last_trace = {"latency_ms": round((time.perf_counter() - started) * 1000), "parse_attempts": parse_attempts, "parse_error_code": "AGENT_ACTION_PARSE_FAILED", "response_excerpt": last_error[:2000]}
         raise RuntimeError(f"AGENT_ACTION_PARSE_FAILED: {last_error}")
+
+    async def next_role_action(self, messages: list[dict]):
+        """Structured one-action turn used by controller-owned role tasks."""
+        if time.monotonic() < self.cooldown_until:
+            raise ModelRateLimitError("MODEL_RATE_LIMITED: provider cooldown is active")
+        started = time.perf_counter()
+        response = await self._get_client().post(
+            f"{self.base_url}/chat/completions",
+            headers={"Authorization": f"Bearer {self.api_key}"},
+            json={
+                "model": self.model,
+                "messages": messages,
+                "temperature": self.temperature,
+                "max_tokens": self.max_output_tokens,
+                "response_format": {"type": "json_schema", "json_schema": {"name": "role_action", "strict": True, "schema": ROLE_ACTION_SCHEMA}},
+            },
+        )
+        response.raise_for_status()
+        body = response.json()
+        content = body["choices"][0]["message"].get("content")
+        if not isinstance(content, str):
+            raise ValueError("role response did not contain JSON content")
+        raw = self._extract_json(content)
+        action = ROLE_ACTION_ADAPTER.validate_python(raw)
+        usage = body.get("usage") or {}
+        self.last_trace = {
+            "latency_ms": round((time.perf_counter() - started) * 1000),
+            "input_tokens": usage.get("prompt_tokens") or usage.get("input_tokens"),
+            "output_tokens": usage.get("completion_tokens") or usage.get("output_tokens"),
+            "provider_request_id": getattr(response, "headers", {}).get("x-request-id") if getattr(response, "headers", None) else None,
+            "parse_attempts": 1,
+            "response_excerpt": content[:2000],
+            "action": action.model_dump(mode="json"),
+        }
+        return action
+
+    async def next_contract(self, messages: list[dict], schema: dict, *, name: str = "role_contract") -> dict:
+        """Request a role-specific top-level contract without the campaign action schema."""
+        started = time.perf_counter()
+        response = await self._get_client().post(
+            f"{self.base_url}/chat/completions",
+            headers={"Authorization": f"Bearer {self.api_key}"},
+            json={
+                "model": self.model, "messages": messages, "temperature": self.temperature,
+                "max_tokens": self.max_output_tokens,
+                "response_format": {"type": "json_schema", "json_schema": {"name": name, "strict": True, "schema": schema}},
+            },
+        )
+        response.raise_for_status()
+        body = response.json()
+        content = body["choices"][0]["message"].get("content")
+        if not isinstance(content, str):
+            raise ValueError("contract response did not contain JSON content")
+        raw = self._extract_json(content)
+        usage = body.get("usage") or {}
+        self.last_trace = {"latency_ms": round((time.perf_counter() - started) * 1000), "input_tokens": usage.get("prompt_tokens") or usage.get("input_tokens"), "output_tokens": usage.get("completion_tokens") or usage.get("output_tokens"), "parse_attempts": 1, "response_excerpt": content[:2000]}
+        return raw

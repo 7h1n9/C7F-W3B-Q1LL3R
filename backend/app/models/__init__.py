@@ -13,6 +13,7 @@ from app.models.learned_skill import (
 )
 from app.models.model_config import ModelConfig
 from app.models.multi_agent import (
+    ApprovedAction,
     AgentRolePolicy,
     AgentTask,
     AgentTaskResult,
@@ -93,6 +94,7 @@ __all__ = [
     "LearnedSkillReview",
     "LearnedSkillValidationRun",
     "AgentRolePolicy",
+    "ApprovedAction",
     "AgentTask",
     "AgentTaskResult",
     "PlannerProposal",

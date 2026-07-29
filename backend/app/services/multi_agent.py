@@ -48,6 +48,7 @@ DEFAULT_POLICIES: tuple[AgentRolePolicyContract, ...] = (
         readable_memory_types=["WORKING", "VERIFIED_FACT", "HYPOTHESIS", "EVIDENCE", "FAILURE"],
         allowed_tool_types=[], allowed_tools=[], allowed_outputs=["PLANNER_PROPOSAL"],
         forbidden_operations=["RUNNER_CALL", "FLAG_SUBMIT", "RUN_STATUS_CHANGE"],
+        max_logical_calls=1, max_internal_requests=8, max_runtime_seconds=300, default_timeout_seconds=300,
     ),
     AgentRolePolicyContract(
         role=AgentRole.RECON,
@@ -58,6 +59,7 @@ DEFAULT_POLICIES: tuple[AgentRolePolicyContract, ...] = (
         allowed_outputs=["RECON_FACT", "EVIDENCE"],
         forbidden_operations=["EXPLOIT", "FLAG_SUBMIT", "RUN_STATUS_CHANGE"],
         can_create_candidate_fact=True,
+        max_logical_calls=4, max_internal_requests=8, max_runtime_seconds=300, default_timeout_seconds=300,
     ),
     AgentRolePolicyContract(
         role=AgentRole.ANALYSIS,
@@ -68,15 +70,17 @@ DEFAULT_POLICIES: tuple[AgentRolePolicyContract, ...] = (
         allowed_outputs=["ANALYSIS_REVIEW", "HYPOTHESIS", "EVIDENCE"],
         forbidden_operations=["RUNNER_CALL", "FLAG_SUBMIT", "RUN_STATUS_CHANGE"],
         can_create_candidate_fact=True,
+        max_logical_calls=1, max_internal_requests=8, max_runtime_seconds=300, default_timeout_seconds=300,
     ),
     AgentRolePolicyContract(
         role=AgentRole.EXPLOIT,
         system_prompt="Execute only the approved bounded task and return artifacts and evidence.",
         readable_memory_types=["WORKING", "VERIFIED_FACT", "HYPOTHESIS", "EVIDENCE"],
         allowed_tool_types=["EXPLOIT"],
-        allowed_tools=["sqlmap_run", "boolean_config_extract", "script_run", "http_request"],
+        allowed_tools=["sql_boolean_compare", "oracle_probe_matrix", "sqlite_metadata_discovery", "boolean_config_extract", "script_run", "http_request"],
         allowed_outputs=["ARTIFACT", "EVIDENCE", "FLAG_CANDIDATE"],
         forbidden_operations=["REPLAN", "BUDGET_BYPASS", "RUN_STATUS_CHANGE", "FLAG_VERIFY"],
+        max_logical_calls=8, max_internal_requests=12, max_runtime_seconds=300, default_timeout_seconds=300,
     ),
     AgentRolePolicyContract(
         role=AgentRole.VERIFY,
@@ -85,6 +89,7 @@ DEFAULT_POLICIES: tuple[AgentRolePolicyContract, ...] = (
         allowed_tool_types=["VERIFY"], allowed_tools=["http_request", "script_run"],
         allowed_outputs=["VERIFICATION_RESULT", "FRESH_REPRODUCTION"],
         forbidden_operations=["EXPLOIT", "RUN_STATUS_CHANGE"], can_verify_fact=True,
+        max_logical_calls=2, max_internal_requests=8, max_runtime_seconds=300, default_timeout_seconds=300,
     ),
 )
 
@@ -119,6 +124,8 @@ class PromotionGate:
     """Promote only new, evidence-backed structured output."""
 
     async def promote_result(self, session: AsyncSession, task: AgentTask, result: AgentTaskResultContract) -> PromotionDecision:
+        if result.status in {AgentTaskStatus.BLOCKED, AgentTaskStatus.FAILED, AgentTaskStatus.PARTIAL, AgentTaskStatus.INTERRUPTED}:
+            return PromotionDecision(status=PromotionStatus.NO_VALUE, reason="Non-completed tasks cannot promote facts; durable evidence is retained for review.")
         if not result.new_facts and not result.evidence_ids and not result.accepted_solution_steps:
             return PromotionDecision(status=PromotionStatus.NO_VALUE, reason="No new fact, evidence, or solution capability.")
         if (result.new_facts or result.accepted_solution_steps) and not result.evidence_ids:
@@ -174,7 +181,7 @@ class EvidenceLedgerService:
         item = EvidenceLedger(
             id=payload.evidence_id, run_id=payload.run_id, evidence_type=payload.evidence_type,
             artifact_id=payload.artifact_id, tool_call_id=payload.tool_call_id, agent_task_id=payload.agent_task_id,
-            summary=payload.summary[:4000], sha256=payload.sha256 or _digest(payload.summary), status=payload.status,
+            summary=payload.summary[:4000], sha256=artifact.sha256, status=payload.status,
             retention_class=payload.retention_class, source_chain=payload.source_chain or [payload.artifact_id, payload.tool_call_id, payload.agent_task_id],
         )
         session.add(item)
@@ -388,11 +395,51 @@ class DeterministicController:
         if task.status not in {AgentTaskStatus.PENDING.value, AgentTaskStatus.RUNNING.value}:
             raise DomainError("AGENT_TASK_NOT_CLAIMABLE", "Only pending or expired tasks can be claimed.")
         token = f"lease-{uuid4()}"
+        total_seconds = min(max(1, lease_seconds), int((task.budget_json or {}).get("max_runtime_seconds", lease_seconds) or lease_seconds))
         task.status, task.lease_owner, task.lease_token = AgentTaskStatus.RUNNING.value, owner, token
-        task.lease_expires_at = now + timedelta(seconds=lease_seconds)
+        task.lease_expires_at = now + timedelta(seconds=total_seconds)
+        task.total_deadline_at = now + timedelta(seconds=total_seconds)
+        task.idle_deadline_at = now + timedelta(seconds=min(45, total_seconds))
+        task.last_activity_at = now
+        task.heartbeat_at = now
         task.optimistic_version += 1
         await session.flush()
         return token
+
+    async def touch_task(self, session: AsyncSession, task_id: str, *, idle_seconds: int = 45) -> None:
+        task = await session.get(AgentTask, task_id)
+        if task is None or task.status != AgentTaskStatus.RUNNING.value:
+            return
+        now = datetime.now(UTC)
+        task.last_activity_at = now
+        task.heartbeat_at = now
+        task.idle_deadline_at = now + timedelta(seconds=idle_seconds)
+        await session.flush()
+
+    async def reconcile_startup(self, session: AsyncSession) -> dict[str, Any]:
+        """Interrupt stale role tasks after a restart, preserving their evidence."""
+        now = datetime.now(UTC)
+        interrupted = 0
+        runs: set[str] = set()
+        rows = list((await session.scalars(select(AgentTask).where(AgentTask.status == AgentTaskStatus.RUNNING.value))).all())
+        for task in rows:
+            expiry = task.lease_expires_at
+            expired = expiry is not None and (expiry.replace(tzinfo=UTC) if expiry.tzinfo is None else expiry) <= now
+            if expired or task.lease_token:
+                task.status = AgentTaskStatus.INTERRUPTED.value
+                task.lease_expires_at = None
+                task.optimistic_version += 1
+                await self.record_failure(session, task.run_id, {
+                    "fingerprint": f"service-restart:{task.id}",
+                    "classification": "SERVICE_RESTART_INTERRUPTED_TASK",
+                    "retryable": True,
+                    "reason": "Backend restarted while the role task was running.",
+                    "next_allowed_condition": "create a fresh task lease and resume from durable evidence",
+                })
+                runs.add(task.run_id)
+                interrupted += 1
+        await session.flush()
+        return {"tasks_interrupted": interrupted, "run_count": len(runs), "run_ids": sorted(runs)}
 
     async def request_cancel(self, session: AsyncSession, task_id: str) -> None:
         task = await session.get(AgentTask, task_id)
@@ -555,7 +602,7 @@ class DeterministicController:
         if review.decision == AnalysisDecision.APPROVE:
             if not review.question_being_tested.strip():
                 raise DomainError("ANALYSIS_QUESTION_REQUIRED", "An approved review must state the decision question.")
-            if not review.supporting_evidence_ids:
+            if review.task_kind == "RESULT_REVIEW" and not review.supporting_evidence_ids:
                 raise DomainError("ANALYSIS_EVIDENCE_REQUIRED", "An approved proposal requires supporting evidence.")
             if not review.expected_true_signal or not review.expected_false_signal:
                 raise DomainError("ANALYSIS_SIGNAL_CONTROLS_REQUIRED", "An approved review must define both true and false signals.")

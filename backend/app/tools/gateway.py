@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import DomainError
 from app.models.challenge import Challenge
-from app.models.multi_agent import AnalysisReview, EvidenceLedger, VerifiedFact
+from app.models.multi_agent import AnalysisReview, ApprovedAction, EvidenceLedger, VerifiedFact
 from app.models.run import (
     AgentTurn,
     Artifact,
@@ -41,6 +41,13 @@ from app.tools.policy import enforce_tool_policy
 from app.tools.registry import load_tool_definitions
 
 _SECRET_KEYS = {"token", "password", "passwd", "secret", "api_key", "authorization", "cookie", "set-cookie"}
+
+
+def is_recon_sql_payload(arguments: dict) -> bool:
+    """Detect SQL exploit syntax before a Recon request reaches the Runner."""
+    flattened = json.dumps(arguments or {}, ensure_ascii=False, sort_keys=True).lower()
+    markers = ("1=1", "1 = 1", "1%3d1", "1=2", "1 = 2", "union select", "union+select", "select%20", "boolean extraction", "sqlite_master")
+    return any(marker in flattened for marker in markers)
 
 
 def _redact_arguments(value):
@@ -132,6 +139,7 @@ class ToolGateway:
         agent_task_id: str | None = None,
         agent_role: str | None = None,
         task_lease_token: str | None = None,
+        approved_action_id: str | None = None,
     ) -> dict:
         definition = load_tool_definitions().get(name)
         if not definition or not definition.enabled:
@@ -142,7 +150,9 @@ class ToolGateway:
         # short-lived execution stages.  Only terminal/explicit pause states
         # are rejected here; attempt/lease freshness is checked in one place.
         coordinated = await tool_invocation_coordinator.validate(
-            session, run, agent_task_id=agent_task_id, task_lease_token=task_lease_token, tool_name=name
+            session, run, agent_task_id=agent_task_id, task_lease_token=task_lease_token,
+            tool_name=name, agent_role=agent_role, approved_action_id=approved_action_id,
+            arguments=arguments,
         )
         if agent_task_id and agent_role and coordinated["task"].agent_role != agent_role:
             raise DomainError("AGENT_SCOPE_INVALID", "The task role does not match the tool-call scope.", {"agent_task_id": agent_task_id, "agent_role": agent_role}, 403)
@@ -183,6 +193,13 @@ class ToolGateway:
                 await session.commit()
                 raise DomainError("SCRIPT_TARGET_NETWORK_UNAVAILABLE", run.last_error_message, {"status": run.status}, 503, stage="NETWORK_POLICY", retryable=False)
         arguments = adapt_arguments(name, arguments, challenge)
+        if agent_task_id and agent_role == "RECON":
+            if is_recon_sql_payload(arguments):
+                raise DomainError(
+                    "RECON_ACTION_OUT_OF_SCOPE",
+                    "Recon may establish HTTP and business baselines but may not execute SQL injection experiments.",
+                    {"agent_task_id": agent_task_id, "redirect": "PLANNER_EXPLOIT_PROPOSAL"}, 422,
+                )
         try:
             arguments = definition.validate_arguments(arguments)
         except DomainError as error:
@@ -257,8 +274,15 @@ class ToolGateway:
             effective_tool_name=name,
             turn_id=turn_id,
             agent_task_id=agent_task_id,
+            approved_action_id=approved_action_id,
+            agent_role=agent_role,
+            task_lease_token=task_lease_token,
         )
         session.add(call)
+        if approved_action_id:
+            approved = await session.get(ApprovedAction, approved_action_id)
+            if approved is not None:
+                approved.used_logical_calls = int(approved.used_logical_calls or 0) + 1
         await session.commit()
         await session.refresh(call)
         lease = await session.scalar(select(RunExecutionLease).where(RunExecutionLease.run_id == run.id))

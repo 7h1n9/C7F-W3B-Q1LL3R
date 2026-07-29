@@ -232,9 +232,10 @@ class CodexSdkEngine(SolveEngine):
                 yield event
             return
         try:
+            controller_prompt = message if self.scope.get("execution_mode") == "controller_tool_loop" else f"{message} {self._campaign_prompt()}{CODEX_CONTROL_PROTOCOL}"
             async for event in self._stream_events(
                 f"{self.bridge_url}/threads/{thread_id}/run",
-                {"prompt": f"{message} {self._campaign_prompt()}{CODEX_CONTROL_PROTOCOL}"},
+                {"prompt": controller_prompt},
             ):
                 yield event
         except httpx.HTTPStatusError as error:

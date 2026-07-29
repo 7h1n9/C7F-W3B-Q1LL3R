@@ -66,7 +66,10 @@ export class CodexService {
   async *stream(threadId: string, prompt: string): AsyncGenerator<BridgeEvent> {
     const thread = this.threads.get(threadId);
     if (!thread) throw new Error("THREAD_NOT_FOUND");
-    const guardedPrompt = `${prompt}\n\n[EXECUTION BOUNDARY]\nUse the installed ctfctl MCP tools exclusively for workspace and target operations. Do not use direct shell, command_execution, node repl, web_search, curl, Invoke-WebRequest, localhost/backend API calls, source-code browsing outside the current Run Workspace, or create other Runs. ctfctl.workspace_write_note may only edit notes/, scripts/, and final/.`;
+    const scope = this.scopes.get(threadId);
+    const guardedPrompt = scope?.execution_mode === "controller_tool_loop"
+      ? `${prompt}\n\n[CONTROLLER TOOL LOOP]\nThis is one bounded model turn. Do not call any tool, MCP server, shell, web search, or command execution. Return only the requested JSON contract/action; the Controller will execute at most one approved tool action after this turn.`
+      : `${prompt}\n\n[EXECUTION BOUNDARY]\nUse the installed ctfctl MCP tools exclusively for workspace and target operations. Do not use direct shell, command_execution, node repl, web_search, curl, Invoke-WebRequest, localhost/backend API calls, source-code browsing outside the current Run Workspace, or create other Runs. ctfctl.workspace_write_note may only edit notes/, scripts/, and final/.`;
     const streamed = await thread.runStreamed(guardedPrompt);
     for await (const event of streamed.events) {
       for (const bridgeEvent of threadEventsToBridgeEvents(event)) yield bridgeEvent;
@@ -146,6 +149,7 @@ export class CodexService {
   private createRealThread(input: ThreadRequest): SdkThread {
     const scope = normalizeScope(input);
     const mcpLaunch = resolveCtfctlMcpLaunch();
+    const controllerToolLoop = scope.execution_mode === "controller_tool_loop";
     // SDK 0.144.1 exposes MCP registration through Codex.config, which it
     // serializes into native CLI configuration. The scope is supplied as
     // subprocess environment, never through model-visible prompt text.
@@ -164,7 +168,7 @@ export class CodexService {
       } : {
         mcp_servers: {
           ctfctl: {
-            enabled: true,
+            enabled: !controllerToolLoop,
             // Keep the SDK turn alive when the native CLI rejects a malformed
             // optional catalog entry during MCP startup.  Backend scope and
             // gateway policy still enforce every actual ctfctl invocation.
@@ -223,7 +227,7 @@ export function resolveCtfctlMcpLaunch(): { command: string; args: string[] } {
   throw new Error("CTFCTL_MCP_ENTRYPOINT_NOT_FOUND");
 }
 
-type CtfctlScope = { run_id: string; challenge_id: string; workspace_root: string; allowed_hosts: string[]; attempt_id: string; lease_token: string; master_lease_token?: string; mcp_required?: boolean; thread_id?: string; model_turn_id?: string; turn_id?: string; agent_task_id?: string; agent_role?: string; task_lease_token?: string; allowed_tools?: string[] };
+type CtfctlScope = { run_id: string; challenge_id: string; workspace_root: string; allowed_hosts: string[]; attempt_id: string; lease_token: string; master_lease_token?: string; mcp_required?: boolean; thread_id?: string; model_turn_id?: string; turn_id?: string; agent_task_id?: string; agent_role?: string; task_lease_token?: string; allowed_tools?: string[]; execution_mode?: string };
 
 function normalizeScope(input: ThreadRequest): CtfctlScope {
   const raw = input.scope ?? {};
@@ -245,6 +249,7 @@ function normalizeScope(input: ThreadRequest): CtfctlScope {
     agent_role: typeof raw.agent_role === "string" ? raw.agent_role : undefined,
     task_lease_token: typeof raw.task_lease_token === "string" ? raw.task_lease_token : undefined,
     allowed_tools: Array.isArray(raw.allowed_tools) ? raw.allowed_tools.filter((item): item is string => typeof item === "string") : undefined,
+    execution_mode: typeof raw.execution_mode === "string" ? raw.execution_mode : undefined,
   };
 }
 

@@ -1,9 +1,7 @@
-"""Model-backed runtime for the five multi-agent roles.
+"""Controller-owned role execution.
 
-The controller owns leases and promotion.  This module owns only one thing:
-turning a leased task into a bounded model/tool interaction and returning a
-validated ``AgentTaskResultContract``.  The mock adapter is deliberately
-deterministic and is used by tests only.
+The model is deliberately reduced to a proposer of one structured action. It
+never receives MCP tools in this mode and it never owns the tool loop.
 """
 
 from __future__ import annotations
@@ -11,11 +9,11 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-import time
 import uuid
 from datetime import UTC, datetime
 from typing import Any
 
+from pydantic import TypeAdapter
 from sqlalchemy import func, select
 
 from app.engines.codex_bridge import CodexSdkEngine
@@ -28,9 +26,10 @@ from app.schemas.multi_agent import (
     AgentTaskKind,
     AgentTaskResultContract,
     AgentTaskStatus,
-    AnalysisDecision,
     AnalysisReviewContract,
     PlannerProposalContract,
+    RoleAction,
+    RoleFinishAction,
     TaskBudget,
 )
 from app.services.multi_agent import deterministic_controller
@@ -50,8 +49,12 @@ def _json_object(text: str) -> dict[str, Any] | None:
     return None
 
 
+def _errors(error: Exception) -> str:
+    return str(error)[:4000]
+
+
 class RoleAgentRuntime:
-    """Execute one leased role task with model and tool scope enforcement."""
+    """Execute Planner/Analysis contracts and one-action role turns."""
 
     def __init__(self, engine: object | None = None, tool_invoker=None) -> None:
         self.engine = engine
@@ -66,64 +69,61 @@ class RoleAgentRuntime:
     async def _new_turn(self, session, run: SolveRun, task: AgentTask, prompt: str) -> AgentTurn:
         step = int(await session.scalar(select(func.max(AgentTurn.step_number)).where(AgentTurn.run_id == run.id)) or 0) + 1
         turn = AgentTurn(
-            run_id=run.id,
-            agent_task_id=task.id,
-            agent_role=task.agent_role,
-            step_number=step,
-            model_config_id=run.model_config_id,
-            action_protocol="json_schema" if run.engine_type != "codex_sdk" else "codex_sdk",
+            run_id=run.id, agent_task_id=task.id, agent_role=task.agent_role,
+            step_number=step, model_config_id=run.model_config_id,
+            action_protocol="role_action" if task.agent_role in {AgentRole.RECON.value, AgentRole.EXPLOIT.value, AgentRole.VERIFY.value} else "role_contract",
             prompt_hash=hashlib.sha256(prompt.encode("utf-8", "replace")).hexdigest(),
-            context_size_chars=len(prompt),
-            turn_started_at=datetime.now(UTC),
+            context_size_chars=len(prompt), turn_started_at=datetime.now(UTC),
             action_json={"task_kind": task.task_kind, "role": task.agent_role},
         )
         session.add(turn)
         await session.flush()
         run.active_turn_id = turn.id
+        await deterministic_controller.touch_task(session, task.id)
         await session.commit()
         return turn
 
-    async def _finish_turn(self, session, run: SolveRun, turn: AgentTurn, trace: dict[str, Any], action: dict[str, Any]) -> None:
+    async def _finish_turn(self, session, run: SolveRun, task: AgentTask, turn: AgentTurn, trace: dict[str, Any], action: dict[str, Any], *, parse_error: str | None = None) -> None:
         turn.latency_ms = trace.get("latency_ms")
         turn.input_tokens = trace.get("input_tokens")
         turn.output_tokens = trace.get("output_tokens")
         turn.provider_request_id = trace.get("provider_request_id") or trace.get("thread_id")
         turn.parse_attempts = int(trace.get("parse_attempts") or 1)
-        turn.parse_error_code = trace.get("parse_error_code")
+        turn.parse_error_code = parse_error or trace.get("parse_error_code")
         turn.response_excerpt_redacted = str(trace.get("response_excerpt") or trace.get("message") or "")[:2000]
         turn.action_json = action
         turn.turn_finished_at = datetime.now(UTC)
         if run.active_turn_id == turn.id:
             run.active_turn_id = None
+        await deterministic_controller.touch_task(session, task.id)
         run.run_total_agent_steps = int(run.run_total_agent_steps or 0) + 1
         run.attempt_agent_steps = int(run.attempt_agent_steps or 0) + 1
         await session.commit()
 
     def _prompt(self, task: AgentTask, policy: AgentRolePolicy, memory: dict, challenge: Challenge) -> str:
         context = {
-            "run_id": task.run_id,
-            "agent_task_id": task.id,
-            "role": task.agent_role,
-            "task_kind": task.task_kind,
-            "objective": task.objective,
+            "run_id": task.run_id, "agent_task_id": task.id, "role": task.agent_role,
+            "task_kind": task.task_kind, "objective": task.objective,
             "success_condition": task.success_condition,
             "stop_conditions": task.stop_conditions_json or [],
-            "allowed_tools": task.allowed_tools_json or [],
-            "task_context": task.context_json or {},
+            "allowed_tools": task.allowed_tools_json or [], "task_context": task.context_json or {},
             "memory": memory,
             "challenge": {"name": challenge.name, "description": challenge.description, "target_url": challenge.target_url, "allowed_hosts": challenge.allowed_hosts, "metadata": challenge.metadata_json or {}},
         }
-        output = {
-            "status": "COMPLETED|FAILED|BLOCKED|NEED_REPLAN",
-            "new_facts": [], "evidence_ids": [], "updated_hypotheses": [],
-            "accepted_solution_steps": [], "rejected_paths": [],
-            "failure_classification": None, "proposed_next_action": {}, "handoff_summary": "",
-        }
+        if task.agent_role == AgentRole.PLANNER.value:
+            schema = {"proposal": PlannerProposalContract.model_json_schema()}
+            instruction = "Output only PlannerProposalContract, either as the object itself or wrapped in {proposal: ...}. Do not output AgentTaskResult, status, new_facts, or proposed_next_action. allowed_tools must contain only exact names from the Controller catalog: http_request, content_discovery, sql_boolean_compare, oracle_probe_matrix, sqlite_metadata_discovery, boolean_config_extract, script_run, http_compare."
+        elif task.agent_role == AgentRole.ANALYSIS.value:
+            schema = {"review": AnalysisReviewContract.model_json_schema()}
+            instruction = "Output only AnalysisReviewContract, either as the object itself or wrapped in {review: ...}. task_kind must be PLAN_REVIEW or RESULT_REVIEW."
+        else:
+            schema = {"one_of": {"tool": {"type": "tool", "tool_name": "string", "arguments": "object", "purpose": "string", "expected_signal": "object", "stop_if": ["string"]}, "finish": {"type": "finish", "result": "AgentTaskResultContract"}}}
+            instruction = "Output exactly one RoleAction. A tool action is one tool request only; a finish action must contain the complete AgentTaskResultContract. Never call MCP, never emit multiple actions, and never do another role's work."
         return (
-            f"{policy.system_prompt}\nYou are the {task.agent_role} role in an authorized CTF run. "
-            "Use only the declared tools and never change lifecycle state. Every claim must cite durable evidence. "
-            "Return one JSON object matching the result envelope below; do not return markdown.\n"
-            f"RESULT_ENVELOPE={json.dumps(output, ensure_ascii=False)}\nCONTEXT={json.dumps(context, ensure_ascii=False, default=str)}"
+            f"{policy.system_prompt}\nYou are executing a bounded {task.agent_role} role task, not the whole CTF. "
+            "The Controller owns tools, evidence, facts, capabilities, leases, and lifecycle state. "
+            "Each model turn has one action. When the success condition, stop condition, or budget is met, output FinishAction.\n"
+            f"{instruction}\nSCHEMA={json.dumps(schema, ensure_ascii=False, default=str)}\nCONTEXT={json.dumps(context, ensure_ascii=False, default=str)}"
         )
 
     @staticmethod
@@ -141,164 +141,220 @@ class RoleAgentRuntime:
             "final_verification": task.agent_role == AgentRole.VERIFY.value,
         }
 
+    @staticmethod
+    def _failure(task_id: str, classification: str, reason: str, *, status: AgentTaskStatus = AgentTaskStatus.FAILED) -> AgentTaskResultContract:
+        return AgentTaskResultContract(
+            task_id=task_id, status=status,
+            failure_classification={"fingerprint": classification.lower(), "classification": classification, "retryable": classification != "MODEL_OUTPUT_SCHEMA_INVALID", "reason": reason, "next_allowed_condition": "repair the structured output or create a fresh bounded task"},
+            handoff_summary=reason,
+        )
+
     async def _mock(self, session, run: SolveRun, challenge: Challenge, attempt: RunAttempt, task: AgentTask, memory: dict, lease_token: str) -> tuple[AgentTaskResultContract, dict]:
         if task.agent_role == AgentRole.PLANNER.value:
-            evidence = list(memory.get("evidence_ids") or [])
-            approved = (task.context_json or {}).get("approved_review")
-            if memory.get("working_memory", {}).get("candidate_seen"):
-                next_agent, tools, objective = AgentRole.VERIFY, ["http_request"], "Freshly reproduce the unverified candidate with an independent request."
-            elif approved:
-                next_agent, tools, objective = AgentRole.EXPLOIT, list(approved.get("allowed_tools") or ["http_request"]), "Execute the analysis-approved bounded experiment."
-            elif evidence:
-                next_agent, tools, objective = AgentRole.ANALYSIS, ["http_request"], "Review the proposed experiment against evidence and controls."
-            else:
-                next_agent, tools, objective = AgentRole.RECON, ["http_request", "content_discovery"], "Establish a fresh authorized baseline and discover one entry surface."
             proposal = PlannerProposalContract(
-                proposal_id=f"PP-{uuid.uuid4().hex[:12]}", run_id=run.id, current_stage=str(memory.get("stage") or "INTAKE"),
-                decision_question="Which bounded next action most reduces the active uncertainty?", next_agent=next_agent,
-                objective=objective, input_fact_ids=list(memory.get("verified_fact_ids") or []), allowed_tools=tools,
-                budget=TaskBudget(max_logical_calls=max(1, len(tools)), max_internal_requests=8, max_runtime_seconds=120),
-                success_condition="produce a fresh evidence-backed handoff", stop_conditions=["stop after one discriminating result"],
+                proposal_id=f"PP-{uuid.uuid4().hex[:12]}", run_id=run.id,
+                current_stage=str(memory.get("stage") or "INTAKE"),
+                decision_question="What single bounded observation reduces the active uncertainty?",
+                next_agent=AgentRole.RECON if not memory.get("evidence_ids") else AgentRole.EXPLOIT,
+                objective="Discover the authorized HTTP surface." if not memory.get("evidence_ids") else "Execute the approved bounded experiment.",
+                input_fact_ids=list(memory.get("verified_fact_ids") or []),
+                allowed_tools=["http_request"], budget=TaskBudget(max_logical_calls=1, max_internal_requests=4, max_runtime_seconds=300),
+                success_condition="produce an evidence-backed handoff", stop_conditions=["stop after the approved experiment"],
             )
-            return AgentTaskResultContract(task_id=task.id, status=AgentTaskStatus.COMPLETED, proposed_next_action={"proposal": proposal.model_dump(mode="json")}, handoff_summary="Mock planner selected the next role from current memory."), {"provider_request_id": f"mock:{task.id}", "input_tokens": 1, "output_tokens": 1, "latency_ms": 0, "action": {"proposal": proposal.model_dump(mode="json")}}
+            return AgentTaskResultContract(task_id=task.id, status=AgentTaskStatus.COMPLETED, proposed_next_action={"proposal": proposal.model_dump(mode="json")}, handoff_summary="Mock Planner emitted a valid proposal."), {"provider_request_id": f"mock:{task.id}", "action": proposal.model_dump(mode="json")}
         if task.task_kind in {AgentTaskKind.PLAN_REVIEW.value, AgentTaskKind.RESULT_REVIEW.value}:
             proposal = (task.context_json or {}).get("proposal") or {}
-            evidence_ids = list(memory.get("evidence_ids") or [])
-            approved = bool(evidence_ids and proposal.get("decision_question") and proposal.get("allowed_tools") and proposal.get("success_condition"))
-            review = AnalysisReviewContract(
-                proposal_id=str(proposal.get("proposal_id") or ""), task_kind="RESULT_REVIEW" if task.task_kind == AgentTaskKind.RESULT_REVIEW.value else "PLAN_REVIEW",
-                decision=AnalysisDecision.APPROVE if approved else AnalysisDecision.NEED_MORE_EVIDENCE,
-                confidence=85 if approved else 25, question_being_tested=str(proposal.get("decision_question") or "Can the proposed bounded action discriminate the active hypothesis?"),
-                supporting_evidence_ids=evidence_ids, independent_variable="request_parameters",
-                required_controls={"authorized_host": "challenge.allowed_hosts", "fresh_request": True},
-                expected_true_signal={"new_artifact": True}, expected_false_signal={"no_new_artifact": True},
-                recommended_tool=(proposal.get("allowed_tools") or [None])[0],
-                reason="Evidence, controls, and success criteria are explicit." if approved else "The proposal lacks an evidence-backed decision basis.",
-                audit_reason="mock structured review", approved_arguments=(task.context_json or {}).get("approved_arguments") or {},
-            )
-            return AgentTaskResultContract(task_id=task.id, status=AgentTaskStatus.COMPLETED, evidence_ids=evidence_ids, proposed_next_action={"review": review.model_dump(mode="json")}, handoff_summary=f"Mock analysis decision: {review.decision.value}."), {"provider_request_id": f"mock:{task.id}", "input_tokens": 1, "output_tokens": 1, "latency_ms": 0, "action": {"review": review.model_dump(mode="json")}}
+            review = AnalysisReviewContract(proposal_id=str(proposal.get("proposal_id") or ""), task_kind=task.task_kind, decision="APPROVE", confidence=90, question_being_tested=str(proposal.get("decision_question") or "bounded question"), independent_variable="request_arguments", required_controls={"fresh_request": True}, expected_true_signal={"new_artifact": True}, expected_false_signal={"different_response": True}, recommended_tool=(proposal.get("allowed_tools") or [None])[0], reason="Mock review approved the declared bounded action.", audit_reason="mock", approved_arguments=(task.context_json or {}).get("approved_arguments") or {}, next_phase="MAPPING")
+            return AgentTaskResultContract(task_id=task.id, status=AgentTaskStatus.COMPLETED, proposed_next_action={"review": review.model_dump(mode="json")}, handoff_summary="Mock Analysis emitted a valid review."), {"provider_request_id": f"mock:{task.id}", "action": review.model_dump(mode="json")}
+        # Mock still follows the controller loop shape: one tool followed by a finish.
         if self.tool_invoker is None:
             raise RuntimeError("ROLE_RUNTIME_TOOL_INVOKER_REQUIRED")
         tool_name = str((task.context_json or {}).get("tool") or (task.allowed_tools_json or ["http_request"])[0])
-        arguments = dict((task.context_json or {}).get("arguments") or self._baseline_request(challenge, task))
-        logical_id = f"mcp:{run.id}:{attempt.id}:agent-task:{task.id}:{uuid.uuid4().hex[:8]}"
-        result = await self.tool_invoker(session, run, challenge, tool_name, arguments, execution_layer="multi_agent", logical_tool_call_id=logical_id, agent_task_id=task.id, agent_role=task.agent_role, task_lease_token=lease_token)
-        status = AgentTaskStatus.COMPLETED if str(result.get("status") or "").upper() in {"COMPLETED", "SUCCEEDED", "SUCCESS"} else AgentTaskStatus.BLOCKED
-        failure = None if status == AgentTaskStatus.COMPLETED else {"fingerprint": f"{task.agent_role.lower()}-tool", "classification": "TOOL_FAILURE", "retryable": True, "reason": str(result.get("error") or result.get("summary") or "tool failed"), "next_allowed_condition": "choose a different bounded action"}
-        return AgentTaskResultContract(task_id=task.id, status=status, proposed_next_action={"tool": tool_name, "logical_tool_call_id": logical_id, "result": result}, failure_classification=failure, handoff_summary=f"{task.agent_role} tool loop returned {status.value}."), {"provider_request_id": f"mock:{task.id}", "input_tokens": 1, "output_tokens": 1, "latency_ms": 0, "action": {"tool": tool_name, "result": result}}
+        arguments = dict((task.context_json or {}).get("approved_arguments") or self._baseline_request(challenge, task))
+        result = await self.tool_invoker(session, run, challenge, tool_name, arguments, execution_layer="multi_agent", logical_tool_call_id=f"mcp:{run.id}:{attempt.id}:agent-task:{task.id}:{uuid.uuid4().hex[:8]}", agent_task_id=task.id, agent_role=task.agent_role, task_lease_token=lease_token, approved_action_id=(task.context_json or {}).get("approved_action_id"))
+        finish = AgentTaskResultContract(task_id=task.id, status=AgentTaskStatus.COMPLETED if str(result.get("status") or "").upper() == "COMPLETED" else AgentTaskStatus.PARTIAL, evidence_ids=[], handoff_summary="Mock role finished after the controller executed one action.")
+        if finish.status == AgentTaskStatus.PARTIAL:
+            finish = finish.model_copy(update={"failure_classification": {"fingerprint": "mock-tool-failure", "classification": "TOOL_FAILURE", "retryable": True, "reason": str(result.get("error") or result.get("summary") or "tool failed"), "next_allowed_condition": "replan"}})
+        return finish, {"provider_request_id": f"mock:{task.id}", "action": {"type": "finish", "result": finish.model_dump(mode="json")}}
 
-    async def _codex(self, session, run: SolveRun, challenge: Challenge, task: AgentTask, memory: dict, lease_token: str, prompt: str) -> tuple[AgentTaskResultContract, dict]:
-        base = self.engine
-        if not isinstance(base, CodexSdkEngine):
-            raise RuntimeError("CODEX_RUNTIME_ENGINE_REQUIRED")
-        scope = dict(base.scope)
-        scope.update({"agent_task_id": task.id, "agent_role": task.agent_role, "task_lease_token": lease_token, "allowed_tools": list(task.allowed_tools_json or []), "model_turn_id": run.active_turn_id, "turn_id": run.active_turn_id})
-        engine = CodexSdkEngine(base.bridge_url, base.workspace_path, scope=scope)
+    async def _bridge_turn(self, engine: CodexSdkEngine, run_id: str, prompt: str, *, continuation: bool = False) -> tuple[dict[str, Any], dict[str, Any]]:
         messages: list[str] = []
-        usage: dict[str, Any] = {}
-        thread_id = None
-        async for event in engine.start(run.id, prompt):
+        trace: dict[str, Any] = {}
+        stream = engine.continue_run(run_id, prompt) if continuation else engine.start(run_id, prompt)
+        async for event in stream:
             payload = event.payload or {}
             if event.event_type == "agent.message" and payload.get("message"):
                 messages.append(str(payload["message"]))
             if event.event_type == "agent.turn_completed":
-                usage = dict(payload.get("usage") or {})
-            thread_id = payload.get("thread_id") or thread_id
-        raw = _json_object(messages[-1] if messages else "") or {}
+                trace.update(payload.get("usage") or {})
+            trace["thread_id"] = payload.get("thread_id") or trace.get("thread_id")
+        return (_json_object(messages[-1] if messages else "") or {}), {**trace, "message": messages[-1] if messages else ""}
+
+    async def _contract_runtime(self, session, run: SolveRun, task: AgentTask, prompt: str) -> tuple[AgentTaskResultContract, dict[str, Any]]:
+        if isinstance(self.engine, OpenAICompatibleEngine):
+            schema = PlannerProposalContract.model_json_schema() if task.agent_role == AgentRole.PLANNER.value else AnalysisReviewContract.model_json_schema()
+            key = "proposal" if task.agent_role == AgentRole.PLANNER.value else "review"
+            raw = await self.engine.next_contract([{"role": "system", "content": prompt}], schema, name=f"{task.agent_role.lower()}_{task.task_kind.lower()}")
+            candidate = raw.get(key) or raw
+            try:
+                value = (PlannerProposalContract if key == "proposal" else AnalysisReviewContract).model_validate(candidate)
+                return AgentTaskResultContract(task_id=task.id, status=AgentTaskStatus.COMPLETED, proposed_next_action={key: value.model_dump(mode="json")}, handoff_summary=f"{task.agent_role} contract validated."), dict(self.engine.last_trace or {})
+            except Exception as error:
+                repair_prompt = f"The previous output was invalid for {task.agent_role} contract. Field errors:\n{_errors(error)}\nOutput only corrected JSON."
+                repair_turn = await self._new_turn(session, run, task, repair_prompt)
+                repaired = await self.engine.next_contract([{"role": "system", "content": repair_prompt}], schema, name=f"{task.agent_role.lower()}_{task.task_kind.lower()}_repair")
+                candidate = repaired.get(key) or repaired
+                try:
+                    value = (PlannerProposalContract if key == "proposal" else AnalysisReviewContract).model_validate(candidate)
+                    await self._finish_turn(session, run, task, repair_turn, dict(self.engine.last_trace or {}), {key: value.model_dump(mode="json")})
+                    return AgentTaskResultContract(task_id=task.id, status=AgentTaskStatus.COMPLETED, proposed_next_action={key: value.model_dump(mode="json")}, handoff_summary=f"{task.agent_role} contract validated after one repair."), dict(self.engine.last_trace or {})
+                except Exception as second:
+                    await self._finish_turn(session, run, task, repair_turn, dict(self.engine.last_trace or {}), {"raw": repaired}, parse_error="MODEL_OUTPUT_SCHEMA_INVALID")
+                    return self._failure(task.id, "MODEL_OUTPUT_SCHEMA_INVALID", f"Role contract remained invalid after repair: {_errors(second)}"), {"parse_error_code": "MODEL_OUTPUT_SCHEMA_INVALID", "parse_attempts": 2}
+        if not isinstance(self.engine, CodexSdkEngine):
+            raise RuntimeError("ROLE_CONTRACT_ENGINE_REQUIRED")
+        scope = dict(self.engine.scope)
+        scope.update({"execution_mode": "controller_tool_loop", "agent_task_id": task.id, "agent_role": task.agent_role, "allowed_tools": [], "task_lease_token": task.lease_token})
+        engine = CodexSdkEngine(self.engine.bridge_url, self.engine.workspace_path, scope=scope)
+        raw, trace = await self._bridge_turn(engine, run.id, prompt)
         if task.agent_role == AgentRole.PLANNER.value:
             candidate = raw.get("proposal") or raw
             try:
-                proposal = PlannerProposalContract.model_validate(candidate)
-            except Exception:
-                proposal = None
-            if proposal:
-                result = AgentTaskResultContract(task_id=task.id, status=AgentTaskStatus.COMPLETED, proposed_next_action={"proposal": proposal.model_dump(mode="json")}, handoff_summary="Codex Planner returned a validated proposal.")
-            else:
-                result = AgentTaskResultContract(task_id=task.id, status=AgentTaskStatus.NEED_REPLAN, proposed_next_action={"raw": raw}, handoff_summary="Codex Planner output was not a valid proposal.")
-        elif task.task_kind in {AgentTaskKind.PLAN_REVIEW.value, AgentTaskKind.RESULT_REVIEW.value}:
-            candidate = raw.get("review") or raw
-            try:
-                review = AnalysisReviewContract.model_validate(candidate)
-                result = AgentTaskResultContract(task_id=task.id, status=AgentTaskStatus.COMPLETED, proposed_next_action={"review": review.model_dump(mode="json")}, handoff_summary="Codex Analysis returned a validated review.")
-            except Exception:
-                result = AgentTaskResultContract(task_id=task.id, status=AgentTaskStatus.NEED_REPLAN, proposed_next_action={"raw": raw}, handoff_summary="Codex Analysis output was not a valid review.")
-        else:
-            result = self._normalize_result(task.id, raw, messages[-1] if messages else "")
-        return result, {"provider_request_id": thread_id, "thread_id": thread_id, "input_tokens": usage.get("input_tokens"), "output_tokens": usage.get("output_tokens"), "latency_ms": None, "message": messages[-1] if messages else "", "action": result.proposed_next_action}
-
-    @staticmethod
-    def _normalize_result(task_id: str, raw: dict[str, Any], message: str) -> AgentTaskResultContract:
-        """Keep provider drift inside the adapter and preserve the audit trail."""
+                value = PlannerProposalContract.model_validate(candidate)
+                return AgentTaskResultContract(task_id=task.id, status=AgentTaskStatus.COMPLETED, proposed_next_action={"proposal": value.model_dump(mode="json")}, handoff_summary="PlannerProposalContract validated."), trace
+            except Exception as error:
+                repair_prompt = f"Your previous output did not satisfy PlannerProposalContract. Field errors:\n{_errors(error)}\nOutput only corrected JSON; no explanation or Markdown."
+                repair_turn = await self._new_turn(session, run, task, repair_prompt)
+                repaired, repair_trace = await self._bridge_turn(engine, run.id, repair_prompt, continuation=True)
+                candidate = repaired.get("proposal") or repaired
+                try:
+                    value = PlannerProposalContract.model_validate(candidate)
+                    repair_trace["parse_attempts"] = 2
+                    return AgentTaskResultContract(task_id=task.id, status=AgentTaskStatus.COMPLETED, proposed_next_action={"proposal": value.model_dump(mode="json")}, handoff_summary="PlannerProposalContract validated after one repair."), repair_trace
+                except Exception as second:
+                    await self._finish_turn(session, run, task, repair_turn, repair_trace, {"raw": repaired}, parse_error="MODEL_OUTPUT_SCHEMA_INVALID")
+                    return self._failure(task.id, "MODEL_OUTPUT_SCHEMA_INVALID", f"Planner output remained invalid after one repair: {_errors(second)}"), {**trace, "parse_attempts": 2, "parse_error_code": "MODEL_OUTPUT_SCHEMA_INVALID"}
+        candidate = raw.get("review") or raw
         try:
-            return AgentTaskResultContract.model_validate({"task_id": task_id, **raw})
-        except Exception:
-            raw_status = str(raw.get("status") or "NEED_REPLAN").upper()
+            value = AnalysisReviewContract.model_validate(candidate)
+            return AgentTaskResultContract(task_id=task.id, status=AgentTaskStatus.COMPLETED, proposed_next_action={"review": value.model_dump(mode="json")}, handoff_summary="AnalysisReviewContract validated."), trace
+        except Exception as error:
+            repair_prompt = f"Your previous output did not satisfy AnalysisReviewContract. Field errors:\n{_errors(error)}\nOutput only corrected JSON; no explanation or Markdown."
+            repair_turn = await self._new_turn(session, run, task, repair_prompt)
+            repaired, repair_trace = await self._bridge_turn(engine, run.id, repair_prompt, continuation=True)
+            candidate = repaired.get("review") or repaired
             try:
-                status = AgentTaskStatus(raw_status)
-            except ValueError:
-                status = AgentTaskStatus.NEED_REPLAN
+                value = AnalysisReviewContract.model_validate(candidate)
+                repair_trace["parse_attempts"] = 2
+                return AgentTaskResultContract(task_id=task.id, status=AgentTaskStatus.COMPLETED, proposed_next_action={"review": value.model_dump(mode="json")}, handoff_summary="AnalysisReviewContract validated after one repair."), repair_trace
+            except Exception as second:
+                await self._finish_turn(session, run, task, repair_turn, repair_trace, {"raw": repaired}, parse_error="MODEL_OUTPUT_SCHEMA_INVALID")
+                return self._failure(task.id, "MODEL_OUTPUT_SCHEMA_INVALID", f"Analysis output remained invalid after one repair: {_errors(second)}"), {**trace, "parse_attempts": 2, "parse_error_code": "MODEL_OUTPUT_SCHEMA_INVALID"}
 
-            def objects(value: Any) -> list[dict[str, Any]]:
-                if not isinstance(value, list):
-                    return []
-                return [item if isinstance(item, dict) else {"summary": str(item)[:2000]} for item in value]
+    async def _role_action(self, engine: object, messages: list[dict[str, Any]]) -> tuple[RoleAction, dict[str, Any]]:
+        if isinstance(engine, OpenAICompatibleEngine):
+            action = await engine.next_role_action(messages)
+            return action, dict(engine.last_trace or {})
+        raise RuntimeError("ROLE_ACTION_ENGINE_REQUIRED")
 
-            failure = raw.get("failure_classification")
-            if status in {AgentTaskStatus.FAILED, AgentTaskStatus.BLOCKED} and not isinstance(failure, dict):
-                failure = {"fingerprint": "model-output-normalized", "classification": "MODEL_OUTPUT_SCHEMA_DRIFT", "retryable": True, "reason": "Provider returned a non-contract result shape.", "next_allowed_condition": "retry or replan with the same durable evidence"}
-            if status == AgentTaskStatus.NEED_REPLAN:
-                failure = None
-            return AgentTaskResultContract(
-                task_id=task_id, status=status, new_facts=objects(raw.get("new_facts")),
-                updated_hypotheses=objects(raw.get("updated_hypotheses")),
-                accepted_solution_steps=objects(raw.get("accepted_solution_steps")),
-                rejected_paths=objects(raw.get("rejected_paths")), evidence_ids=[str(item) for item in raw.get("evidence_ids") or []],
-                failure_classification=failure, proposed_next_action=raw.get("proposed_next_action") if isinstance(raw.get("proposed_next_action"), dict) else {"raw": raw},
-                handoff_summary=str(raw.get("handoff_summary") or message or "Provider result was normalized by the role adapter.")[:4000],
-            )
+    async def _codex_action(self, engine: CodexSdkEngine, run_id: str, prompt: str, *, continuation: bool) -> tuple[RoleAction, dict[str, Any]]:
+        raw, trace = await self._bridge_turn(engine, run_id, prompt, continuation=continuation)
+        return TypeAdapter(RoleAction).validate_python(raw), trace
 
-    async def _openai(self, session, run: SolveRun, challenge: Challenge, attempt: RunAttempt, task: AgentTask, memory: dict, lease_token: str, prompt: str) -> tuple[AgentTaskResultContract, dict]:
-        if not isinstance(self.engine, OpenAICompatibleEngine):
-            raise RuntimeError("OPENAI_RUNTIME_ENGINE_REQUIRED")
-        messages = [{"role": "system", "content": prompt}]
-        last_action: Any = None
+    async def _execution_loop(self, session, run: SolveRun, challenge: Challenge, attempt: RunAttempt, task: AgentTask, memory: dict, lease_token: str, prompt: str) -> tuple[AgentTaskResultContract, dict[str, Any]]:
+        messages: list[dict[str, Any]] = [{"role": "system", "content": prompt}]
         trace: dict[str, Any] = {}
-        for _ in range(min(4, max(1, int((task.budget_json or {}).get("max_internal_requests", 1))))):
-            turn = await self._new_turn(session, run, task, json.dumps(messages, ensure_ascii=False))
-            started = time.perf_counter()
-            action = await self.engine.next_action(messages)
-            trace = dict(self.engine.last_trace or {})
-            trace.setdefault("latency_ms", round((time.perf_counter() - started) * 1000))
-            await self._finish_turn(session, run, turn, trace, action.model_dump(mode="json"))
-            last_action = action
-            if getattr(action, "type", "") != "tool":
-                break
+        continuation = False
+        engine = self.engine
+        if isinstance(engine, CodexSdkEngine):
+            scope = dict(engine.scope)
+            scope.update({"execution_mode": "controller_tool_loop", "agent_task_id": task.id, "agent_role": task.agent_role, "allowed_tools": [], "task_lease_token": lease_token})
+            engine = CodexSdkEngine(engine.bridge_url, engine.workspace_path, scope=scope)
+        max_turns = max(1, int((task.budget_json or {}).get("max_internal_requests", 1)))
+        used_calls = 0
+        for _ in range(max_turns):
+            turn_prompt = prompt if not continuation else "Tool execution is complete for this step. Review the compact result below and output exactly one next RoleAction."
+            if continuation:
+                messages.append({"role": "user", "content": turn_prompt})
+            turn = await self._new_turn(session, run, task, json.dumps(messages, ensure_ascii=False, default=str))
+            try:
+                if isinstance(engine, CodexSdkEngine):
+                    action, action_trace = await self._codex_action(engine, run.id, turn_prompt + "\n" + json.dumps(messages[-1], ensure_ascii=False, default=str), continuation=continuation)
+                else:
+                    action, action_trace = await self._role_action(engine, messages)
+                trace = action_trace
+                await self._finish_turn(session, run, task, turn, trace, action.model_dump(mode="json"))
+            except Exception as error:
+                await self._finish_turn(session, run, task, turn, {"response_excerpt": str(error)}, {}, parse_error="ROLE_ACTION_SCHEMA_INVALID")
+                return self._failure(task.id, "MODEL_OUTPUT_SCHEMA_INVALID", f"RoleAction was invalid: {_errors(error)}"), {"parse_error_code": "ROLE_ACTION_SCHEMA_INVALID"}
+            if isinstance(action, RoleFinishAction):
+                return action.result, trace
             if action.tool_name not in (task.allowed_tools_json or []):
-                return AgentTaskResultContract(task_id=task.id, status=AgentTaskStatus.BLOCKED, failure_classification={"fingerprint": "role-tool-scope", "classification": "POLICY_BLOCK", "retryable": False, "reason": f"{action.tool_name} is outside the task contract", "next_allowed_condition": "planner must declare the tool"}, handoff_summary="Model selected a tool outside its task scope."), trace
-            result = await self.tool_invoker(session, run, challenge, action.tool_name, action.arguments, execution_layer="multi_agent", logical_tool_call_id=f"mcp:{run.id}:{attempt.id}:agent-task:{task.id}:{uuid.uuid4().hex[:8]}", agent_task_id=task.id, agent_role=task.agent_role, task_lease_token=lease_token)
-            messages.extend([{"role": "assistant", "content": json.dumps(action.model_dump(mode="json"), ensure_ascii=False)}, {"role": "user", "content": json.dumps({"tool_result": result}, ensure_ascii=False, default=str)}])
-        if task.agent_role == AgentRole.PLANNER.value:
-            proposal = _json_object(getattr(last_action, "summary", "") or "") or {}
-            return AgentTaskResultContract(task_id=task.id, status=AgentTaskStatus.NEED_REPLAN, proposed_next_action={"raw": proposal}, handoff_summary="OpenAI Planner must return a proposal object in its final JSON."), trace
-        return AgentTaskResultContract(task_id=task.id, status=AgentTaskStatus.COMPLETED, proposed_next_action={"action": last_action.model_dump(mode="json") if last_action else {}}, handoff_summary="OpenAI role turn completed."), trace
+                return self._failure(task.id, "ROLE_TOOL_SCOPE_INVALID", f"{action.tool_name} is outside the task contract", status=AgentTaskStatus.NEED_REPLAN), trace
+            if self.tool_invoker is None:
+                raise RuntimeError("ROLE_RUNTIME_TOOL_INVOKER_REQUIRED")
+            approved_id = (task.context_json or {}).get("approved_action_id")
+            result = await self.tool_invoker(session, run, challenge, action.tool_name, action.arguments, execution_layer="multi_agent", logical_tool_call_id=f"mcp:{run.id}:{attempt.id}:agent-task:{task.id}:{uuid.uuid4().hex[:8]}", agent_task_id=task.id, agent_role=task.agent_role, task_lease_token=lease_token, approved_action_id=approved_id)
+            await deterministic_controller.touch_task(session, task.id)
+            compact = {"tool": action.tool_name, "status": result.get("status"), "summary": result.get("summary"), "error_code": result.get("error_code"), "model_view": result.get("model_view"), "artifact_id": result.get("artifact_id"), "observation_id": result.get("observation_id")}
+            messages.extend([{"role": "assistant", "content": json.dumps(action.model_dump(mode="json"), ensure_ascii=False)}, {"role": "user", "content": json.dumps({"tool_result": compact}, ensure_ascii=False, default=str)}])
+            continuation = True
+            used_calls += 1
+            if used_calls >= int((task.budget_json or {}).get("max_logical_calls", 0)):
+                break
+        # Budget/success boundary: one finalizer turn with no tools in scope.
+        finalizer_prompt = "工具执行阶段已经结束。不得再调用任何工具。仅依据以下 Task、Tool Result、Evidence 和 Artifact 摘要输出 RoleFinishAction。\n" + json.dumps(messages[-2:], ensure_ascii=False, default=str)
+        final_turn = await self._new_turn(session, run, task, finalizer_prompt)
+        try:
+            if isinstance(engine, CodexSdkEngine):
+                action, final_trace = await self._codex_action(engine, run.id, finalizer_prompt, continuation=True)
+            else:
+                action, final_trace = await self._role_action(engine, [{"role": "system", "content": finalizer_prompt}])
+            if not isinstance(action, RoleFinishAction):
+                raise ValueError("finalizer returned a tool action")
+            await self._finish_turn(session, run, task, final_turn, final_trace, action.model_dump(mode="json"))
+            return action.result, final_trace
+        except Exception as error:
+            await self._finish_turn(session, run, task, final_turn, {"response_excerpt": str(error)}, {}, parse_error="FINALIZER_SCHEMA_INVALID")
+            repair_prompt = finalizer_prompt + "\nThe previous finalizer output was invalid. Output only a valid RoleFinishAction JSON; do not call tools."
+            repair_turn = await self._new_turn(session, run, task, repair_prompt)
+            try:
+                if isinstance(engine, CodexSdkEngine):
+                    repaired, repair_trace = await self._codex_action(engine, run.id, repair_prompt, continuation=True)
+                else:
+                    repaired, repair_trace = await self._role_action(engine, [{"role": "system", "content": repair_prompt}])
+                if not isinstance(repaired, RoleFinishAction):
+                    raise ValueError("finalizer repair returned a tool action")
+                await self._finish_turn(session, run, task, repair_turn, repair_trace, repaired.model_dump(mode="json"))
+                return repaired.result, repair_trace
+            except Exception as second:
+                await self._finish_turn(session, run, task, repair_turn, {"response_excerpt": str(second)}, {}, parse_error="FINALIZER_SCHEMA_INVALID")
+                return self._failure(task.id, "FINALIZER_SCHEMA_INVALID", "Finalizer remained invalid after one schema repair.", status=AgentTaskStatus.PARTIAL), {"parse_error_code": "FINALIZER_SCHEMA_INVALID", "repair_error": str(second)[:1000]}
 
     async def execute(self, session, run: SolveRun, challenge: Challenge, attempt: RunAttempt, task: AgentTask, lease_token: str) -> AgentTaskResultContract:
         policy = await self._policy(session, task)
         memory = await deterministic_controller.memory.read_for_role(session, run.id, task.agent_role)
         prompt = self._prompt(task, policy, memory, challenge)
+        await deterministic_controller.touch_task(session, task.id)
         if run.engine_type == "codex_sdk":
             turn = await self._new_turn(session, run, task, prompt)
             try:
-                result, trace = await asyncio.wait_for(self._codex(session, run, challenge, task, memory, lease_token, prompt), timeout=max(10, int(task.timeout_seconds or 120)))
+                if task.agent_role in {AgentRole.PLANNER.value, AgentRole.ANALYSIS.value}:
+                    result, trace = await asyncio.wait_for(self._contract_runtime(session, run, task, prompt), timeout=max(10, int((task.budget_json or {}).get("max_runtime_seconds", 300))))
+                else:
+                    # The execution loop creates its own AgentTurn rows. Close
+                    # the bootstrap marker without treating it as a model turn.
+                    await self._finish_turn(session, run, task, turn, {"message": "controller loop started"}, {"execution_mode": "controller_tool_loop"})
+                    return (await asyncio.wait_for(self._execution_loop(session, run, challenge, attempt, task, memory, lease_token, prompt), timeout=max(10, int((task.budget_json or {}).get("max_runtime_seconds", 300)))))[0]
             except asyncio.TimeoutError:
-                result = AgentTaskResultContract(task_id=task.id, status=AgentTaskStatus.BLOCKED, failure_classification={"fingerprint": "codex-role-timeout", "classification": "MODEL_TIMEOUT", "retryable": True, "reason": "Codex role turn exceeded its leased task timeout", "next_allowed_condition": "retry with a fresh role thread"}, handoff_summary="Codex role turn timed out; controller may replan.")
-                trace = {"parse_error_code": "ROLE_MODEL_TIMEOUT", "response_excerpt": "", "latency_ms": int(task.timeout_seconds or 120) * 1000}
-            await self._finish_turn(session, run, turn, trace, result.proposed_next_action)
+                result, trace = self._failure(task.id, "ROLE_IDLE_TIMEOUT", "Role task exceeded its active deadline.", status=AgentTaskStatus.PARTIAL), {"parse_error_code": "ROLE_IDLE_TIMEOUT"}
+            await self._finish_turn(session, run, task, turn, trace, result.proposed_next_action)
             return result
         if run.engine_type == "openai_compatible":
-            result, _ = await self._openai(session, run, challenge, attempt, task, memory, lease_token, prompt)
-            return result
+            if task.agent_role in {AgentRole.PLANNER.value, AgentRole.ANALYSIS.value}:
+                raise RuntimeError("OPENAI_ROLE_CONTRACT_NOT_CONFIGURED")
+            return (await self._execution_loop(session, run, challenge, attempt, task, memory, lease_token, prompt))[0]
         turn = await self._new_turn(session, run, task, prompt)
         result, trace = await self._mock(session, run, challenge, attempt, task, memory, lease_token)
-        await self._finish_turn(session, run, turn, trace, result.proposed_next_action)
+        await self._finish_turn(session, run, task, turn, trace, result.proposed_next_action)
         return result

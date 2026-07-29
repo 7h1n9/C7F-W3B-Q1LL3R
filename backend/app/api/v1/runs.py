@@ -541,12 +541,17 @@ async def start_run(run_id: str, session: AsyncSession = Depends(get_session)) -
         and bool(run.recovery_checkpoint_json.get("next_required_action"))
         and run.current_phase == "FLAG_SEARCH"
     )
-    if run.status not in {RunStatus.CREATED, RunStatus.PAUSED_RECOVERY, RunStatus.PAUSED_DEPLOYMENT, RunStatus.PAUSED_CHECKPOINT, RunStatus.WAITING_CONFIGURATION} and not checkpoint_recovery:
+    recoverable_planning = run.status in {RunStatus.PLANNING, RunStatus.ANALYZING, RunStatus.EVALUATING} and bool(run.last_error_code)
+    if run.status not in {RunStatus.CREATED, RunStatus.PAUSED_RECOVERY, RunStatus.PAUSED_DEPLOYMENT, RunStatus.PAUSED_CHECKPOINT, RunStatus.WAITING_CONFIGURATION} and not checkpoint_recovery and not recoverable_planning:
         raise DomainError(
             "RUN_INVALID_STATE",
             "Only created or controller-recoverable runs can be started.",
             {"current_state": run.status},
         )
+    if recoverable_planning or run.status in {RunStatus.PAUSED_RECOVERY, RunStatus.PAUSED_CHECKPOINT}:
+        run.last_error_code = None
+        run.last_error_message = None
+        await session.commit()
     if run.status == RunStatus.PAUSED_CHECKPOINT and run.started_at:
         started_at = run.started_at.replace(tzinfo=UTC) if run.started_at.tzinfo is None else run.started_at
         if (datetime.now(UTC) - started_at).total_seconds() >= run.max_total_runtime_seconds:

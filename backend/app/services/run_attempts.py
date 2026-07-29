@@ -222,16 +222,13 @@ class RunAttemptService:
                 if expired or stale_owner:
                     attempt = await session.get(RunAttempt, lease.attempt_id)
                     if attempt and attempt.status == "RUNNING":
-                        attempt.status = "PAUSED_DEPLOYMENT" if stale_owner and not expired else "ABORTED"
-                        attempt.error_code = "PAUSED_DEPLOYMENT" if stale_owner and not expired else "PROCESS_INTERRUPTED"
+                        attempt.status = "ABORTED"
+                        attempt.error_code = "SERVICE_RESTART_INTERRUPTED_TASK" if stale_owner and not expired else "PROCESS_INTERRUPTED"
                         attempt.finished_at = now
-                        if not (stale_owner and not expired):
-                            aborted_attempts += 1
+                        aborted_attempts += 1
                         if run and stale_owner and not expired and RunStatus(run.status) not in TERMINAL:
-                            run.status = RunStatus.PAUSED_DEPLOYMENT.value
-                            # Keep the last solver phase; PAUSED_DEPLOYMENT is
-                            # represented exclusively by Run.status.
-                            await event_service.append(session, run.id, "run.paused_deployment", {"code": "PAUSED_DEPLOYMENT"})
+                            run.status = RunStatus.PAUSED_RECOVERY.value
+                            await event_service.append(session, run.id, "run.paused_recovery", {"classification": "SERVICE_RESTART_INTERRUPTED_TASK", "retryable": True})
                 # Tickets reference the lease by foreign key.  Reconcile
                 # stale leases in dependency order so one orphaned ticket
                 # cannot abort backend startup before the health endpoint is

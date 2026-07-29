@@ -295,6 +295,9 @@ class ToolCall(UUIDTimestampMixin, Base):
     effective_tool_name: Mapped[str | None] = mapped_column(String(120))
     turn_id: Mapped[str | None] = mapped_column(String(36), index=True)
     agent_task_id: Mapped[str | None] = mapped_column(ForeignKey("agent_tasks.id"), index=True)
+    approved_action_id: Mapped[str | None] = mapped_column(ForeignKey("approved_actions.id"), index=True)
+    agent_role: Mapped[str | None] = mapped_column(String(30), index=True)
+    task_lease_token: Mapped[str | None] = mapped_column(String(120))
 
 
 class LogicalToolCall(UUIDTimestampMixin, Base):
