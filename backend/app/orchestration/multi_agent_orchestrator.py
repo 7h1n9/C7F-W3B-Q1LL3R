@@ -2297,10 +2297,7 @@ class MultiAgentOrchestrator:
                                 arguments = json.loads(arguments)
                         if isinstance(arguments, dict) and arguments.get("test_field"):
                             tested_fields.add(str(arguments["test_field"]))
-                    if declared_fields and declared_fields <= tested_fields:
-                        run.current_phase = "TESTING"
-                        if state_after_review is not None:
-                            state_after_review.current_phase = "TESTING"
+                    if self._asset_warranty_mysql(challenge) and declared_fields and declared_fields <= tested_fields:
                         run.last_error_code = "MYSQL_PREDICATE_NOT_CONFIRMED"
                         run.last_error_message = "All declared business fields produced no stable TRUE/FALSE Boolean Oracle differential."
                         run.recovery_checkpoint_json = {
@@ -2311,9 +2308,10 @@ class MultiAgentOrchestrator:
                             "declared_fields": sorted(declared_fields),
                             "tool_call_ids": [item.id for item in completed_calls],
                         }
-                        await self._status(session, run, RunStatus.PAUSED_CHECKPOINT)
-                        await session.commit()
-                        return {"status": run.status, "current_phase": "TESTING", "error_code": run.last_error_code, "boolean_oracle_failed": True}
+                        await run_finalizer.finish_unsolved_with_wp(
+                            session, run, "MYSQL_PREDICATE_NOT_CONFIRMED: all declared business fields were tested without a stable Boolean Oracle."
+                        )
+                        return {"status": run.status, "current_phase": "REPORTING", "error_code": run.last_error_code, "boolean_oracle_failed": True, "wp": True}
                 # A confirmed Boolean Oracle is the handoff into Block 3. Keep
                 # the durable checkpoint for recovery, but continue the same
                 # fresh Run into calibration and metadata discovery instead of

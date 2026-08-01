@@ -29,6 +29,17 @@ class RunFinalizer:
         challenge = await session.get(Challenge, run.challenge_id)
         state = await session.scalar(select(SolverState).where(SolverState.run_id == run.id))
         facts = list((state.confirmed_facts_json or []) if state else [])
+        checkpoint = dict(run.recovery_checkpoint_json or {})
+        calls = list((await session.scalars(select(ToolCall).where(
+            ToolCall.run_id == run.id, ToolCall.status == "COMPLETED"
+        ).order_by(ToolCall.created_at))).all())
+        tested_fields = sorted({
+            str((call.arguments_json or {}).get("test_field"))
+            for call in calls
+            if call.tool_name == "sql_boolean_compare"
+            and isinstance(call.arguments_json, dict)
+            and (call.arguments_json or {}).get("test_field")
+        })
         return {
             "generated": True,
             "challenge": {"id": run.challenge_id, "name": challenge.name if challenge else ""},
@@ -36,8 +47,11 @@ class RunFinalizer:
             "confirmed_facts": facts,
             "completed_stages": sorted({str(item.get("stage") or item.get("source") or "") for item in facts if isinstance(item, dict)}),
             "evidence_summary": {"confirmed_fact_count": len(facts)},
+            "tested_fields": tested_fields,
+            "completed_tool_calls": [{"id": call.id, "tool": call.tool_name} for call in calls[-50:]],
             "failed_stage": run.current_phase,
             "likely_cause": reason,
+            "checkpoint_details": checkpoint,
             "next_manual_steps": ["Inspect the failed stage output and Runner capability.", "Resume after correcting the input or extraction strategy."],
         }
 
@@ -47,7 +61,12 @@ class RunFinalizer:
         run.current_phase = "REPORTING"
         run.last_error_code = "COMPLETED_UNSOLVED_WITH_WP"
         run.last_error_message = reason[:4000]
-        run.recovery_checkpoint_json = {"terminal_reason": reason, "wp": wp, "current_phase": "REPORTING"}
+        run.recovery_checkpoint_json = {
+            **dict(run.recovery_checkpoint_json or {}),
+            "terminal_reason": reason,
+            "wp": wp,
+            "current_phase": "REPORTING",
+        }
         run.finished_at = datetime.now(UTC)
         await self.reconcile(session, run)
         return wp
