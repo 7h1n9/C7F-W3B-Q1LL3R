@@ -541,6 +541,7 @@ async def get_run_tool_manifest(run_id: str, session: AsyncSession = Depends(get
 @router.post("/runs/{run_id}/start")
 async def start_run(run_id: str, session: AsyncSession = Depends(get_session)) -> dict:
     run = await require_run(run_id, session)
+    await run_attempt_service.recover_stale_execution(session, run)
     await run_attempt_service.reclaim_expired_lease(session, run.id)
     active_lease = await session.scalar(select(RunExecutionLease).where(RunExecutionLease.run_id == run.id))
     if active_lease:
@@ -625,6 +626,7 @@ async def restart_run(
             "RUN_ALREADY_ACTIVE", "The run is already executing.", status_code=409
         )
     await run_attempt_service.reclaim_expired_lease(session, run.id)
+    await run_attempt_service.recover_stale_execution(session, run)
     active_lease = await session.scalar(select(RunExecutionLease).where(RunExecutionLease.run_id == run.id))
     if active_lease:
         raise DomainError("RUN_ALREADY_EXECUTING", "Run already has an active execution lease.", status_code=409)

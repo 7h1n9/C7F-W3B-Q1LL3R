@@ -58,7 +58,7 @@ def _metadata_result_has_required_fact(arguments: dict, result: dict) -> bool:
         "columns": ("columns",),
     }.get(stage)
     if not required:
-        return True
+        return False
     values = {key: extracted.get(key, structured.get(key)) for key in required}
     return all(bool(value) for value in values.values())
 from app.tools.registry import load_tool_definitions

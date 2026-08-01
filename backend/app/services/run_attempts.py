@@ -8,7 +8,9 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import DomainError
-from app.models.run import AgentTurn, RunAttempt, RunExecutionLease, SolveRun, ToolInvocationTicket
+from app.models.multi_agent import AgentTask
+from app.models.run import AgentTurn, RunAttempt, RunExecutionLease, SolveRun, ToolCall, ToolInvocationTicket
+from app.schemas.multi_agent import AgentTaskStatus
 from app.orchestration.state_machine import TERMINAL, RunStatus
 from app.services.codex_preflight import codex_preflight_service
 from app.services.events import event_service
@@ -68,6 +70,49 @@ class RunAttemptService:
                 await session.delete(lease)
         if leases:
             await session.commit()
+
+    async def recover_stale_execution(self, session: AsyncSession, run: SolveRun, *, stale_after_seconds: int = 600) -> bool:
+        """Recover abandoned execution rows without interrupting fresh work."""
+        now = utc_now()
+        cutoff = now - timedelta(seconds=stale_after_seconds)
+        stale_calls = list((await session.scalars(select(ToolCall).where(
+            ToolCall.run_id == run.id,
+            ToolCall.status.in_(["REQUESTED", "STARTED"]),
+            ToolCall.started_at.is_not(None),
+            ToolCall.started_at < cutoff,
+        ))).all())
+        running_tasks = list((await session.scalars(select(AgentTask).where(
+            AgentTask.run_id == run.id,
+            AgentTask.status == AgentTaskStatus.RUNNING.value,
+            AgentTask.idle_deadline_at.is_not(None),
+            AgentTask.idle_deadline_at < now,
+        ))).all())
+        expired_leases = list((await session.scalars(select(RunExecutionLease).where(
+            RunExecutionLease.run_id == run.id,
+            RunExecutionLease.expires_at < now,
+        ))).all())
+        changed = bool(stale_calls or running_tasks or expired_leases)
+        for call in stale_calls:
+            call.status = "FAILED"
+            call.finished_at = now
+        for task in running_tasks:
+            task.status = AgentTaskStatus.NEED_REPLAN.value
+            task.lease_expires_at = None
+        for lease in expired_leases:
+            await session.delete(lease)
+        if changed and RunStatus(run.status) == RunStatus.EXECUTING:
+            run.status = RunStatus.PAUSED_CHECKPOINT.value
+            run.last_error_code = "STALE_EXECUTION_RECOVERED"
+            run.last_error_message = "A stale STARTED ToolCall or expired execution lease was recovered."
+            await session.commit()
+            await event_service.append(session, run.id, "run.stale_execution_recovered", {
+                "stale_tool_calls": [call.id for call in stale_calls],
+                "tasks_replanned": [task.id for task in running_tasks],
+                "expired_leases": [lease.id for lease in expired_leases],
+            })
+        elif changed:
+            await session.commit()
+        return changed
 
     async def begin(self, session: AsyncSession, run: SolveRun) -> tuple[RunAttempt, RunExecutionLease]:
         if RunStatus(run.status) == RunStatus.COMPLETED_SOLVED or run.thread_invalidated:

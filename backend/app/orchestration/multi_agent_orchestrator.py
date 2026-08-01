@@ -206,7 +206,19 @@ class MultiAgentOrchestrator:
         checkpoint = dict(run.recovery_checkpoint_json or {})
         attempts = dict(checkpoint.get("metadata_attempts") or {})
         previous_stage = str(checkpoint.get("metadata_last_empty_stage") or "")
+        state = await solver_state_service.load(session, run.id)
+        ledger = dict(state.capability_ledger_json or {}) if state else {}
+        empty_ledger = dict(ledger.get("mysql_metadata_empty_results") or {})
+        prior = dict(empty_ledger.get(stage) or {})
         attempts[stage] = int(attempts.get(stage) or 0) + 1 if previous_stage == stage else 1
+        call = await session.scalar(select(ToolCall).where(ToolCall.run_id == run.id, ToolCall.agent_task_id == task.id).order_by(ToolCall.created_at.desc()))
+        empty_ledger[stage] = {
+            "count": attempts[stage],
+            "tool_call_ids": [*(prior.get("tool_call_ids") or []), *([call.id] if call else [])][-10:],
+            "target_expression": args.get("target_expression"),
+        }
+        if state is not None:
+            state.capability_ledger_json = {**ledger, "mysql_metadata_empty_results": empty_ledger}
         checkpoint.update({"metadata_attempts": attempts, "metadata_last_empty_stage": stage})
         if attempts[stage] >= 2:
             target = {
@@ -556,6 +568,33 @@ class MultiAgentOrchestrator:
             contract = AnalysisReviewContract.model_validate(raw)
         except Exception as error:
             raise DomainError("MODEL_OUTPUT_SCHEMA_INVALID", f"AnalysisReviewContract is invalid: {error}", {"task_id": task.id}) from error
+        if task.task_kind == AgentTaskKind.RESULT_REVIEW.value:
+            candidate_facts = (task.context_json or {}).get("candidate_facts") or []
+            approved_indexes = list(contract.approved_fact_indexes or [])
+            invalid_indexes = [index for index in approved_indexes if index < 0 or index >= len(candidate_facts)]
+            if invalid_indexes:
+                contract = contract.model_copy(update={
+                    "decision": AnalysisDecision.REVISE,
+                    "confidence": max(95, int(contract.confidence or 0)),
+                    "approved_fact_indexes": [],
+                    "reason": "Result Review approved fact indexes that do not reference the producing task candidate facts.",
+                    "audit_reason": "RESULT_REVIEW_APPROVED_INDEX_OUT_OF_RANGE",
+                    "next_phase": "HYPOTHESIS",
+                })
+            if (
+                self._asset_warranty_mysql(await session.get(Challenge, run.challenge_id))
+                and contract.decision == AnalysisDecision.APPROVE.value
+                and not candidate_facts
+                and not (contract.capabilities_added or [])
+                and not contract.solution_step_accepted
+            ):
+                contract = contract.model_copy(update={
+                    "decision": AnalysisDecision.REVISE,
+                    "approved_fact_indexes": [],
+                    "reason": "No candidate facts or capabilities were produced by this asset-warranty result.",
+                    "audit_reason": "ASSET_WARRANTY_EMPTY_RESULT_REVIEW_BLOCKED",
+                    "next_phase": "CHAINING",
+                })
         if (
             task.task_kind == AgentTaskKind.PLAN_REVIEW.value
             and proposal.allowed_tools_json == ["http_compare"]
@@ -719,9 +758,9 @@ class MultiAgentOrchestrator:
             }
             selected = [(index, fact) for index, fact in enumerate(candidate_facts) if fact.fact_key in wanted]
             evidence_ids = sorted({evidence_id for _, fact in selected for evidence_id in (fact.evidence_ids_json or [])})
-            contract = contract.model_copy(update={
+            metadata_review = {
                 "task_kind": AgentTaskKind.RESULT_REVIEW.value,
-                "decision": AnalysisDecision.APPROVE,
+                "decision": AnalysisDecision.APPROVE if selected else AnalysisDecision.REVISE,
                 "approved_fact_indexes": [index for index, _ in selected],
                 "question_being_tested": "Did the bounded MySQL metadata request produce verified metadata facts?",
                 "required_controls": {"discovery_scope": "current_database", "bounded": True},
@@ -733,9 +772,10 @@ class MultiAgentOrchestrator:
                 "solution_step_accepted": False,
                 "next_phase": "MAPPING",
                 "recommended_tool": "mysql_metadata_discovery",
-                "reason": "Controller promoted the completed bounded MySQL metadata result after Result Context validation.",
-                "audit_reason": "mysql_metadata_result_review_controller_route",
-            })
+                "reason": "Controller promoted the completed bounded MySQL metadata result after Result Context validation." if selected else "The metadata result produced no candidate facts for the current stage.",
+                "audit_reason": "mysql_metadata_result_review_controller_route" if selected else "MYSQL_METADATA_EMPTY_RESULT",
+            }
+            contract = contract.model_copy(update=metadata_review)
         if (
             str(proposal.current_stage or "").upper() == "BOOLEAN_ORACLE"
             and task.task_kind == AgentTaskKind.RESULT_REVIEW.value
@@ -2000,7 +2040,9 @@ class MultiAgentOrchestrator:
                 # row/lease transaction.
                 await session.commit()
                 if exec_result.status in {AgentTaskStatus.FAILED, AgentTaskStatus.PARTIAL}:
-                    if str(exec_result.failure_classification.get("classification") or "") == "MYSQL_METADATA_EMPTY_RESULT":
+                    failure_classification = str(exec_result.failure_classification.get("classification") or "")
+                    metadata_empty = failure_classification in {"MYSQL_METADATA_EMPTY_RESULT", "ORACLE_RESPONSE_UNRECOGNIZED"}
+                    if approved.tool_name == "mysql_metadata_discovery" and metadata_empty:
                         paused = await self._handle_mysql_metadata_empty_result(session, run, challenge, approved, exec_task)
                         if not paused:
                             parent = exec_task.id

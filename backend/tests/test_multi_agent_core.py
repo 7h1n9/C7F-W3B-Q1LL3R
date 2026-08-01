@@ -387,6 +387,22 @@ async def test_asset_warranty_plan_review_blocks_post_baseline_http_mapping(sess
 
 
 @pytest.mark.asyncio
+async def test_result_review_revises_out_of_range_candidate_indexes(session_factory) -> None:
+    async with session_factory() as session:
+        challenge, run = await _asset_mysql_run(session)
+        task = AgentTask(run_id=run.id, agent_role=AgentRole.ANALYSIS.value, task_kind="RESULT_REVIEW", objective="review", context_json={"candidate_facts": []})
+        session.add(task)
+        await session.flush()
+        proposal = PlannerProposal(run_id=run.id, proposal_id="empty-review", current_stage="HYPOTHESIS", next_agent=AgentRole.RECON.value, objective="probe", success_condition="fact", allowed_tools_json=["http_request"])
+        session.add(proposal)
+        await session.flush()
+        review = await MultiAgentOrchestrator()._review(session, run, proposal, task, AgentTaskResultContract(task_id=task.id, status="COMPLETED", proposed_next_action={"review": {"proposal_id": "empty-review", "decision": "APPROVE", "approved_fact_indexes": [0]}}))
+        assert review.decision == "REVISE"
+        assert review.approved_fact_indexes_json == []
+        assert review.audit_reason == "RESULT_REVIEW_APPROVED_INDEX_OUT_OF_RANGE"
+
+
+@pytest.mark.asyncio
 async def test_cancel_run_closes_attempt_tasks_actions_tools_and_lease(session_factory) -> None:
     async with session_factory() as session:
         challenge, run = await _asset_mysql_run(session)
