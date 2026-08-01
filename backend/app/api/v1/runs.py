@@ -85,6 +85,7 @@ from app.services.role_loader import role_loader
 from app.services.run_attempts import run_attempt_service
 from app.services.run_lifecycle import cancel_run as cancel_run_lifecycle
 from app.services.run_finalizer import run_finalizer
+from app.services.run_supervisor import run_supervisor
 from app.services.run_diagnostics import run_diagnostics_service
 from app.services.runner_client import runner_client
 from app.services.skill_selection import snapshot_run_skills
@@ -574,7 +575,7 @@ async def start_run(run_id: str, session: AsyncSession = Depends(get_session)) -
                 {"max_total_runtime_seconds": run.max_total_runtime_seconds},
                 status_code=409,
             )
-    asyncio.create_task(orchestrator.start(run.id))
+    asyncio.create_task(run_supervisor.run_background(run.id))
     return {"data": {"run_id": run.id, "status": "STARTING"}}
 
 
@@ -612,7 +613,7 @@ async def enqueue_run_message(run_id: str, payload: dict, session: AsyncSession 
     # A running turn is never interrupted. Paused runs can safely resume so
     # this input is consumed on the next Agent Step.
     if run.id not in orchestrator.active_tasks and RunStatus(run.status) in {RunStatus.WAITING_USER, RunStatus.PAUSED_RECOVERY, RunStatus.PAUSED_DEPLOYMENT, RunStatus.WAITING_CONFIGURATION, RunStatus.PAUSED_RATE_LIMIT}:
-        asyncio.create_task(orchestrator.start(run.id))
+        asyncio.create_task(run_supervisor.run_background(run.id))
     return {"data": {"accepted": True, "revision": revision, "status": "QUEUED", "message": "补充信息已加入，将在下一 Agent Step 使用。"}}
 
 
@@ -701,7 +702,7 @@ async def restart_run(
         },
     )
     message = str((payload or {}).get("message", "")).strip() or None
-    asyncio.create_task(orchestrator.start(run.id, message))
+    asyncio.create_task(run_supervisor.run_background(run.id, message))
     return {"data": {"run_id": run.id, "status": "STARTING"}}
 
 
@@ -735,7 +736,7 @@ async def continue_run(
         raise DomainError(
             "MESSAGE_REQUIRED", "A continuation message is required.", status_code=422
         )
-    asyncio.create_task(orchestrator.continue_with_message(run.id, message))
+    asyncio.create_task(run_supervisor.run_background(run.id, message))
     return {"data": {"run_id": run.id, "status": "STARTING"}}
 
 

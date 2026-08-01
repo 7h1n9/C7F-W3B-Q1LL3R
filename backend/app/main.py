@@ -19,6 +19,7 @@ from app.services.events import event_service
 from app.services.multi_agent import deterministic_controller
 from app.services.run_attempts import run_attempt_service
 from app.services.run_finalizer import run_finalizer
+from app.services.run_supervisor import run_supervisor
 from app.services.temporary_data import temporary_data_janitor
 
 
@@ -70,13 +71,28 @@ async def lifespan(_: FastAPI):
                 await run_attempt_service.cleanup_tickets(cleanup_session)
                 await temporary_data_janitor.run_once(cleanup_session)
 
+    async def supervisor_loop() -> None:
+        while True:
+            await asyncio.sleep(5)
+            async with SessionLocal() as supervisor_session:
+                paused_runs = list((await supervisor_session.scalars(select(SolveRun).where(
+                    SolveRun.status.in_([RunStatus.PAUSED_RECOVERY.value, RunStatus.PAUSED_CHECKPOINT.value])
+                ))).all())
+            for paused_run in paused_runs:
+                with contextlib.suppress(Exception):
+                    await run_supervisor.run_background(paused_run.id)
+
     cleanup_task = asyncio.create_task(cleanup_loop())
+    supervisor_task = asyncio.create_task(supervisor_loop())
     try:
         yield
     finally:
         cleanup_task.cancel()
+        supervisor_task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await cleanup_task
+        with contextlib.suppress(asyncio.CancelledError):
+            await supervisor_task
 
 
 app = FastAPI(title="CTF Web Agent API", version="0.1.0", lifespan=lifespan)
