@@ -67,6 +67,7 @@ from app.services.infrastructure import clear_failure, infrastructure_error, rec
 from app.services.progress_evaluator import progress_evaluator
 from app.services.reports import ReproductionPlanner, report_service
 from app.services.run_attempts import run_attempt_service
+from app.services.run_finalizer import run_finalizer
 from app.services.runner_client import runner_client
 from app.services.script_controller import script_fallback_controller
 from app.services.solver_state import solver_state_service
@@ -630,6 +631,7 @@ class SolveOrchestrator:
                 run = await session.scalar(select(SolveRun).where(SolveRun.id == run_id))
                 if not run:
                     return
+                await run_finalizer.reconcile(session, run)
                 if run.engine_type == "codex_sdk" and run.solver_mode != "multi_agent_v1":
                     await solver_state_service.ensure_confirmed_boolean_checkpoint(session, run)
                 try:

@@ -18,6 +18,7 @@ from app.services.builtin_skills import builtin_skill_sync_service
 from app.services.events import event_service
 from app.services.multi_agent import deterministic_controller
 from app.services.run_attempts import run_attempt_service
+from app.services.run_finalizer import run_finalizer
 from app.services.temporary_data import temporary_data_janitor
 
 
@@ -35,6 +36,11 @@ async def lifespan(_: FastAPI):
         await deterministic_controller.seed_policies(session)
         await run_attempt_service.cleanup_tickets(session)
         await run_attempt_service.reconcile_startup(session)
+        # Reconcile every persisted Run after process restart.  This also
+        # removes leases left by a previously terminated process and repairs
+        # phase projections before the first resume request arrives.
+        for run in (await session.scalars(select(SolveRun))).all():
+            await run_finalizer.reconcile(session, run)
         recovery = await deterministic_controller.reconcile_startup(session)
         for run_id in recovery.get("run_ids", []):
             run = await session.get(SolveRun, run_id)

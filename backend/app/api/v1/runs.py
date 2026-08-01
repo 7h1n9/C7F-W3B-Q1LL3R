@@ -84,6 +84,7 @@ from app.services.methodology_hints import hints_for_challenge
 from app.services.role_loader import role_loader
 from app.services.run_attempts import run_attempt_service
 from app.services.run_lifecycle import cancel_run as cancel_run_lifecycle
+from app.services.run_finalizer import run_finalizer
 from app.services.run_diagnostics import run_diagnostics_service
 from app.services.runner_client import runner_client
 from app.services.skill_selection import snapshot_run_skills
@@ -541,6 +542,7 @@ async def get_run_tool_manifest(run_id: str, session: AsyncSession = Depends(get
 @router.post("/runs/{run_id}/start")
 async def start_run(run_id: str, session: AsyncSession = Depends(get_session)) -> dict:
     run = await require_run(run_id, session)
+    await run_finalizer.reconcile(session, run)
     await run_attempt_service.recover_stale_execution(session, run)
     await run_attempt_service.reclaim_expired_lease(session, run.id)
     active_lease = await session.scalar(select(RunExecutionLease).where(RunExecutionLease.run_id == run.id))
@@ -620,6 +622,7 @@ async def restart_run(
 ) -> dict:
     """Restart a run while retaining its workspace, evidence, events and solver state."""
     run = await require_run(run_id, session)
+    await run_finalizer.reconcile(session, run)
     active = orchestrator.active_tasks.get(run_id)
     if active and not active.done():
         raise DomainError(
@@ -706,6 +709,7 @@ async def restart_run(
 async def cancel_run(run_id: str, session: AsyncSession = Depends(get_session)) -> dict:
     run = await require_run(run_id, session)
     await cancel_run_lifecycle(session, run.id, "Run cancelled by user.")
+    await run_finalizer.reconcile(session, run)
     await orchestrator.cancel(run.id)
     with contextlib.suppress(Exception):
         await runner_client.clear_sessions(run.id)
@@ -717,6 +721,7 @@ async def continue_run(
     run_id: str, payload: dict, session: AsyncSession = Depends(get_session)
 ) -> dict:
     run = await require_run(run_id, session)
+    await run_finalizer.reconcile(session, run)
     await run_attempt_service.reclaim_expired_lease(session, run.id)
     active_lease = await session.scalar(select(RunExecutionLease).where(RunExecutionLease.run_id == run.id))
     if active_lease:

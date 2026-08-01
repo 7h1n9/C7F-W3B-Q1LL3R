@@ -1389,9 +1389,30 @@ class MultiAgentOrchestrator:
             )
 
     async def _result_context(self, session, run: SolveRun, attempt: RunAttempt, proposal: PlannerProposal, plan_review: AnalysisReview, approved_action: ApprovedAction, task: AgentTask) -> dict:
-        context = await self.build_production_result_context(
-            session, run, attempt, proposal, plan_review, approved_action, task
-        )
+        retryable = {
+            "RESULT_CONTEXT_TASK_NOT_COMPLETED",
+            "RESULT_CONTEXT_TASK_RESULT_MISSING",
+            "RESULT_CONTEXT_APPROVED_ACTION_NOT_CONSUMED",
+        }
+        context = None
+        for index in range(5):
+            try:
+                context = await self.build_production_result_context(
+                    session, run, attempt, proposal, plan_review, approved_action, task
+                )
+                break
+            except DomainError as error:
+                if error.code not in retryable or index == 4:
+                    if error.code in retryable:
+                        raise DomainError(
+                            "RESULT_CONTEXT_DURABILITY_TIMEOUT",
+                            "Production result did not become durably visible within the bounded wait.",
+                            {**(error.details or {}), "last_error_code": error.code, "attempts": 5},
+                        ) from error
+                    raise
+                await session.rollback()
+                await asyncio.sleep(0.3)
+        assert context is not None
         return context.model_dump(mode="json")
 
     async def _apply_result_review(self, session, run: SolveRun, producing_task: AgentTask, review: AnalysisReview) -> list[str]:
@@ -2349,7 +2370,7 @@ class MultiAgentOrchestrator:
             run.last_error_code = error.code
             run.last_error_message = error.message[:4000]
             run.recovery_checkpoint_json = {"terminal_reason": error.code, "details": error.details or {}}
-            control_errors = {"TOOL_INVALID_ARGUMENT", "APPROVED_ACTION_COMPILE_FAILED", "APPROVED_ACTION_NOT_COMPILED", "TOOL_SCHEMA_VERSION_CHANGED", "SQL_EXPRESSION_PROVENANCE_REQUIRED", "RESULT_REVIEW_PROMOTION_EMPTY", "APPROVED_ARGUMENT_DIGEST_MISMATCH", "EXPERIMENT_ALREADY_CONFIRMED", "RESULT_CONTEXT_TIMEOUT", "RESULT_CONTEXT_RECORD_MISSING", "RESULT_CONTEXT_TOOLCALL_MISSING", "RESULT_CONTEXT_ARTIFACT_MISSING", "RESULT_CONTEXT_OBSERVATION_MISSING", "RESULT_CONTEXT_EVIDENCE_MISSING", "RESULT_CONTEXT_TASK_NOT_COMPLETED", "RESULT_CONTEXT_TASK_RESULT_MISSING", "RESULT_CONTEXT_APPROVED_ACTION_NOT_CONSUMED"}
+            control_errors = {"TOOL_INVALID_ARGUMENT", "APPROVED_ACTION_COMPILE_FAILED", "APPROVED_ACTION_NOT_COMPILED", "TOOL_SCHEMA_VERSION_CHANGED", "SQL_EXPRESSION_PROVENANCE_REQUIRED", "RESULT_REVIEW_PROMOTION_EMPTY", "APPROVED_ARGUMENT_DIGEST_MISMATCH", "EXPERIMENT_ALREADY_CONFIRMED", "RESULT_CONTEXT_TIMEOUT", "RESULT_CONTEXT_DURABILITY_TIMEOUT", "RESULT_CONTEXT_RECORD_MISSING", "RESULT_CONTEXT_TOOLCALL_MISSING", "RESULT_CONTEXT_ARTIFACT_MISSING", "RESULT_CONTEXT_OBSERVATION_MISSING", "RESULT_CONTEXT_EVIDENCE_MISSING", "RESULT_CONTEXT_TASK_NOT_COMPLETED", "RESULT_CONTEXT_TASK_RESULT_MISSING", "RESULT_CONTEXT_APPROVED_ACTION_NOT_CONSUMED"}
             if error.code in control_errors:
                 active_tasks = list((await session.scalars(select(AgentTask).where(AgentTask.run_id == run.id, AgentTask.status == AgentTaskStatus.RUNNING.value))).all())
                 for active_task in active_tasks:
@@ -2357,7 +2378,7 @@ class MultiAgentOrchestrator:
                 actions = list((await session.scalars(select(ApprovedAction).where(ApprovedAction.run_id == run.id, ApprovedAction.status == "ACTIVE"))).all())
                 for action in actions:
                     action.status = "REJECTED"
-                target = RunStatus.PAUSED_CHECKPOINT
+                target = RunStatus.PAUSED_RECOVERY if error.code in {"RESULT_CONTEXT_DURABILITY_TIMEOUT", "RESULT_CONTEXT_TASK_NOT_COMPLETED", "RESULT_CONTEXT_TASK_RESULT_MISSING", "RESULT_CONTEXT_APPROVED_ACTION_NOT_CONSUMED"} else RunStatus.PLANNING if error.code == "RESULT_REVIEW_PROMOTION_EMPTY" else RunStatus.PAUSED_CHECKPOINT
             else:
                 target = RunStatus.PAUSED_CHECKPOINT if error.code == "MODEL_OUTPUT_SCHEMA_INVALID" else RunStatus.PAUSED_DEPLOYMENT if error.code in {"TARGET_NETWORK_ENFORCEMENT_UNAVAILABLE", "SCRIPT_TARGET_NETWORK_UNAVAILABLE", "TOOL_CATALOG_DRIFT"} else RunStatus.PAUSED_RECOVERY if error.code in {"RUNNER_UNAVAILABLE", "CODEX_STREAM_INTERRUPTED"} else RunStatus.FAILED_ENGINE
             if RunStatus(run.status) not in {RunStatus.COMPLETED_SOLVED, RunStatus.COMPLETED_UNSOLVED, RunStatus.CANCELLED}:
