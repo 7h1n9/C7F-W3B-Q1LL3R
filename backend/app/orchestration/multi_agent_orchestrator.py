@@ -63,6 +63,7 @@ from app.services.approved_action_compiler import approved_action_compiler
 from app.services.events import event_service
 from app.services.multi_agent import deterministic_controller
 from app.services.solver_state import solver_state_service
+from app.services.run_finalizer import run_finalizer
 from app.services.tool_result_fact_reducer import tool_result_fact_reducer
 from app.tools.gateway import tool_gateway
 
@@ -84,6 +85,15 @@ class MultiAgentOrchestrator:
     async def _phase(self, session, run: SolveRun, phase: str) -> None:
         previous = run.current_phase
         run.current_phase = phase
+        checkpoint = dict(run.recovery_checkpoint_json or {})
+        checkpoint["current_phase"] = phase
+        if phase == "MYSQL_METADATA_DISCOVERY":
+            checkpoint["checkpoint_type"] = "MYSQL_METADATA_DISCOVERY_ACTIVE"
+        elif phase == "BOUNDED_EXTRACTION":
+            checkpoint["checkpoint_type"] = "BOUNDED_EXTRACTION_ACTIVE"
+        elif phase == "FLAG_SEARCH":
+            checkpoint["checkpoint_type"] = "FLAG_SEARCH_ACTIVE"
+        run.recovery_checkpoint_json = checkpoint
         state = await solver_state_service.load(session, run.id)
         if state is not None:
             state.current_phase = phase
@@ -117,13 +127,37 @@ class MultiAgentOrchestrator:
 
     async def _capability_phase(self, session, run: SolveRun) -> str:
         """Derive the next phase from durable evidence/capabilities, not role completion."""
+        challenge = await session.get(Challenge, run.challenge_id)
+        if self._asset_warranty_mysql(challenge):
+            keys = set((await session.scalars(select(VerifiedFact.fact_key).where(
+                VerifiedFact.run_id == run.id,
+                VerifiedFact.promotion_status == "VERIFIED",
+            ))).all())
+            if "asset_warranty.valid_baseline" not in keys or "asset_warranty.invalid_baseline" not in keys:
+                return "BUSINESS_BASELINE"
+            if "asset_warranty.mysql_boolean_oracle" not in keys:
+                return "BOOLEAN_ORACLE"
+            if "asset_warranty.oracle_calibration_matrix" not in keys or "asset_warranty.mysql_dbms" not in keys:
+                return "ORACLE_CALIBRATION"
+            metadata_required = {
+                "asset_warranty.mysql_version",
+                "asset_warranty.mysql_version_comment",
+                "asset_warranty.current_database",
+                "asset_warranty.mysql_user_tables",
+                "asset_warranty.mysql_candidate_columns",
+            }
+            if not metadata_required <= keys:
+                return "MYSQL_METADATA_DISCOVERY"
+            if await self._candidate_gate(session, run):
+                return "FLAG_VERIFICATION"
+            return "BOUNDED_EXTRACTION"
         state = await solver_state_service.load(session, run.id)
         ledger = state.capability_ledger_json if state else {}
         candidate = await self._candidate_gate(session, run)
         if candidate:
             return "FLAG_VERIFICATION"
         keys = {str(key).lower() for key in ledger}
-        if any("metadata" in key or "extraction" in key or "flag_search" in key for key in keys):
+        if "flag_search" in keys:
             return "FLAG_SEARCH"
         if any("boolean" in key or "oracle" in key for key in keys):
             return "CHAINING"
@@ -230,17 +264,22 @@ class MultiAgentOrchestrator:
             run.last_error_message = "Tool completed but produced no metadata facts."
             run.recovery_checkpoint_json = {
                 "checkpoint_type": "MYSQL_METADATA_STAGE_EMPTY_RESULT",
+                "current_phase": "WAITING_USER",
                 "stage": stage,
                 "target_expression": target,
                 "attempts": attempts[stage],
                 "reason": "Tool completed but produced no metadata facts",
                 "next_allowed_condition": "Fix mysql_metadata_discovery result contract or runner extraction",
                 "task_id": task.id,
+                "question": "mysql_metadata_discovery repeatedly produced empty results. Fix the Runner extraction or continue with an alternative strategy?",
+                "options": ["retry_after_fix", "finish_unsolved_wp", "increase_budget"],
             }
-            await self._status(session, run, RunStatus.PAUSED_CHECKPOINT)
+            await self._phase(session, run, "WAITING_USER")
+            await self._status(session, run, RunStatus.WAITING_USER)
             await session.commit()
             return True
         run.recovery_checkpoint_json = checkpoint
+        await self._phase(session, run, "MYSQL_METADATA_DISCOVERY")
         if RunStatus(run.status) == RunStatus.EXECUTING:
             await self._status(session, run, RunStatus.EVALUATING)
         await self._status(session, run, RunStatus.PLANNING)
@@ -2010,6 +2049,18 @@ class MultiAgentOrchestrator:
                         await self._status(session, run, RunStatus.PAUSED_CHECKPOINT)
                         await session.commit()
                         return {"status": run.status, "error_code": error.code, "agent_tasks": cycle + 1}
+                    if error.code != "PLAN_REVIEW_PERSISTENCE_INCOMPLETE":
+                        run.last_error_code = error.code
+                        run.last_error_message = error.message[:4000]
+                        run.recovery_checkpoint_json = {
+                            "classification": error.code,
+                            "details": error.details or {},
+                            "proposal_id": proposal.id,
+                            "analysis_task_id": plan_task.id,
+                        }
+                        await self._status(session, run, RunStatus.PAUSED_CHECKPOINT)
+                        await session.commit()
+                        return {"status": run.status, "error_code": error.code, "agent_tasks": cycle + 1}
                     await self._fail_plan_review_persistence(session, run.id, plan_task.id, plan_token, str(error))
                     return {"status": RunStatus.PAUSED_CHECKPOINT.value, "error_code": "PLAN_REVIEW_PERSISTENCE_INCOMPLETE", "agent_tasks": cycle + 1}
                 if plan_review.decision != AnalysisDecision.APPROVE.value:
@@ -2358,13 +2409,9 @@ class MultiAgentOrchestrator:
                 await self._status(session, run, RunStatus.PAUSED_CHECKPOINT)
                 await session.commit()
                 return {"status": run.status, "agent_tasks": int(await session.scalar(select(func.count()).select_from(AgentTask).where(AgentTask.run_id == run.id)) or 0), "terminal_reason": "FINISH_GATE_BLOCKED_INCOMPLETE_SOLUTION_CHAIN"}
-            run.recovery_checkpoint_json = {"terminal_reason": "MAX_REPLAN_CYCLES_EXHAUSTED", "cycles": max_cycles, "candidate_gate": "not satisfied"}
-            run.last_error_code = "MULTI_AGENT_TERMINAL"
-            run.last_error_message = "No candidate satisfied the verification gate after bounded replanning cycles."
-            await self._phase(session, run, "REPORTING")
-            await self._status(session, run, RunStatus.REPORTING)
-            await self._status(session, run, RunStatus.COMPLETED_UNSOLVED)
-            await session.commit()
+            await run_finalizer.finish_unsolved_with_wp(
+                session, run, "No candidate satisfied the verification gate after bounded replanning cycles."
+            )
             return {"status": run.status, "agent_tasks": int(await session.scalar(select(func.count()).select_from(AgentTask).where(AgentTask.run_id == run.id)) or 0), "terminal_reason": "MAX_REPLAN_CYCLES_EXHAUSTED"}
         except DomainError as error:
             run.last_error_code = error.code

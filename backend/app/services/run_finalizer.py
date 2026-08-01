@@ -14,6 +14,8 @@ from app.models.multi_agent import AgentTask, ApprovedAction
 from app.models.run import RunAttempt, RunExecutionLease, SolveRun, ToolCall, ToolInvocationTicket
 from app.models.solver_state import SolverState
 from app.schemas.multi_agent import AgentTaskStatus
+
+
 TERMINAL_RUN_STATUSES = {
     "COMPLETED_SOLVED", "COMPLETED_UNSOLVED", "FAILED_ENGINE", "FAILED_TOOL",
     "FAILED_RUNNER", "TIMEOUT", "POLICY_BLOCKED", "CANCELLED",
@@ -21,6 +23,35 @@ TERMINAL_RUN_STATUSES = {
 
 
 class RunFinalizer:
+    async def build_wp(self, session, run: SolveRun, reason: str) -> dict:
+        from app.models.challenge import Challenge
+
+        challenge = await session.get(Challenge, run.challenge_id)
+        state = await session.scalar(select(SolverState).where(SolverState.run_id == run.id))
+        facts = list((state.confirmed_facts_json or []) if state else [])
+        return {
+            "generated": True,
+            "challenge": {"id": run.challenge_id, "name": challenge.name if challenge else ""},
+            "target": challenge.target_url if challenge else "",
+            "confirmed_facts": facts,
+            "completed_stages": sorted({str(item.get("stage") or item.get("source") or "") for item in facts if isinstance(item, dict)}),
+            "evidence_summary": {"confirmed_fact_count": len(facts)},
+            "failed_stage": run.current_phase,
+            "likely_cause": reason,
+            "next_manual_steps": ["Inspect the failed stage output and Runner capability.", "Resume after correcting the input or extraction strategy."],
+        }
+
+    async def finish_unsolved_with_wp(self, session, run: SolveRun, reason: str) -> dict:
+        wp = await self.build_wp(session, run, reason)
+        run.status = "COMPLETED_UNSOLVED"
+        run.current_phase = "REPORTING"
+        run.last_error_code = "COMPLETED_UNSOLVED_WITH_WP"
+        run.last_error_message = reason[:4000]
+        run.recovery_checkpoint_json = {"terminal_reason": reason, "wp": wp, "current_phase": "REPORTING"}
+        run.finished_at = datetime.now(UTC)
+        await self.reconcile(session, run)
+        return wp
+
     async def reconcile(self, session, run: SolveRun) -> dict:
         now = datetime.now(UTC)
         changed = {"leases_deleted": 0, "attempts_closed": 0, "tasks_replanned": 0,

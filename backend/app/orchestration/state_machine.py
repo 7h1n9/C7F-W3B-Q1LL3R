@@ -110,6 +110,7 @@ ALLOWED: dict[RunStatus, set[RunStatus]] = {
         # A controlled stop (budget/no-progress ceiling) may finish directly
         # after a rejected or failed tool action, before EVALUATING is entered.
         RunStatus.REPORTING,
+        RunStatus.WAITING_USER,
         RunStatus.FAILED_ENGINE,
         RunStatus.FAILED_TOOL,
         RunStatus.FAILED_RUNNER,
