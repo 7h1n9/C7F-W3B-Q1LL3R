@@ -122,6 +122,14 @@ class ToolResultFactReducer:
     def _reduce_one(self, challenge: Challenge, call: ToolCall, observation: Observation, payload: dict[str, Any], evidence_ids: list[str]) -> list[dict[str, Any]]:
         facts = observation.facts_json or {}
         structured = payload.get("structured_result") if isinstance(payload.get("structured_result"), dict) else payload
+        # Runner artifact JSON is preferred, but Observation is the durable
+        # contract boundary.  Older Runner builds placed the same fields only
+        # in ToolModelView or directly in facts_json, so merge those sources.
+        view = facts.get("tool_model_view") if isinstance(facts.get("tool_model_view"), dict) else {}
+        view_extracted = view.get("extracted_facts") if isinstance(view.get("extracted_facts"), dict) else {}
+        direct_keys = ("version", "version_comment", "current_database", "tables", "columns", "dbms", "stage")
+        direct = {key: facts[key] for key in direct_keys if key in facts}
+        structured = {**view_extracted, **direct, **structured}
         extracted = structured.get("extracted_facts") if isinstance(structured.get("extracted_facts"), dict) else {}
         response = structured.get("body") or structured.get("body_excerpt") or structured.get("content")
         if isinstance(response, str):

@@ -24,6 +24,8 @@ from app.schemas.multi_agent import (
     TaskBudget,
 )
 from app.services.multi_agent import deterministic_controller
+from app.services.solver_state import solver_state_service
+from app.tools.gateway import _metadata_result_has_required_fact
 
 
 @pytest.fixture
@@ -335,6 +337,42 @@ async def test_asset_warranty_metadata_finish_gate_requires_tables_columns_and_l
         orchestrator = MultiAgentOrchestrator()
 
         assert await orchestrator._asset_warranty_mysql_finish_ready(session, run, challenge) is True
+
+
+def test_mysql_metadata_completed_requires_current_stage_fact() -> None:
+    empty = {"status": "COMPLETED", "structured_result": {"stage": "version", "extracted_facts": {}}}
+    assert _metadata_result_has_required_fact({"stage": "version"}, empty) is False
+    assert _metadata_result_has_required_fact({"stage": "version"}, {"status": "COMPLETED", "structured_result": {"stage": "version", "version": "8.0.36"}}) is True
+    assert _metadata_result_has_required_fact({"stage": "tables"}, {"status": "COMPLETED", "structured_result": {"stage": "tables", "tables": []}}) is False
+    assert _metadata_result_has_required_fact({"stage": "tables"}, {"status": "COMPLETED", "structured_result": {"stage": "tables", "tables": [{"name": "warranties"}]}}) is True
+
+
+@pytest.mark.asyncio
+async def test_metadata_empty_stage_pauses_after_two_consecutive_attempts(session_factory) -> None:
+    async with session_factory() as session:
+        challenge, run = await _asset_mysql_run(session)
+        run.status = RunStatus.EXECUTING.value
+        action = type("Action", (), {"tool_name": "mysql_metadata_discovery", "compiled_arguments_json": {"stage": "version", "target_expression": "VERSION()"}})()
+        task = AgentTask(run_id=run.id, agent_role=AgentRole.EXPLOIT.value, task_kind="MYSQL_METADATA_DISCOVERY", objective="version")
+        session.add(task)
+        await session.flush()
+        orchestrator = MultiAgentOrchestrator()
+        assert await orchestrator._handle_mysql_metadata_empty_result(session, run, challenge, action, task) is False
+        assert await orchestrator._handle_mysql_metadata_empty_result(session, run, challenge, action, task) is True
+        assert run.status == RunStatus.PAUSED_CHECKPOINT.value
+        assert run.last_error_code == "MYSQL_METADATA_STAGE_EMPTY_RESULT"
+        assert run.recovery_checkpoint_json["attempts"] == 2
+        assert run.recovery_checkpoint_json["target_expression"] == "VERSION()"
+
+
+@pytest.mark.asyncio
+async def test_solver_state_initialize_preserves_non_intake_resume_phase(session_factory) -> None:
+    async with session_factory() as session:
+        challenge, run = await _asset_mysql_run(session)
+        run.current_phase = "MYSQL_METADATA_DISCOVERY"
+        state = await solver_state_service.initialize(session, run, challenge.challenge_type, [], challenge.name, challenge.description)
+        assert state.current_phase == "MYSQL_METADATA_DISCOVERY"
+        assert run.current_phase == "MYSQL_METADATA_DISCOVERY"
 
 
 def test_planner_cannot_schedule_execution_and_analysis_rejects_bad_controls() -> None:

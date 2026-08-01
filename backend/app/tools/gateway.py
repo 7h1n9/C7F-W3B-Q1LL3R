@@ -43,6 +43,24 @@ from app.services.tool_invocation_coordinator import tool_invocation_coordinator
 from app.services.tool_permissions import effective_tools_for
 from app.services.workspace_sync import workspace_sync_service
 from app.tools.policy import enforce_tool_policy
+
+
+def _metadata_result_has_required_fact(arguments: dict, result: dict) -> bool:
+    """Return whether a COMPLETED metadata result contains this stage's fact."""
+    structured = result.get("structured_result") if isinstance(result.get("structured_result"), dict) else result
+    extracted = structured.get("extracted_facts") if isinstance(structured.get("extracted_facts"), dict) else {}
+    stage = str(arguments.get("stage") or structured.get("stage") or "").lower()
+    required = {
+        "version": ("version",),
+        "version_comment": ("version_comment",),
+        "database": ("current_database",),
+        "tables": ("tables",),
+        "columns": ("columns",),
+    }.get(stage)
+    if not required:
+        return True
+    values = {key: extracted.get(key, structured.get(key)) for key in required}
+    return all(bool(value) for value in values.values())
 from app.tools.registry import load_tool_definitions
 
 _SECRET_KEYS = {"token", "password", "passwd", "secret", "api_key", "authorization", "cookie", "set-cookie"}
@@ -368,6 +386,15 @@ class ToolGateway:
                 if "tool_timeout_seconds" not in str(error):
                     raise
                 result = await runner_client.wait_job(job_id)
+            if name == "mysql_metadata_discovery" and result.get("status") == "COMPLETED" and not _metadata_result_has_required_fact(arguments, result):
+                result = {
+                    "status": "FAILED",
+                    "error_code": "MYSQL_METADATA_EMPTY_RESULT",
+                    "summary": "mysql_metadata_discovery completed without the required metadata fact.",
+                    "stage": "RESULT_CONTRACT",
+                    "tool_execution_completed": True,
+                    "retryable": True,
+                }
             with contextlib.suppress(Exception):
                 await workspace_sync_service.sync_from_runner(run.id, Path(run.workspace_path))
             if result.get("status") != "COMPLETED" and not result.get("error_code"):

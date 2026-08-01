@@ -311,6 +311,25 @@ async def mysql_metadata_discovery(request: JobRequest) -> dict[str, Any]:
         "scope": contract["scope"],
         "provenance": contract["provenance"],
     }
+    required_value = {
+        "version": structured.get("version"),
+        "version_comment": structured.get("version_comment"),
+        "database": structured.get("current_database"),
+        "tables": structured.get("tables"),
+        "columns": structured.get("columns"),
+    }.get(stage)
+    if not required_value:
+        result_payload = {
+            "status": "FAILED",
+            "error_code": "MYSQL_METADATA_EMPTY_RESULT",
+            "summary": "mysql_metadata_discovery completed without the required metadata fact.",
+            "stage": stage,
+            "tool_execution_completed": True,
+            "retryable": True,
+            "structured_result": structured,
+        }
+        result_path.write_text(json.dumps(result_payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        return result_payload
     result_payload = {"status": "COMPLETED", "summary": "Bounded MySQL metadata discovery completed", "structured_result": structured, "artifact_paths": [str(result_path.relative_to(root)).replace("\\", "/"), str(progress_path.relative_to(root)).replace("\\", "/"), str(checkpoint_path.relative_to(root)).replace("\\", "/"), str(request_contract_path.relative_to(root)).replace("\\", "/")], "progress_path": str(progress_path.relative_to(root)).replace("\\", "/"), "checkpoint_path": str(checkpoint_path.relative_to(root)).replace("\\", "/"), "result_path": str(result_path.relative_to(root)).replace("\\", "/")}
     result_path.write_text(json.dumps(result_payload, ensure_ascii=False, indent=2), encoding="utf-8")
     checkpoint_path.write_text(json.dumps({"status": "COMPLETED", "position": request_count, "request_hash": request_hash, "expression": expression, "candidate_table": candidate_table, "requests": request_count}, ensure_ascii=False, indent=2), encoding="utf-8")

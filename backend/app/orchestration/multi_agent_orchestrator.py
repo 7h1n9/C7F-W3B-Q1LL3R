@@ -190,6 +190,46 @@ class MultiAgentOrchestrator:
             return max(24, configured)
         return max(3, min(8, configured))
 
+    async def _handle_mysql_metadata_empty_result(self, session, run: SolveRun, challenge: Challenge, approved: ApprovedAction, task: AgentTask) -> bool:
+        """Bound consecutive empty stage results and create a resumable pause."""
+        if not self._asset_warranty_mysql(challenge) or approved.tool_name != "mysql_metadata_discovery":
+            return False
+        args = approved.compiled_arguments_json or {}
+        stage = str(args.get("stage") or "").lower()
+        if stage not in {"version", "version_comment", "database", "tables", "columns"}:
+            return False
+        checkpoint = dict(run.recovery_checkpoint_json or {})
+        attempts = dict(checkpoint.get("metadata_attempts") or {})
+        previous_stage = str(checkpoint.get("metadata_last_empty_stage") or "")
+        attempts[stage] = int(attempts.get(stage) or 0) + 1 if previous_stage == stage else 1
+        checkpoint.update({"metadata_attempts": attempts, "metadata_last_empty_stage": stage})
+        if attempts[stage] >= 2:
+            target = {
+                "version": "VERSION()", "version_comment": "@@version_comment",
+                "database": "DATABASE()", "tables": "information_schema.tables",
+                "columns": "information_schema.columns",
+            }[stage]
+            run.last_error_code = "MYSQL_METADATA_STAGE_EMPTY_RESULT"
+            run.last_error_message = "Tool completed but produced no metadata facts."
+            run.recovery_checkpoint_json = {
+                "checkpoint_type": "MYSQL_METADATA_STAGE_EMPTY_RESULT",
+                "stage": stage,
+                "target_expression": target,
+                "attempts": attempts[stage],
+                "reason": "Tool completed but produced no metadata facts",
+                "next_allowed_condition": "Fix mysql_metadata_discovery result contract or runner extraction",
+                "task_id": task.id,
+            }
+            await self._status(session, run, RunStatus.PAUSED_CHECKPOINT)
+            await session.commit()
+            return True
+        run.recovery_checkpoint_json = checkpoint
+        if RunStatus(run.status) == RunStatus.EXECUTING:
+            await self._status(session, run, RunStatus.EVALUATING)
+        await self._status(session, run, RunStatus.PLANNING)
+        await session.commit()
+        return False
+
     async def _task(self, session, run: SolveRun, role: AgentRole, kind: AgentTaskKind, objective: str, tools: list[str], *, parent: str | None = None, context: dict | None = None, budget: TaskBudget | None = None, success_condition: str = "produce a validated structured handoff with evidence or an explicit failure classification", stop_conditions: list[str] | None = None) -> tuple[AgentTask, str]:
         logger.warning("multi_agent.task.snapshot.begin run_id=%s role=%s", run.id, role.value)
         snapshot = await deterministic_controller.memory.read_snapshot(session, run.id)
@@ -1614,12 +1654,13 @@ class MultiAgentOrchestrator:
         if not calls:
             return await checkpoint("COMPILED_ACTION_NOT_DISPATCHED", "The compiled action completed without creating a ToolCall.")
         if str(result.get("status") or "").upper() != "COMPLETED":
+            failure_code = str(result.get("error_code") or "TOOL_FAILURE")
             partial = AgentTaskResultContract(
                 task_id=task.id,
                 status=AgentTaskStatus.PARTIAL,
                 failure_classification={
                     "fingerprint": "compiled-action-tool-failed",
-                    "classification": "TOOL_FAILURE",
+                    "classification": failure_code,
                     "retryable": True,
                     "reason": str(result.get("error") or result.get("summary") or "The compiled tool action failed."),
                     "next_allowed_condition": "replan from the durable tool result",
@@ -1900,7 +1941,13 @@ class MultiAgentOrchestrator:
                 # next controller stage does not retain an uncommitted task
                 # row/lease transaction.
                 await session.commit()
-                if exec_result.status == AgentTaskStatus.FAILED:
+                if exec_result.status in {AgentTaskStatus.FAILED, AgentTaskStatus.PARTIAL}:
+                    if str(exec_result.failure_classification.get("classification") or "") == "MYSQL_METADATA_EMPTY_RESULT":
+                        paused = await self._handle_mysql_metadata_empty_result(session, run, challenge, approved, exec_task)
+                        if not paused:
+                            parent = exec_task.id
+                            context = {"replan_reason": "MYSQL_METADATA_EMPTY_RESULT", "metadata_stage": (approved.compiled_arguments_json or {}).get("stage")}
+                            continue
                     await session.commit()
                     return {
                         "status": run.status,

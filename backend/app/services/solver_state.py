@@ -41,6 +41,16 @@ class SolverStateService:
             if not state.attack_chain_plan_json:
                 state.attack_chain_plan_json = build_attack_chain(challenge_name, challenge_description)
                 await session.commit()
+            # Resume is idempotent: initialization must not erase a durable
+            # mapping/enumeration phase (or its capability ledger) by
+            # reapplying the challenge's default INTAKE phase.
+            if run.current_phase and run.current_phase != "INTAKE":
+                state.current_phase = run.current_phase
+            elif state.current_phase and state.current_phase != "INTAKE":
+                run.current_phase = state.current_phase
+            if run.current_phase and state.run_plan_json:
+                state.run_plan_json = {**state.run_plan_json, "current_phase": state.current_phase}
+            await session.commit()
             return state
         state = SolverState(
             run_id=run.id,
