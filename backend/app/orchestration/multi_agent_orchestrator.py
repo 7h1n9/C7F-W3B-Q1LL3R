@@ -136,6 +136,32 @@ class MultiAgentOrchestrator:
             and str(metadata.get("dbms") or "").lower() == "mysql"
         )
 
+    @staticmethod
+    def _looks_like_asset_warranty_challenge(challenge: Challenge | None) -> bool:
+        if challenge is None:
+            return False
+        text = f"{challenge.name or ''}\n{challenge.description or ''}".lower()
+        return "资产保修" in text or "asset warranty" in text or "asset_no" in text or "department" in text
+
+    async def _ensure_asset_warranty_metadata_or_pause(self, session, run: SolveRun, challenge: Challenge | None) -> bool:
+        if not self._looks_like_asset_warranty_challenge(challenge) or self._asset_warranty_mysql(challenge):
+            return True
+        required = {
+            "adapter": "asset_warranty",
+            "dbms": "mysql",
+            "endpoint": "/api/warranty/check",
+            "method": "POST",
+            "content_type": "application/json",
+            "fields": ["asset_no", "department"],
+            "control_values": {"asset_no": "PC-2026-013", "department": "OPS"},
+        }
+        run.last_error_code = "CHALLENGE_METADATA_REQUIRED"
+        run.last_error_message = "Asset warranty challenge requires normalized metadata_json before multi_agent_v1 can route the specialized chain."
+        run.recovery_checkpoint_json = {"classification": "CHALLENGE_METADATA_REQUIRED", "required_metadata": required}
+        await self._status(session, run, RunStatus.PAUSED_CHECKPOINT)
+        await session.commit()
+        return False
+
     async def _asset_warranty_mysql_finish_ready(self, session, run: SolveRun, challenge: Challenge | None) -> bool:
         if not self._asset_warranty_mysql(challenge):
             return True
@@ -467,6 +493,21 @@ class MultiAgentOrchestrator:
             contract = AnalysisReviewContract.model_validate(raw)
         except Exception as error:
             raise DomainError("MODEL_OUTPUT_SCHEMA_INVALID", f"AnalysisReviewContract is invalid: {error}", {"task_id": task.id}) from error
+        if (
+            task.task_kind == AgentTaskKind.PLAN_REVIEW.value
+            and proposal.allowed_tools_json == ["http_compare"]
+        ):
+            arguments = contract.approved_arguments or {}
+            if not isinstance(arguments.get("baseline"), dict) or not isinstance(arguments.get("candidate"), dict):
+                contract = contract.model_copy(update={
+                    "decision": AnalysisDecision.REVISE,
+                    "confidence": max(95, int(contract.confidence or 0)),
+                    "recommended_tool": None,
+                    "approved_arguments": {},
+                    "reason": "http_compare requires concrete baseline and candidate request/response objects; empty or abstract arguments cannot be compiled.",
+                    "audit_reason": "HTTP_COMPARE_SCHEMA_PRECHECK_FAILED",
+                    "next_phase": "HYPOTHESIS",
+                })
         if (
             str(proposal.current_stage or "").upper() == "MYSQL_METADATA_DISCOVERY"
             and proposal.allowed_tools_json == ["mysql_metadata_discovery"]
@@ -1737,6 +1778,8 @@ class MultiAgentOrchestrator:
 
     async def run(self, session, run: SolveRun, challenge: Challenge, attempt: RunAttempt, lease: RunExecutionLease, *, engine: object | None = None) -> dict:
         await deterministic_controller.seed_policies(session)
+        if not await self._ensure_asset_warranty_metadata_or_pause(session, run, challenge):
+            return {"status": run.status, "error_code": run.last_error_code, "current_phase": run.current_phase}
         await solver_state_service.initialize(session, run, challenge.challenge_type, [], challenge.name, challenge.description)
         self.runtime.engine = engine or self.runtime.engine
         self.runtime.tool_invoker = self.tool_invoker
@@ -1794,6 +1837,18 @@ class MultiAgentOrchestrator:
                         run.last_error_message = error.message[:4000]
                         run.recovery_checkpoint_json = {"classification": error.code, "task_id": plan_task.id}
                         await self._status(session, run, RunStatus.PAUSED_CHECKPOINT)
+                        return {"status": run.status, "error_code": error.code, "agent_tasks": cycle + 1}
+                    if error.code == "APPROVED_ACTION_COMPILE_FAILED":
+                        run.last_error_code = error.code
+                        run.last_error_message = error.message[:4000]
+                        run.recovery_checkpoint_json = {
+                            "classification": error.code,
+                            "details": error.details or {},
+                            "proposal_id": proposal.id,
+                            "analysis_task_id": plan_task.id,
+                        }
+                        await self._status(session, run, RunStatus.PAUSED_CHECKPOINT)
+                        await session.commit()
                         return {"status": run.status, "error_code": error.code, "agent_tasks": cycle + 1}
                     await self._fail_plan_review_persistence(session, run.id, plan_task.id, plan_token, str(error))
                     return {"status": RunStatus.PAUSED_CHECKPOINT.value, "error_code": "PLAN_REVIEW_PERSISTENCE_INCOMPLETE", "agent_tasks": cycle + 1}

@@ -19,6 +19,24 @@ def test_challenge_allows_url_style_host_list_values() -> None:
     assert challenge.allowed_hosts == ["not-allowed.local", "other.local"]
 
 
+def test_asset_warranty_challenge_normalizes_empty_metadata() -> None:
+    challenge = ChallengeInput(
+        name="资产保修核验平台",
+        target_url="http://asset.local/",
+        allowed_hosts=["asset.local"],
+        metadata_json={},
+    )
+    assert challenge.metadata_json == {
+        "adapter": "asset_warranty",
+        "dbms": "mysql",
+        "endpoint": "/api/warranty/check",
+        "method": "POST",
+        "content_type": "application/json",
+        "fields": ["asset_no", "department"],
+        "control_values": {"asset_no": "PC-2026-013", "department": "OPS"},
+    }
+
+
 def test_state_machine_rejects_invalid_transition() -> None:
     class Run: status = "CREATED"; current_phase = "CREATED"; started_at = None; finished_at = None
     with pytest.raises(Exception): transition(Run(), RunStatus.COMPLETED_SOLVED)

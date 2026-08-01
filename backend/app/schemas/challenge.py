@@ -11,6 +11,28 @@ def _extract_hostname(value: str) -> str:
     return (parsed.hostname or candidate).lower().strip()
 
 
+def normalize_asset_warranty_metadata(challenge: "ChallengeInput") -> dict:
+    """Normalize the durable metadata required by the asset-warranty adapter."""
+    metadata = dict(challenge.metadata_json or {})
+    adapter = str(metadata.get("adapter") or "").lower()
+    text = f"{challenge.name or ''}\n{challenge.description or ''}".lower()
+    looks_like_asset_warranty = (
+        "资产保修" in text
+        or "asset warranty" in text
+        or ("asset_no" in text and "department" in text)
+    )
+    if adapter != "asset_warranty" and not looks_like_asset_warranty:
+        return metadata
+    metadata.setdefault("adapter", "asset_warranty")
+    metadata.setdefault("dbms", "mysql")
+    metadata.setdefault("endpoint", "/api/warranty/check")
+    metadata.setdefault("method", "POST")
+    metadata.setdefault("content_type", "application/json")
+    metadata.setdefault("fields", ["asset_no", "department"])
+    metadata.setdefault("control_values", {"asset_no": "PC-2026-013", "department": "OPS"})
+    return metadata
+
+
 class ChallengeInput(BaseModel):
     name: str = Field(min_length=1, max_length=200)
     description: str = ""
@@ -43,7 +65,8 @@ class ChallengeInput(BaseModel):
             raise ValueError(
                 "traffic-analysis challenges must not define target_url or allowed_hosts"
             )
-        metadata = dict(self.metadata_json or {})
+        self.metadata_json = normalize_asset_warranty_metadata(self)
+        metadata = self.metadata_json
         if metadata.get("adapter") == "asset_warranty":
             if metadata.get("dbms", "mysql") != "mysql":
                 raise ValueError("asset_warranty challenges must declare metadata_json.dbms=mysql")

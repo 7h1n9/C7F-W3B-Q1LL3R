@@ -280,6 +280,40 @@ async def test_asset_warranty_oracle_calibration_result_review_promotes_complete
 
 
 @pytest.mark.asyncio
+async def test_http_compare_empty_arguments_are_revised_before_compilation(session_factory) -> None:
+    async with session_factory() as session:
+        run = await _run(session)
+        task = AgentTask(run_id=run.id, agent_role=AgentRole.ANALYSIS.value, task_kind="PLAN_REVIEW", objective="review")
+        session.add(task)
+        await session.flush()
+        proposal = PlannerProposal(
+            run_id=run.id,
+            proposal_id="http-compare-empty",
+            current_stage="HYPOTHESIS",
+            next_agent=AgentRole.RECON.value,
+            objective="compare",
+            success_condition="response difference",
+            allowed_tools_json=["http_compare"],
+        )
+        session.add(proposal)
+        await session.flush()
+        review = await MultiAgentOrchestrator()._review(
+            session,
+            run,
+            proposal,
+            task,
+            AgentTaskResultContract(
+                task_id=task.id,
+                status="COMPLETED",
+                proposed_next_action={"review": {"proposal_id": "http-compare-empty", "decision": "APPROVE", "approved_arguments": {}}},
+            ),
+        )
+        assert review.decision == "REVISE"
+        assert review.audit_reason == "HTTP_COMPARE_SCHEMA_PRECHECK_FAILED"
+        assert review.approved_arguments_json == {}
+
+
+@pytest.mark.asyncio
 async def test_asset_warranty_metadata_finish_gate_requires_tables_columns_and_ledger(session_factory) -> None:
     async with session_factory() as session:
         challenge, run = await _asset_mysql_run(session)
