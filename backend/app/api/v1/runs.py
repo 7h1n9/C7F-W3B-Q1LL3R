@@ -83,6 +83,7 @@ from app.services.fresh_reproduction import fresh_reproduction_executor
 from app.services.methodology_hints import hints_for_challenge
 from app.services.role_loader import role_loader
 from app.services.run_attempts import run_attempt_service
+from app.services.run_lifecycle import cancel_run as cancel_run_lifecycle
 from app.services.run_diagnostics import run_diagnostics_service
 from app.services.runner_client import runner_client
 from app.services.skill_selection import snapshot_run_skills
@@ -702,9 +703,7 @@ async def restart_run(
 @router.post("/runs/{run_id}/cancel")
 async def cancel_run(run_id: str, session: AsyncSession = Depends(get_session)) -> dict:
     run = await require_run(run_id, session)
-    transition(run, RunStatus.CANCELLED)
-    await session.commit()
-    await event_service.append(session, run.id, "run.status_changed", {"status": run.status})
+    await cancel_run_lifecycle(session, run.id, "Run cancelled by user.")
     await orchestrator.cancel(run.id)
     with contextlib.suppress(Exception):
         await runner_client.clear_sessions(run.id)

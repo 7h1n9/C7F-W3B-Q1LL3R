@@ -9,7 +9,7 @@ from app.core.exceptions import DomainError
 from app.models import Base
 from app.models.challenge import Challenge
 from app.models.multi_agent import AgentTask, EvidenceLedger, PlannerProposal, VerifiedFact
-from app.models.run import Artifact, SolveRun, ToolCall
+from app.models.run import Artifact, RunAttempt, RunExecutionLease, SolveRun, ToolCall
 from app.models.solver_state import SolverState
 from app.orchestration.multi_agent_orchestrator import MultiAgentOrchestrator
 from app.orchestration.state_machine import RunStatus
@@ -24,6 +24,7 @@ from app.schemas.multi_agent import (
     TaskBudget,
 )
 from app.services.multi_agent import deterministic_controller
+from app.services.run_lifecycle import cancel_run as cancel_run_lifecycle
 from app.services.solver_state import solver_state_service
 from app.tools.gateway import _metadata_result_has_required_fact
 
@@ -337,6 +338,75 @@ async def test_asset_warranty_metadata_finish_gate_requires_tables_columns_and_l
         orchestrator = MultiAgentOrchestrator()
 
         assert await orchestrator._asset_warranty_mysql_finish_ready(session, run, challenge) is True
+
+
+@pytest.mark.asyncio
+async def test_asset_warranty_baselines_force_boolean_oracle_proposal(session_factory) -> None:
+    async with session_factory() as session:
+        challenge, run = await _asset_mysql_run(session)
+        state = await session.scalar(select(SolverState).where(SolverState.run_id == run.id))
+        state.capability_ledger_json = {"business_response_differential_confirmed": {"confirmed": True}}
+        session.add_all([
+            VerifiedFact(run_id=run.id, fact_key="asset_warranty.valid_baseline", fact_type="BUSINESS_RESPONSE_BASELINE", value_json={}, confidence=95, promotion_status="VERIFIED"),
+            VerifiedFact(run_id=run.id, fact_key="asset_warranty.invalid_baseline", fact_type="BUSINESS_RESPONSE_BASELINE", value_json={}, confidence=95, promotion_status="VERIFIED"),
+        ])
+        task = AgentTask(run_id=run.id, agent_role=AgentRole.PLANNER.value, task_kind="PLANNING", objective="plan")
+        session.add(task)
+        await session.flush()
+        result = AgentTaskResultContract(task_id=task.id, status="COMPLETED", proposed_next_action={"proposal": {
+            "proposal_id": "bad-mapping",
+            "run_id": run.id,
+            "current_stage": "MAPPING",
+            "next_agent": "RECON",
+            "objective": "repeat mapping",
+            "allowed_tools": ["http_request"],
+            "success_condition": "probe",
+        }})
+        proposal = await MultiAgentOrchestrator()._proposal(session, run, challenge, task, result)
+        assert proposal.current_stage == "BOOLEAN_ORACLE"
+        assert proposal.next_agent == AgentRole.EXPLOIT.value
+        assert proposal.allowed_tools_json == ["sql_boolean_compare"]
+        assert proposal.budget_json["max_internal_requests"] >= 12
+
+
+@pytest.mark.asyncio
+async def test_asset_warranty_plan_review_blocks_post_baseline_http_mapping(session_factory) -> None:
+    async with session_factory() as session:
+        challenge, run = await _asset_mysql_run(session)
+        state = await session.scalar(select(SolverState).where(SolverState.run_id == run.id))
+        state.capability_ledger_json = {"business_response_differential_confirmed": {"confirmed": True}}
+        task = AgentTask(run_id=run.id, agent_role=AgentRole.ANALYSIS.value, task_kind="PLAN_REVIEW", objective="review")
+        session.add(task)
+        await session.flush()
+        proposal = PlannerProposal(run_id=run.id, proposal_id="mapping-http", current_stage="MAPPING", next_agent=AgentRole.RECON.value, objective="mapping", success_condition="probe", allowed_tools_json=["http_request"])
+        session.add(proposal)
+        await session.flush()
+        review = await MultiAgentOrchestrator()._review(session, run, proposal, task, AgentTaskResultContract(task_id=task.id, status="COMPLETED", proposed_next_action={"review": {"proposal_id": "mapping-http", "decision": "APPROVE"}}))
+        assert review.decision == "REVISE"
+        assert review.audit_reason == "ASSET_WARRANTY_RECON_AFTER_BASELINE_BLOCKED"
+
+
+@pytest.mark.asyncio
+async def test_cancel_run_closes_attempt_tasks_actions_tools_and_lease(session_factory) -> None:
+    async with session_factory() as session:
+        challenge, run = await _asset_mysql_run(session)
+        run.status = RunStatus.EXECUTING.value
+        attempt = RunAttempt(run_id=run.id, attempt_number=1, engine_type="mock", status="RUNNING")
+        session.add(attempt)
+        await session.flush()
+        task = AgentTask(run_id=run.id, agent_role=AgentRole.EXPLOIT.value, task_kind="EXPLOIT", objective="active", status="RUNNING")
+        session.add(task)
+        await session.flush()
+        session.add(ToolCall(run_id=run.id, tool_name="http_request", status="STARTED"))
+        await session.flush()
+        await cancel_run_lifecycle(session, run.id, "test cancellation")
+        await session.refresh(attempt)
+        await session.refresh(task)
+        assert run.status == RunStatus.CANCELLED.value
+        assert attempt.status == RunStatus.CANCELLED.value
+        assert attempt.finished_at is not None
+        assert task.status == "INTERRUPTED"
+        assert not await session.scalar(select(RunExecutionLease).where(RunExecutionLease.run_id == run.id))
 
 
 def test_mysql_metadata_completed_requires_current_stage_fact() -> None:

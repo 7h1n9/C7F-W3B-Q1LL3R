@@ -82,12 +82,17 @@ class MultiAgentOrchestrator:
         await self._controller_event(session, run.id, "run.status_changed", {"status": run.status, "controller": "multi_agent_v1"})
 
     async def _phase(self, session, run: SolveRun, phase: str) -> None:
-        if str(run.current_phase or "") == phase:
-            return
         previous = run.current_phase
         run.current_phase = phase
+        state = await solver_state_service.load(session, run.id)
+        if state is not None:
+            state.current_phase = phase
+            plan = dict(state.run_plan_json or {})
+            plan["current_phase"] = phase
+            state.run_plan_json = plan
         await session.commit()
-        await self._controller_event(session, run.id, "run.phase_changed", {"previous_phase": previous, "phase": phase, "source": "role_agent_runtime"})
+        if str(previous or "") != phase:
+            await self._controller_event(session, run.id, "run.phase_changed", {"previous_phase": previous, "phase": phase, "source": "role_agent_runtime"})
 
     async def _controller_event(self, session, run_id: str, event_type: str, payload: dict) -> None:
         """Persist controller milestones without blocking on SSE fanout.
@@ -432,6 +437,11 @@ class MultiAgentOrchestrator:
                 VerifiedFact.promotion_status == "VERIFIED",
                 VerifiedFact.fact_key.in_(("asset_warranty.valid_baseline", "asset_warranty.invalid_baseline")),
             ))).all())
+            oracle_fact = await session.scalar(select(VerifiedFact).where(
+                VerifiedFact.run_id == run.id,
+                VerifiedFact.fact_key == "asset_warranty.mysql_boolean_oracle",
+                VerifiedFact.promotion_status == "VERIFIED",
+            ))
             # The model may suggest a later stage from stale working memory.
             # The Controller owns the business-baseline ordering and must not
             # dispatch Boolean Oracle until both response baselines are
@@ -453,6 +463,19 @@ class MultiAgentOrchestrator:
                     "allowed_tools": ["http_request"],
                     "required_capabilities": ["valid_business_baseline_confirmed"],
                     "success_condition": "Confirm the invalid business baseline and response differential with durable HTTP evidence.",
+                })
+            elif (
+                oracle_fact is None
+                and "mysql_boolean_oracle_confirmed" not in ledger
+            ):
+                contract = contract.model_copy(update={
+                    "current_stage": "BOOLEAN_ORACLE",
+                    "next_agent": AgentRole.EXPLOIT,
+                    "objective": "Use the confirmed asset-warranty business response differential to test one declared field as a stable MySQL Boolean Oracle.",
+                    "allowed_tools": ["sql_boolean_compare"],
+                    "required_capabilities": ["business_response_differential_confirmed"],
+                    "success_condition": "Confirm a stable paired TRUE/FALSE Boolean Oracle from the asset-warranty POST contract.",
+                    "budget": contract.budget.model_copy(update={"max_logical_calls": 1, "max_internal_requests": 12, "max_runtime_seconds": 300}),
                 })
             elif "mysql_boolean_oracle_confirmed" in ledger and "mysql_dbms_confirmed" not in ledger:
                 calibration_plan = await self._oracle_calibration_plan(session, run)
@@ -547,6 +570,25 @@ class MultiAgentOrchestrator:
                     "reason": "http_compare requires concrete baseline and candidate request/response objects; empty or abstract arguments cannot be compiled.",
                     "audit_reason": "HTTP_COMPARE_SCHEMA_PRECHECK_FAILED",
                     "next_phase": "HYPOTHESIS",
+                })
+        if (
+            self._asset_warranty_mysql(await session.get(Challenge, run.challenge_id))
+            and task.task_kind == AgentTaskKind.PLAN_REVIEW.value
+            and str(proposal.current_stage or "").upper() in {"MAPPING", "HYPOTHESIS"}
+            and proposal.next_agent == AgentRole.RECON.value
+            and proposal.allowed_tools_json == ["http_request"]
+        ):
+            state = await solver_state_service.load(session, run.id)
+            ledger = state.capability_ledger_json if state else {}
+            if "business_response_differential_confirmed" in ledger and "mysql_boolean_oracle_confirmed" not in ledger:
+                contract = contract.model_copy(update={
+                    "decision": AnalysisDecision.REVISE,
+                    "confidence": max(95, int(contract.confidence or 0)),
+                    "recommended_tool": None,
+                    "approved_arguments": {},
+                    "reason": "Asset-warranty business baselines are already verified. Further HTTP mapping probes do not advance the solution chain; the next required stage is BOOLEAN_ORACLE with sql_boolean_compare.",
+                    "audit_reason": "ASSET_WARRANTY_RECON_AFTER_BASELINE_BLOCKED",
+                    "next_phase": "CHAINING",
                 })
         if (
             str(proposal.current_stage or "").upper() == "MYSQL_METADATA_DISCOVERY"
@@ -1313,6 +1355,7 @@ class MultiAgentOrchestrator:
         return context.model_dump(mode="json")
 
     async def _apply_result_review(self, session, run: SolveRun, producing_task: AgentTask, review: AnalysisReview) -> list[str]:
+        proposal = await session.get(PlannerProposal, review.proposal_id)
         facts = list((await session.scalars(select(VerifiedFact).where(VerifiedFact.run_id == run.id, VerifiedFact.source_task_id == producing_task.id))).all())
         if not facts and producing_task.task_kind == AgentTaskKind.RECON.value:
             # A baseline reducer may have already materialized the same
@@ -1345,6 +1388,21 @@ class MultiAgentOrchestrator:
                     fact.promotion_status = "VERIFIED"
                     approved_ids.append(fact.id)
                     await self._record_verified_fact_capabilities(session, run, fact)
+        if (
+            proposal is not None
+            and self._asset_warranty_mysql(await session.get(Challenge, run.challenge_id))
+            and review.decision == AnalysisDecision.APPROVE.value
+            and not approved_ids
+            and not (review.capabilities_added_json or [])
+            and not review.solution_step_accepted
+            and str(proposal.current_stage or "").upper() in {"MAPPING", "HYPOTHESIS"}
+            and proposal.allowed_tools_json == ["http_request"]
+        ):
+            raise DomainError(
+                "ASSET_WARRANTY_EMPTY_REVIEW_APPROVAL",
+                "Asset-warranty result review approved an HTTP mapping probe without new facts, capabilities, or an accepted solution step.",
+                {"task_id": producing_task.id, "proposal_id": proposal.proposal_id},
+            )
         if review.decision == AnalysisDecision.APPROVE.value:
             if facts and not selected and not review.capabilities_added_json and not review.solution_step_accepted:
                 raise DomainError("RESULT_REVIEW_PROMOTION_EMPTY", "Approved RESULT_REVIEW selected no candidate fact, capability, or solution step.", {"task_id": producing_task.id, "candidate_fact_count": len(facts)})
