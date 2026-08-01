@@ -161,7 +161,7 @@ class MultiAgentOrchestrator:
     def _max_replan_cycles(self, run: SolveRun, challenge: Challenge | None) -> int:
         configured = max(3, int(run.max_agent_steps or 8) // 2)
         if self._asset_warranty_mysql(challenge):
-            return max(12, min(18, configured))
+            return max(24, configured)
         return max(3, min(8, configured))
 
     async def _task(self, session, run: SolveRun, role: AgentRole, kind: AgentTaskKind, objective: str, tools: list[str], *, parent: str | None = None, context: dict | None = None, budget: TaskBudget | None = None, success_condition: str = "produce a validated structured handoff with evidence or an explicit failure classification", stop_conditions: list[str] | None = None) -> tuple[AgentTask, str]:
@@ -470,6 +470,7 @@ class MultiAgentOrchestrator:
         if (
             str(proposal.current_stage or "").upper() == "MYSQL_METADATA_DISCOVERY"
             and proposal.allowed_tools_json == ["mysql_metadata_discovery"]
+            and task.task_kind == AgentTaskKind.PLAN_REVIEW.value
         ):
             metadata = (await session.get(Challenge, run.challenge_id)).metadata_json or {}
             if str(metadata.get("adapter") or "").lower() == "asset_warranty" and str(metadata.get("dbms") or "").lower() == "mysql":
@@ -541,24 +542,42 @@ class MultiAgentOrchestrator:
         if (
             str(proposal.current_stage or "").upper() == "ORACLE_CALIBRATION"
             and task.task_kind == AgentTaskKind.RESULT_REVIEW.value
+            and proposal.allowed_tools_json == ["oracle_expression_calibration"]
         ):
             candidate_facts = list((await session.scalars(select(VerifiedFact).where(
                 VerifiedFact.run_id == run.id,
                 VerifiedFact.source_task_id == task.created_by_task_id,
+                VerifiedFact.promotion_status == "CANDIDATE",
             ))).all())
-            contract = contract.model_copy(update={
-                "task_kind": AgentTaskKind.RESULT_REVIEW.value,
-                "decision": AnalysisDecision.APPROVE,
-                "approved_fact_indexes": list(range(len(candidate_facts))),
-                "supporting_evidence_ids": sorted({evidence_id for fact in candidate_facts for evidence_id in (fact.evidence_ids_json or [])}),
-                "approved_evidence_ids": sorted({evidence_id for fact in candidate_facts for evidence_id in (fact.evidence_ids_json or [])}),
-                "capabilities_added": [],
-                "solution_step_accepted": False,
-                "next_phase": "TESTING",
-                "recommended_tool": "oracle_expression_calibration",
-                "reason": "Controller recorded the bounded calibration matrix without assuming that all-false expressions are valid SQL FALSE results.",
-                "audit_reason": "oracle_calibration_result_review_controller_route",
-            })
+            wanted = {"asset_warranty.oracle_calibration_matrix", "asset_warranty.mysql_dbms"}
+            selected = [(index, fact) for index, fact in enumerate(candidate_facts) if fact.fact_key in wanted]
+            calibration_fact = next((fact for _, fact in selected if fact.fact_key == "asset_warranty.oracle_calibration_matrix"), None)
+            calibration_value = calibration_fact.value_json if calibration_fact and isinstance(calibration_fact.value_json, dict) else {}
+            profile = calibration_value.get("adaptive_extraction_profile")
+            if (
+                calibration_value.get("status") == "COMPLETED"
+                and isinstance(profile, dict)
+                and profile.get("extraction_strategy")
+                and {fact.fact_key for _, fact in selected} == wanted
+            ):
+                evidence_ids = sorted({evidence_id for _, fact in selected for evidence_id in (fact.evidence_ids_json or [])})
+                contract = contract.model_copy(update={
+                    "task_kind": AgentTaskKind.RESULT_REVIEW.value,
+                    "decision": AnalysisDecision.APPROVE,
+                    "approved_fact_indexes": [index for index, _ in selected],
+                    "question_being_tested": "Did the completed calibration establish a bounded extraction profile?",
+                    "required_controls": {"status": "COMPLETED", "extraction_strategy": "present"},
+                    "expected_true_signal": {"calibration": "completed"},
+                    "expected_false_signal": {"calibration": "not completed"},
+                    "supporting_evidence_ids": evidence_ids,
+                    "approved_evidence_ids": evidence_ids,
+                    "capabilities_added": [],
+                    "solution_step_accepted": False,
+                    "next_phase": "CHAINING",
+                    "recommended_tool": "oracle_expression_calibration",
+                    "reason": "Controller promoted completed calibration facts with an adaptive extraction profile.",
+                    "audit_reason": "controller_calibration_result_route",
+                })
         if (
             str(proposal.current_stage or "").upper() == "MYSQL_METADATA_DISCOVERY"
             and task.task_kind == AgentTaskKind.RESULT_REVIEW.value
@@ -566,16 +585,30 @@ class MultiAgentOrchestrator:
             candidate_facts = list((await session.scalars(select(VerifiedFact).where(
                 VerifiedFact.run_id == run.id,
                 VerifiedFact.source_task_id == task.created_by_task_id,
+                VerifiedFact.promotion_status == "CANDIDATE",
             ))).all())
+            wanted = {
+                "asset_warranty.mysql_version",
+                "asset_warranty.mysql_version_comment",
+                "asset_warranty.current_database",
+                "asset_warranty.mysql_user_tables",
+                "asset_warranty.mysql_candidate_columns",
+            }
+            selected = [(index, fact) for index, fact in enumerate(candidate_facts) if fact.fact_key in wanted]
+            evidence_ids = sorted({evidence_id for _, fact in selected for evidence_id in (fact.evidence_ids_json or [])})
             contract = contract.model_copy(update={
                 "task_kind": AgentTaskKind.RESULT_REVIEW.value,
                 "decision": AnalysisDecision.APPROVE,
-                "approved_fact_indexes": list(range(len(candidate_facts))),
-                "supporting_evidence_ids": sorted({evidence_id for fact in candidate_facts for evidence_id in (fact.evidence_ids_json or [])}),
-                "approved_evidence_ids": sorted({evidence_id for fact in candidate_facts for evidence_id in (fact.evidence_ids_json or [])}),
+                "approved_fact_indexes": [index for index, _ in selected],
+                "question_being_tested": "Did the bounded MySQL metadata request produce verified metadata facts?",
+                "required_controls": {"discovery_scope": "current_database", "bounded": True},
+                "expected_true_signal": {"metadata": "candidate facts present"},
+                "expected_false_signal": {"metadata": "no candidate facts present"},
+                "supporting_evidence_ids": evidence_ids,
+                "approved_evidence_ids": evidence_ids,
                 "capabilities_added": [],
                 "solution_step_accepted": False,
-                "next_phase": "ENUMERATION",
+                "next_phase": "MAPPING",
                 "recommended_tool": "mysql_metadata_discovery",
                 "reason": "Controller promoted the completed bounded MySQL metadata result after Result Context validation.",
                 "audit_reason": "mysql_metadata_result_review_controller_route",
@@ -2068,6 +2101,19 @@ class MultiAgentOrchestrator:
                 )
                 await self._status(session, run, RunStatus.PLANNING)
             if not await self._asset_warranty_mysql_finish_ready(session, run, challenge):
+                verified_keys = set((await session.scalars(select(VerifiedFact.fact_key).where(
+                    VerifiedFact.run_id == run.id,
+                    VerifiedFact.promotion_status == "VERIFIED",
+                ))).all())
+                metadata_required = {
+                    "asset_warranty.mysql_version",
+                    "asset_warranty.mysql_version_comment",
+                    "asset_warranty.current_database",
+                    "asset_warranty.mysql_user_tables",
+                    "asset_warranty.mysql_candidate_columns",
+                }
+                metadata_complete = metadata_required <= verified_keys
+                terminal_error = "BOUNDED_EXTRACTION_REQUIRED" if metadata_complete else "MYSQL_METADATA_DISCOVERY_REQUIRED"
                 run.recovery_checkpoint_json = {
                     "terminal_reason": "FINISH_GATE_BLOCKED_INCOMPLETE_SOLUTION_CHAIN",
                     "cycles": max_cycles,
@@ -2079,8 +2125,12 @@ class MultiAgentOrchestrator:
                         "mysql_metadata_discovered",
                     ],
                 }
-                run.last_error_code = "MYSQL_METADATA_DISCOVERY_REQUIRED"
-                run.last_error_message = "Finish gate blocked: current database verification is not sufficient without MySQL metadata discovery."
+                run.last_error_code = terminal_error
+                run.last_error_message = (
+                    "Finish gate blocked: MySQL metadata discovery is incomplete."
+                    if not metadata_complete else
+                    "Finish gate blocked: metadata is complete but bounded extraction/flag verification is still required."
+                )
                 await self._phase(session, run, "ENUMERATION")
                 await self._status(session, run, RunStatus.PAUSED_CHECKPOINT)
                 await session.commit()

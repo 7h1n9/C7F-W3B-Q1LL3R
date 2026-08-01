@@ -8,7 +8,7 @@ from sqlalchemy.pool import StaticPool
 from app.core.exceptions import DomainError
 from app.models import Base
 from app.models.challenge import Challenge
-from app.models.multi_agent import EvidenceLedger, VerifiedFact
+from app.models.multi_agent import AgentTask, EvidenceLedger, PlannerProposal, VerifiedFact
 from app.models.run import Artifact, SolveRun, ToolCall
 from app.models.solver_state import SolverState
 from app.orchestration.multi_agent_orchestrator import MultiAgentOrchestrator
@@ -216,6 +216,67 @@ async def test_asset_warranty_current_database_does_not_satisfy_finish_gate(sess
         plan = await orchestrator._mysql_metadata_plan(session, run)
         assert plan["target_expression"] == "information_schema.tables"
         assert plan["stage"] == "tables"
+
+
+@pytest.mark.asyncio
+async def test_asset_warranty_metadata_result_review_promotes_only_producing_facts(session_factory) -> None:
+    async with session_factory() as session:
+        challenge, run = await _asset_mysql_run(session)
+        producing = AgentTask(run_id=run.id, agent_role=AgentRole.EXPLOIT.value, task_kind="MYSQL_METADATA_DISCOVERY", objective="tables")
+        session.add(producing)
+        await session.flush()
+        review_task = AgentTask(run_id=run.id, agent_role=AgentRole.ANALYSIS.value, task_kind="RESULT_REVIEW", objective="review", created_by_task_id=producing.id)
+        session.add(review_task)
+        await session.flush()
+        assert review_task.created_by_task_id == producing.id
+        assert review_task.task_kind == "RESULT_REVIEW"
+        session.add_all([
+            VerifiedFact(run_id=run.id, fact_key="asset_warranty.mysql_user_tables", fact_type="MYSQL_USER_TABLES", value_json={"tables": [{"name": "warranties"}]}, evidence_ids_json=["E-tables"], source_task_id=producing.id),
+            VerifiedFact(run_id=run.id, fact_key="asset_warranty.mysql_candidate_columns", fact_type="MYSQL_CANDIDATE_COLUMNS", value_json={"columns": [{"name": "flag"}]}, evidence_ids_json=["E-columns"], source_task_id=producing.id),
+        ])
+        await session.flush()
+        assert len((await session.scalars(select(VerifiedFact).where(VerifiedFact.source_task_id == producing.id))).all()) == 2
+        proposal = PlannerProposal(run_id=run.id, proposal_id="metadata-result", current_stage="MYSQL_METADATA_DISCOVERY", next_agent=AgentRole.EXPLOIT.value, objective="metadata", success_condition="facts", allowed_tools_json=["mysql_metadata_discovery"])
+        session.add(proposal)
+        await session.flush()
+        assert str(proposal.current_stage).upper() == "MYSQL_METADATA_DISCOVERY"
+        review = await MultiAgentOrchestrator()._review(
+            session, run, proposal, review_task,
+            AgentTaskResultContract(task_id=review_task.id, status="COMPLETED", proposed_next_action={"review": {"proposal_id": "metadata-result", "task_kind": "RESULT_REVIEW", "decision": "REVISE"}}),
+        )
+        assert review.decision == "APPROVE"
+        assert review.approved_fact_indexes_json == [0, 1]
+        assert review.next_phase in {"MAPPING", "CHAINING"}
+
+
+@pytest.mark.asyncio
+async def test_asset_warranty_oracle_calibration_result_review_promotes_completed_profile(session_factory) -> None:
+    async with session_factory() as session:
+        challenge, run = await _asset_mysql_run(session)
+        producing = AgentTask(run_id=run.id, agent_role=AgentRole.EXPLOIT.value, task_kind="ORACLE_CALIBRATION", objective="calibrate")
+        session.add(producing)
+        await session.flush()
+        review_task = AgentTask(run_id=run.id, agent_role=AgentRole.ANALYSIS.value, task_kind="RESULT_REVIEW", objective="review", created_by_task_id=producing.id)
+        session.add(review_task)
+        await session.flush()
+        assert review_task.created_by_task_id == producing.id
+        assert review_task.task_kind == "RESULT_REVIEW"
+        session.add_all([
+            VerifiedFact(run_id=run.id, fact_key="asset_warranty.oracle_calibration_matrix", fact_type="ORACLE_CALIBRATION", value_json={"status": "COMPLETED", "adaptive_extraction_profile": {"extraction_strategy": "bounded_binary"}}, evidence_ids_json=["E-calibration"], source_task_id=producing.id),
+            VerifiedFact(run_id=run.id, fact_key="asset_warranty.mysql_dbms", fact_type="MYSQL_DBMS", value_json={"dbms": "mysql"}, evidence_ids_json=["E-dbms"], source_task_id=producing.id),
+        ])
+        await session.flush()
+        proposal = PlannerProposal(run_id=run.id, proposal_id="calibration-result", current_stage="ORACLE_CALIBRATION", next_agent=AgentRole.EXPLOIT.value, objective="calibration", success_condition="facts", allowed_tools_json=["oracle_expression_calibration"])
+        session.add(proposal)
+        await session.flush()
+        review = await MultiAgentOrchestrator()._review(
+            session, run, proposal, review_task,
+            AgentTaskResultContract(task_id=review_task.id, status="COMPLETED", proposed_next_action={"review": {"proposal_id": "calibration-result", "task_kind": "RESULT_REVIEW", "decision": "REVISE"}}),
+        )
+        assert review.decision == "APPROVE"
+        assert review.approved_fact_indexes_json == [0, 1]
+        assert review.audit_reason == "controller_calibration_result_route"
+        assert review.next_phase in {"MAPPING", "CHAINING"}
 
 
 @pytest.mark.asyncio
