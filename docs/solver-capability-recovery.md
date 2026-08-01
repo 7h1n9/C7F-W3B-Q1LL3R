@@ -99,7 +99,7 @@ OpenAI 结束门槛现在拒绝“0 Tool Call 直接 unsolved”，要求题目/
 | Runner Ruff | passed |
 | Bridge build/test | passed |
 | Frontend build | passed |
-| Alembic upgrade → downgrade -1 → upgrade | passed，临时 SQLite |
+| Alembic upgrade → downgrade -1 → upgrade | 需在 MySQL 8 测试数据库执行 |
 | Runner 脚本链路 | passed：上传 `scripts/test.py` → manifest → `script_run` → `outputs/generated/result.txt` |
 | 七类题目两引擎各三次 | 未执行：缺少受控 fixtures/目标实例 |
 

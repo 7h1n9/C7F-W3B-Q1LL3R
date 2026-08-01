@@ -46,6 +46,24 @@ async def _run(session) -> SolveRun:
     return run
 
 
+async def _asset_mysql_run(session) -> tuple[Challenge, SolveRun]:
+    challenge = Challenge(
+        name="asset warranty",
+        target_url="http://asset.local/api/warranty",
+        allowed_hosts=["asset.local"],
+        challenge_type="WEB_TARGET",
+        metadata_json={"adapter": "asset_warranty", "dbms": "mysql"},
+    )
+    session.add(challenge)
+    await session.flush()
+    run = SolveRun(challenge_id=challenge.id, workspace_path=".", role_snapshot_json={}, solver_mode="multi_agent_v1")
+    session.add(run)
+    await session.flush()
+    session.add(SolverState(run_id=run.id, current_phase="CHAINING", capability_ledger_json={"mysql_boolean_oracle_confirmed": {"confirmed": True}}))
+    await session.flush()
+    return challenge, run
+
+
 @pytest.mark.asyncio
 async def test_task_lease_and_promotion_gate(session_factory) -> None:
     async with session_factory() as session:
@@ -174,6 +192,54 @@ async def test_asset_warranty_verified_baselines_advance_capability_ledger(sessi
         assert "valid_business_baseline_confirmed" in state.capability_ledger_json
         assert "invalid_business_baseline_confirmed" in state.capability_ledger_json
         assert "business_response_differential_confirmed" in state.capability_ledger_json
+
+
+@pytest.mark.asyncio
+async def test_asset_warranty_current_database_does_not_satisfy_finish_gate(session_factory) -> None:
+    async with session_factory() as session:
+        challenge, run = await _asset_mysql_run(session)
+        session.add_all([
+            VerifiedFact(run_id=run.id, fact_key="asset_warranty.valid_baseline", fact_type="BUSINESS_RESPONSE_BASELINE", value_json={}, confidence=95, promotion_status="VERIFIED"),
+            VerifiedFact(run_id=run.id, fact_key="asset_warranty.invalid_baseline", fact_type="BUSINESS_RESPONSE_BASELINE", value_json={}, confidence=95, promotion_status="VERIFIED"),
+            VerifiedFact(run_id=run.id, fact_key="asset_warranty.mysql_boolean_oracle", fact_type="BOOLEAN_ORACLE", value_json={}, confidence=95, promotion_status="VERIFIED"),
+            VerifiedFact(run_id=run.id, fact_key="asset_warranty.mysql_dbms", fact_type="MYSQL_DBMS", value_json={}, confidence=95, promotion_status="VERIFIED"),
+            VerifiedFact(run_id=run.id, fact_key="asset_warranty.mysql_version", fact_type="MYSQL_VERSION", value_json={}, confidence=95, promotion_status="VERIFIED"),
+            VerifiedFact(run_id=run.id, fact_key="asset_warranty.mysql_version_comment", fact_type="MYSQL_VERSION_COMMENT", value_json={}, confidence=95, promotion_status="VERIFIED"),
+            VerifiedFact(run_id=run.id, fact_key="asset_warranty.current_database", fact_type="CURRENT_DATABASE", value_json={"database": "asset_warranty"}, confidence=95, promotion_status="VERIFIED"),
+        ])
+        await session.flush()
+        orchestrator = MultiAgentOrchestrator()
+
+        assert await orchestrator._asset_warranty_mysql_finish_ready(session, run, challenge) is False
+        assert orchestrator._max_replan_cycles(run, challenge) >= 12
+
+        plan = await orchestrator._mysql_metadata_plan(session, run)
+        assert plan["target_expression"] == "information_schema.tables"
+        assert plan["stage"] == "tables"
+
+
+@pytest.mark.asyncio
+async def test_asset_warranty_metadata_finish_gate_requires_tables_columns_and_ledger(session_factory) -> None:
+    async with session_factory() as session:
+        challenge, run = await _asset_mysql_run(session)
+        state = await session.scalar(select(SolverState).where(SolverState.run_id == run.id))
+        assert state is not None
+        state.capability_ledger_json = {**state.capability_ledger_json, "mysql_metadata_discovered": {"confirmed": True}}
+        session.add_all([
+            VerifiedFact(run_id=run.id, fact_key="asset_warranty.valid_baseline", fact_type="BUSINESS_RESPONSE_BASELINE", value_json={}, confidence=95, promotion_status="VERIFIED"),
+            VerifiedFact(run_id=run.id, fact_key="asset_warranty.invalid_baseline", fact_type="BUSINESS_RESPONSE_BASELINE", value_json={}, confidence=95, promotion_status="VERIFIED"),
+            VerifiedFact(run_id=run.id, fact_key="asset_warranty.mysql_boolean_oracle", fact_type="BOOLEAN_ORACLE", value_json={}, confidence=95, promotion_status="VERIFIED"),
+            VerifiedFact(run_id=run.id, fact_key="asset_warranty.mysql_dbms", fact_type="MYSQL_DBMS", value_json={}, confidence=95, promotion_status="VERIFIED"),
+            VerifiedFact(run_id=run.id, fact_key="asset_warranty.mysql_version", fact_type="MYSQL_VERSION", value_json={}, confidence=95, promotion_status="VERIFIED"),
+            VerifiedFact(run_id=run.id, fact_key="asset_warranty.mysql_version_comment", fact_type="MYSQL_VERSION_COMMENT", value_json={}, confidence=95, promotion_status="VERIFIED"),
+            VerifiedFact(run_id=run.id, fact_key="asset_warranty.current_database", fact_type="CURRENT_DATABASE", value_json={"database": "asset_warranty"}, confidence=95, promotion_status="VERIFIED"),
+            VerifiedFact(run_id=run.id, fact_key="asset_warranty.mysql_user_tables", fact_type="MYSQL_USER_TABLES", value_json={"tables": [{"name": "warranties"}]}, confidence=95, promotion_status="VERIFIED"),
+            VerifiedFact(run_id=run.id, fact_key="asset_warranty.mysql_candidate_columns", fact_type="MYSQL_CANDIDATE_COLUMNS", value_json={"columns": [{"name": "flag"}]}, confidence=95, promotion_status="VERIFIED"),
+        ])
+        await session.flush()
+        orchestrator = MultiAgentOrchestrator()
+
+        assert await orchestrator._asset_warranty_mysql_finish_ready(session, run, challenge) is True
 
 
 def test_planner_cannot_schedule_execution_and_analysis_rejects_bad_controls() -> None:

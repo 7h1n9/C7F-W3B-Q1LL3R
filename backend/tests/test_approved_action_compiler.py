@@ -28,7 +28,7 @@ async def _rows(session, *, tool: str, arguments: dict, state: dict | None = Non
         name="Warranty challenge",
         target_url="http://192.168.236.1:28036",
         allowed_hosts=["192.168.236.1"],
-        metadata_json={"adapter": "asset_warranty", "endpoint": "/api/warranty/check", "method": "POST", "content_type": "application/json", "fields": ["asset_no", "department"], "control_values": {"asset_no": "PC-2026-013", "department": "OPS"}},
+        metadata_json={"adapter": "asset_warranty", "dbms": "mysql", "endpoint": "/api/warranty/check", "method": "POST", "content_type": "application/json", "fields": ["asset_no", "department"], "control_values": {"asset_no": "PC-2026-013", "department": "OPS"}},
     )
     session.add(challenge)
     await session.flush()
@@ -86,10 +86,10 @@ async def test_boolean_compare_compiler_emits_runner_contract_without_task_budge
 
 
 @pytest.mark.asyncio
-async def test_sqlite_metadata_requires_verified_boolean_oracle_source(session_factory):
+async def test_mysql_metadata_requires_verified_boolean_oracle_source(session_factory):
     async with session_factory() as session:
-        run, challenge, proposal, review = await _rows(session, tool="sqlite_metadata_discovery", arguments={"target_expression": "SELECT name FROM sqlite_master"})
+        run, challenge, proposal, review = await _rows(session, tool="mysql_metadata_discovery", arguments={"target_expression": "DATABASE()", "expression_type": "METADATA_DISCOVERY", "supporting_evidence_ids": ["missing"], "supporting_fact_ids": ["missing"], "source_hypothesis_id": "missing", "approved_analysis_review_id": "missing", "assumption_status": "VERIFIED"})
         with pytest.raises(DomainError) as error:
-            await approved_action_compiler.compile(session, run, challenge, proposal, review, "sqlite_metadata_discovery")
+            await approved_action_compiler.compile(session, run, challenge, proposal, review, "mysql_metadata_discovery")
         assert error.value.code == "APPROVED_ACTION_COMPILE_FAILED"
         assert error.value.details["reason"] == "BOOLEAN_ORACLE_REQUIRED"

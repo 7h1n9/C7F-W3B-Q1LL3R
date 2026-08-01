@@ -27,9 +27,7 @@ def upgrade() -> None:
                 "WHERE updated_at IS NULL"
             )
         )
-        bind = op.get_bind()
-        if bind.dialect.name == "mysql":
-            op.alter_column("compaction_leases", "updated_at", nullable=False)
+        op.alter_column("compaction_leases", "updated_at", nullable=False)
 
 
 def downgrade() -> None:

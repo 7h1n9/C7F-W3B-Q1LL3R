@@ -43,6 +43,17 @@ class ChallengeInput(BaseModel):
             raise ValueError(
                 "traffic-analysis challenges must not define target_url or allowed_hosts"
             )
+        metadata = dict(self.metadata_json or {})
+        if metadata.get("adapter") == "asset_warranty":
+            if metadata.get("dbms", "mysql") != "mysql":
+                raise ValueError("asset_warranty challenges must declare metadata_json.dbms=mysql")
+            metadata.setdefault("dbms", "mysql")
+            metadata.setdefault("endpoint", "/api/warranty/check")
+            metadata.setdefault("method", "POST")
+            metadata.setdefault("content_type", "application/json")
+            metadata.setdefault("fields", ["asset_no", "department"])
+            metadata.setdefault("control_values", {"asset_no": "PC-2026-013", "department": "OPS"})
+            self.metadata_json = metadata
         return self
 
 

@@ -97,13 +97,13 @@ async def snapshot_run_skills(
     return snapshots
 
 
-def allowed_tools_for(challenge_type: str) -> set[str]:
-    return (
+def allowed_tools_for(challenge_type: str, metadata: dict | None = None) -> set[str]:
+    tools = (
         {
             "http_request", "http_session_request", "http_extract", "request_capture", "whatweb_fingerprint",
             "js_asset_analyze", "source_map_analyze", "file_type", "strings_extract", "archive_list",
             "content_discovery", "jwt_inspect", "sqlmap_detect", "sqlmap_run", "nmap_service_probe", "nikto_scan",
-            "sql_injection_probe", "sql_boolean_compare", "sql_union_probe", "oracle_probe_matrix", "boolean_config_extract", "sqlite_metadata_discovery",
+            "sql_injection_probe", "sql_boolean_compare", "sql_union_probe", "oracle_probe_matrix", "boolean_config_extract", "oracle_expression_calibration", "mysql_metadata_discovery", "sqlite_metadata_discovery",
             "binwalk_scan", "exiftool_metadata", "file_read", "file_search", "python_run", "script_run", "sandbox_exec",
         }
         if challenge_type == "WEB_TARGET"
@@ -122,6 +122,11 @@ def allowed_tools_for(challenge_type: str) -> set[str]:
             "pcap_credentials",
         }
     )
+    metadata = metadata or {}
+    if metadata.get("adapter") == "asset_warranty" and str(metadata.get("dbms") or "").lower() == "mysql":
+        tools.discard("sqlite_metadata_discovery")
+        tools.add("mysql_metadata_discovery")
+    return tools
 
 
 async def specialist_skill_catalog(

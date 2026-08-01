@@ -13,12 +13,21 @@ async def effective_tools_for(session: AsyncSession, run: SolveRun, challenge: C
     # the source of runtime tool drift.
     from app.models.run import AttemptToolManifest, RunExecutionLease
     lease = await session.scalar(select(RunExecutionLease).where(RunExecutionLease.run_id == run.id))
+    asset_mysql = challenge.metadata_json.get("adapter") == "asset_warranty" and str(challenge.metadata_json.get("dbms") or "").lower() == "mysql"
     if lease and run.engine_type == "codex_sdk":
         manifest = await session.scalar(select(AttemptToolManifest).where(AttemptToolManifest.attempt_id == lease.attempt_id))
         if manifest is not None:
-            return set(manifest.effective_tools or []) - await forbidden_tools_for(session, run.id)
-    allowed = set(allowed_tools_for(challenge.challenge_type))
+            effective = set(manifest.effective_tools or [])
+            if asset_mysql:
+                effective.discard("sqlite_metadata_discovery")
+                if "mysql_metadata_discovery" in set(manifest.backend_registry_tools or []) and "mysql_metadata_discovery" in set(manifest.runner_capability_tools or []):
+                    effective.add("mysql_metadata_discovery")
+            return effective - await forbidden_tools_for(session, run.id)
+    allowed = set(allowed_tools_for(challenge.challenge_type, challenge.metadata_json or {}))
     role_tools = set((run.role_snapshot_json or {}).get("tools") or [])
+    if asset_mysql:
+        role_tools.discard("sqlite_metadata_discovery")
+        role_tools.add("mysql_metadata_discovery")
     if role_tools:
         allowed &= role_tools
     try:

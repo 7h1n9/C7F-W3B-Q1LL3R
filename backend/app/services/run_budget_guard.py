@@ -157,8 +157,7 @@ class RunBudgetGuard:
     async def _enforce(self, session, run: SolveRun, *, attempt_id: str | None = None, turn_id: str | None = None, turn_started_at=None, required_action: bool = False, required_action_kind: str | None = None) -> BudgetDecision:
         # The lock is essential: checking a COUNT and inserting the logical
         # call in separate transactions lets concurrent model actions all see
-        # the same remaining budget.  MySQL/InnoDB honors FOR UPDATE; SQLite
-        # still gets the durable reservation field and serializes the write.
+        # the same remaining budget. MySQL/InnoDB serializes the locked row.
         locked_run = await session.scalar(
             select(SolveRun).where(SolveRun.id == run.id).with_for_update()
         )

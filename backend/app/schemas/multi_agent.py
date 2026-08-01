@@ -158,6 +158,40 @@ class AgentTaskResultContract(BaseModel):
         return self
 
 
+class ProductionResultContext(BaseModel):
+    """Durable, cross-session input for a RESULT_REVIEW turn.
+
+    This is deliberately a transport snapshot rather than a collection of
+    SQLAlchemy objects.  The controller builds it only after the producing
+    ToolCall, Artifact, Observation, EvidenceLedger and task result have been
+    committed, then the Analysis turn can safely use it in a new transaction.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    run_id: str
+    attempt_id: str
+    proposal_id: str
+    plan_review_id: str
+    approved_action_id: str
+    agent_task_id: str
+    task_status: str
+    task_result: dict[str, Any]
+    proposal: dict[str, Any]
+    plan_review: dict[str, Any]
+    approved_action: dict[str, Any]
+    production_task: dict[str, Any]
+    tool_calls: list[dict[str, Any]]
+    artifacts: list[dict[str, Any]]
+    observations: list[dict[str, Any]]
+    evidence_ids: list[str]
+    candidate_facts: list[dict[str, Any]]
+    current_verified_fact_ids: list[str]
+    current_capabilities: dict[str, Any]
+    current_phase: str
+    success_condition: str = ""
+
+
 class AgentRolePolicyContract(BaseModel):
     model_config = ConfigDict(extra="forbid")
 

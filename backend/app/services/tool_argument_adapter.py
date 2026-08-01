@@ -28,6 +28,8 @@ _REQUEST_TOOLS = {
     "sql_union_probe",
     "oracle_probe_matrix",
     "boolean_config_extract",
+    "oracle_expression_calibration",
+    "mysql_metadata_discovery",
 }
 
 

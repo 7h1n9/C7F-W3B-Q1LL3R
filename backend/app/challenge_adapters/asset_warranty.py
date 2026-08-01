@@ -19,9 +19,10 @@ class AssetWarrantyAdapter:
     @staticmethod
     def matches(challenge: Challenge) -> bool:
         metadata = challenge.metadata_json or {}
-        declared = str(metadata.get("adapter") or metadata.get("challenge_adapter") or "").lower()
-        name = str(challenge.name or "").lower().replace("-", "_").replace(" ", "_")
-        return declared in {"asset_warranty", "asset-warranty"} or "asset_warranty" in name or "warranty" in name
+        return (
+            str(metadata.get("adapter") or "").lower() == AssetWarrantyAdapter.key
+            and str(metadata.get("dbms") or "").lower() == "mysql"
+        )
 
     @staticmethod
     def context(challenge: Challenge) -> dict[str, Any]:
@@ -45,7 +46,7 @@ class AssetWarrantyAdapter:
                 "surface_recon",
                 "business_baseline",
                 "boolean_oracle",
-                "sqlite_metadata",
+                "mysql_metadata",
                 "bounded_extraction",
                 "flag_verification",
             ],

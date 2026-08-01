@@ -1,0 +1,98 @@
+name: asset-warranty-mysql
+
+services:
+  asset-warranty-db:
+    container_name: asset-warranty-db
+    build:
+      context: ./mysql
+    image: asset-warranty-mysql:8.4
+    environment:
+      MYSQL_DATABASE: asset_warranty
+      MYSQL_USER: warranty_app
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?set MYSQL_PASSWORD in .env}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?set MYSQL_ROOT_PASSWORD in .env}
+      WARRANTY_FLAG: ${WARRANTY_FLAG:?set WARRANTY_FLAG in .env}
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_0900_ai_ci
+      - --skip-name-resolve
+    volumes:
+      - asset_warranty_mysql_data:/var/lib/mysql
+    networks:
+      - asset-warranty-net
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - mysqladmin ping -h 127.0.0.1 -uroot -p"$${MYSQL_ROOT_PASSWORD}"
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+    restart: unless-stopped
+
+  asset-warranty-tests:
+    build:
+      context: ./app
+    profiles: [test]
+    environment:
+      TARGET_URL: http://asset-warranty-web:5000
+      MYSQL_HOST: asset-warranty-db
+      MYSQL_PORT: 3306
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?set MYSQL_ROOT_PASSWORD in .env}
+    depends_on:
+      asset-warranty-web:
+        condition: service_healthy
+    volumes:
+      - ./tests:/tests:ro
+    networks:
+      - asset-warranty-net
+    command: ["pytest", "-q", "/tests"]
+
+  asset-warranty-web:
+    container_name: asset-warranty-web
+    build:
+      context: ./app
+    environment:
+      DB_HOST: asset-warranty-db
+      DB_PORT: 3306
+      DB_NAME: asset_warranty
+      DB_USER: warranty_app
+      DB_PASSWORD: ${MYSQL_PASSWORD:?set MYSQL_PASSWORD in .env}
+      DB_CHARSET: utf8mb4
+    depends_on:
+      asset-warranty-db:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:28037:5000"
+    networks:
+      - asset-warranty-net
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp
+    user: appuser
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - import urllib.request; urllib.request.urlopen('http://127.0.0.1:5000/health', timeout=2)
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+    restart: unless-stopped
+
+networks:
+  asset-warranty-net:
+    name: asset-warranty-net
+    driver: bridge
+    driver_opts:
+      com.docker.network.bridge.enable_ip_masquerade: "false"
+
+volumes:
+  asset_warranty_mysql_data:
+    name: asset-warranty-mysql-data

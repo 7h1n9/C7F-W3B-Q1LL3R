@@ -9,7 +9,7 @@ enabled: true
 # default Web role prevents a false manifest-drift block at Run intake.
 # sqlmap is intentionally not in the default role until the VM self-test
 # proves its executable environment; bounded SQL probes remain available.
-tools: [http_request, http_session_request, http_extract, request_capture, file_read, file_search, python_run, script_run, sandbox_exec, jwt_inspect, js_asset_analyze, source_map_analyze, content_discovery, file_type, strings_extract, archive_list, sql_injection_probe, sql_boolean_compare, sql_union_probe, oracle_probe_matrix, boolean_config_extract, sqlite_metadata_discovery, nmap_service_probe, nikto_scan]
+tools: [http_request, http_session_request, http_extract, request_capture, file_read, file_search, python_run, script_run, sandbox_exec, jwt_inspect, js_asset_analyze, source_map_analyze, content_discovery, file_type, strings_extract, archive_list, sql_injection_probe, sql_boolean_compare, sql_union_probe, oracle_probe_matrix, boolean_config_extract, oracle_expression_calibration, mysql_metadata_discovery, nmap_service_probe, nikto_scan]
 skills: [ctf-solver-core, web-ctf-methodology]
 limits:
   max_tool_calls: 40

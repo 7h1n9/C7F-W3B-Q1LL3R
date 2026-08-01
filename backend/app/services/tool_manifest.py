@@ -17,7 +17,6 @@ from app.services.runtime_build import backend_build_manifest
 from app.services.skill_selection import allowed_tools_for
 from app.tools.registry import load_tool_definitions
 
-
 # These tools are useful accelerators, but they are not required to start a
 # Codex Attempt.  Remote Runner builds may omit them; SQL extraction can use
 # sql_boolean_compare plus the bounded script_run fallback instead.
@@ -43,7 +42,7 @@ async def refresh_runtime_tool_manifest(
     mcp_tools: list[dict[str, Any]] | None = None,
 ) -> AttemptToolManifest:
     role = {str(item) for item in (run.role_snapshot_json or {}).get("tools", [])}
-    challenge_tools = set(allowed_tools_for(challenge.challenge_type))
+    challenge_tools = set(allowed_tools_for(challenge.challenge_type, challenge.metadata_json or {}))
     definitions = load_tool_definitions()
     backend = {name for name, item in definitions.items() if item.enabled}
     try:

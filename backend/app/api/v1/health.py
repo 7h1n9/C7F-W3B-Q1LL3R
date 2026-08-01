@@ -1,5 +1,7 @@
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
+from sqlalchemy import text
 
+from app.core.database import engine
 from app.services.runtime_build import backend_build_manifest
 
 router = APIRouter(tags=["health"])
@@ -17,7 +19,12 @@ async def health_live() -> dict:
 
 @router.get("/health/ready")
 async def health_ready() -> dict:
-    # Dependency health is checked by the readiness/preflight endpoints; this
-    # endpoint remains cheap so Start-All can distinguish an accepting backend
-    # from a process that has not mounted its API yet.
-    return {"data": {"status": "ready", "ready": True}}
+    try:
+        async with engine.connect() as connection:
+            await connection.execute(text("SELECT 1"))
+    except Exception as error:
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "DATABASE_NOT_READY", "message": str(error)[:500]},
+        ) from error
+    return {"data": {"status": "ready", "ready": True, "database": "mysql+asyncmy"}}

@@ -73,6 +73,8 @@ def _hash(value: Any) -> str:
 
 async def boolean_config_extract(request: JobRequest) -> dict[str, Any]:
     args = dict(request.arguments)
+    if str(args.get("dbms") or "mysql").lower() != "mysql":
+        raise HTTPException(422, detail="BOOLEAN_EXTRACT_DBMS_UNSUPPORTED")
     spec = _spec(args)
     field = str(args.get("test_field") or "")
     expression = str(args.get("target_expression") or args.get("expression") or "").strip().rstrip(";").strip()
@@ -109,6 +111,7 @@ async def boolean_config_extract(request: JobRequest) -> dict[str, Any]:
                 "job_id": job_id,
                 "request": {**spec, "headers": {key: "<redacted>" if key.lower() in {"authorization", "cookie", "set-cookie", "proxy-authorization"} else value for key, value in spec.get("headers", {}).items()}},
                 "test_field": field,
+                "dbms": "mysql",
                 "control_fields": control_fields,
                 "target_expression": expression,
                 "provenance": provenance,

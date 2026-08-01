@@ -3,7 +3,7 @@ from app.services.target_allowlist import require_target_allowed
 
 
 def enforce_tool_policy(name: str, arguments: dict, allowed_hosts: list[str]) -> None:
-    if name in {"http_request", "http_session_request", "http_extract", "sql_injection_probe", "sql_boolean_compare", "sql_union_probe", "oracle_probe_matrix", "boolean_config_extract", "sqlite_metadata_discovery", "request_capture"}:
+    if name in {"http_request", "http_session_request", "http_extract", "sql_injection_probe", "sql_boolean_compare", "sql_union_probe", "oracle_probe_matrix", "boolean_config_extract", "oracle_expression_calibration", "mysql_metadata_discovery", "sqlite_metadata_discovery", "request_capture"}:
         if name == "http_session_request" and str(arguments.get("operation") or "request").lower() in {"inspect", "clear", "create"}:
             return
         if name == "request_capture" and arguments.get("request_file") and not arguments.get("url"):

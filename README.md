@@ -53,7 +53,7 @@ alembic downgrade -1
 alembic upgrade head
 ```
 
-`APP_DATABASE_URL` 默认使用 `mysql+asyncmy`。本地测试时它可以指向异步 SQLite URL；生产环境仍然使用 MySQL 8。
+`APP_DATABASE_URL` 默认使用 `mysql+asyncmy`，开发、测试和生产环境均要求使用 MySQL 8。
 
 ## 单智能体 OpenAI 兼容解题循环
 

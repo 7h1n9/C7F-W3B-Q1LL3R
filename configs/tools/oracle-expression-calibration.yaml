@@ -1,0 +1,25 @@
+name: oracle_expression_calibration
+display_name: Expression Oracle Calibration
+category: web
+description: Bounded paired TRUE/FALSE calibration of the verified Web Boolean predicate; no direct database connection.
+risk_level: high
+enabled: true
+parameters:
+  dbms: {type: string, required: false}
+  request: {type: object, required: true}
+  test_field: {type: string, required: true}
+  baseline_value: {type: string, required: true}
+  control_fields: {type: object, required: false}
+  oracle: {type: object, required: true}
+  predicate_template: {type: string, required: true}
+  matrix: {type: array, items: {type: object}, required: true}
+  skip_levels: {type: array, items: {type: integer}, required: false}
+  existing_profile: {type: object, required: false}
+  repeats_per_expression: {type: integer, required: false}
+  max_calibration_requests: {type: integer, required: false}
+  supporting_evidence_ids: {type: array, items: {type: string}, required: true}
+  supporting_fact_ids: {type: array, items: {type: string}, required: true}
+  source_hypothesis_id: {type: string, required: true}
+  approved_analysis_review_id: {type: string, required: true}
+  assumption_status: {type: string, required: true}
+permissions: {target_allowlist_required: true}

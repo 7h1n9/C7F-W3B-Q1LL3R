@@ -42,6 +42,18 @@ def test_state_machine_allows_controlled_reporting_from_execution() -> None:
     assert run.status == "REPORTING"
 
 
+def test_state_machine_preserves_enumeration_phase() -> None:
+    class Run:
+        status = "EVALUATING"
+        current_phase = "ENUMERATION"
+        started_at = object()
+        finished_at = None
+
+    run = Run()
+    transition(run, RunStatus.PLANNING)
+    assert run.current_phase == "ENUMERATION"
+
+
 def test_model_visible_role_snapshot_uses_live_permitted_tools() -> None:
     class Run:
         role_snapshot_json = {

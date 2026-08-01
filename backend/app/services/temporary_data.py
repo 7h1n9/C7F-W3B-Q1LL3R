@@ -270,7 +270,8 @@ class TemporaryDataJanitor:
             run = runs.get(task.run_id)
             if not run:
                 continue
-            due = task.status not in {"PENDING", "RUNNING"} and task.created_at + (DEBUG_RETENTION if self.debug_mode else FAILED_RETENTION if task.status in {"FAILED", "BLOCKED", "NEED_REPLAN"} else TASK_CLEANUP_DELAY) <= now
+            created_at = task.created_at.replace(tzinfo=UTC) if task.created_at.tzinfo is None else task.created_at
+            due = task.status not in {"PENDING", "RUNNING"} and created_at + (DEBUG_RETENTION if self.debug_mode else FAILED_RETENTION if task.status in {"FAILED", "BLOCKED", "NEED_REPLAN"} else TASK_CLEANUP_DELAY) <= now
             if due:
                 result = await self.cleanup_task(session, run, task, now=now)
                 task_cleaned += int(result.get("status") == "COMPLETED")

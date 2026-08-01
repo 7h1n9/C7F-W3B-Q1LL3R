@@ -17,10 +17,8 @@ def _columns(table: str) -> set[str]:
 def upgrade() -> None:
     # Older migrations created a short alembic_version column. The new
     # revision identifier is longer, so widen it before Alembic writes the
-    # revision marker. Keep the SQLite path untouched for local migration
-    # validation.
-    if op.get_bind().dialect.name == "mysql":
-        op.execute("ALTER TABLE alembic_version MODIFY COLUMN version_num VARCHAR(128) NOT NULL")
+    # revision marker.
+    op.execute("ALTER TABLE alembic_version MODIFY COLUMN version_num VARCHAR(128) NOT NULL")
 
     tool_columns = _columns("tool_calls")
     for name, kind in (("logical_tool_call_id", sa.String(120)), ("parent_tool_call_id", sa.String(120)), ("execution_layer", sa.String(40))):

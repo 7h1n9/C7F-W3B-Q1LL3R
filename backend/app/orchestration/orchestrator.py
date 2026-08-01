@@ -630,7 +630,7 @@ class SolveOrchestrator:
                 run = await session.scalar(select(SolveRun).where(SolveRun.id == run_id))
                 if not run:
                     return
-                if run.engine_type == "codex_sdk":
+                if run.engine_type == "codex_sdk" and run.solver_mode != "multi_agent_v1":
                     await solver_state_service.ensure_confirmed_boolean_checkpoint(session, run)
                 try:
                     attempt, lease = await run_attempt_service.begin(session, run)

@@ -1,15 +1,39 @@
+import importlib
 import ipaddress
 import os
 import socket
+import sys
 from functools import lru_cache
 from pathlib import Path
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+DATABASE_URL_SCHEME = "mysql+asyncmy"
+
+
+def validate_database_driver(database_url: str) -> None:
+    """Fail fast with an actionable error when the async MySQL driver is absent."""
+    scheme = database_url.split(":", 1)[0].lower()
+    if scheme != DATABASE_URL_SCHEME:
+        raise ValueError(
+            f"DATABASE_ASYNC_DRIVER_INVALID: database_url_scheme={scheme} "
+            f"required_scheme={DATABASE_URL_SCHEME}"
+        )
+    try:
+        importlib.import_module("asyncmy")
+    except ModuleNotFoundError as error:
+        if error.name != "asyncmy":
+            raise
+        raise RuntimeError(
+            "DATABASE_ASYNC_DRIVER_MISSING: driver=asyncmy "
+            f"database_url_scheme={scheme} python_executable={sys.executable}"
+        ) from error
 
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_prefix="APP_", extra="ignore")
-    database_url: str = "mysql+asyncmy://ctf_agent:ctf_agent@localhost:3306/ctf_agent"
+    database_url: str = "mysql+asyncmy://ctf_agent:ctf_agent@localhost:3307/ctf_agent"
     workspace_root: Path = Path("../data/workspaces")
     runner_url: str = "http://192.168.236.128:8091"
     runner_api_token: str = "development-runner-token"
@@ -31,6 +55,17 @@ class Settings(BaseSettings):
     web_search_url: str = ""
     web_search_api_key: str = ""
     web_search_timeout_seconds: int = 20
+
+    @field_validator("database_url")
+    @classmethod
+    def require_mysql_database_url(cls, value: str) -> str:
+        if value.split(":", 1)[0].lower() != DATABASE_URL_SCHEME:
+            raise ValueError("APP_DATABASE_URL must use mysql+asyncmy")
+        return value
+
+    @property
+    def platform_database_is_mysql(self) -> bool:
+        return self.database_url.split(":", 1)[0].lower() == DATABASE_URL_SCHEME
 
     # Hotfix feature gates. They deliberately default to off; Codex MCP is
     # enabled for a run only after the explicit preflight succeeds.
@@ -56,6 +91,8 @@ class Settings(BaseSettings):
         }
 
     def require_safe_production_secrets(self) -> None:
+        if not self.platform_database_is_mysql:
+            raise RuntimeError("Platform persistence requires a MySQL database URL.")
         if self.environment.lower() not in {"dev", "development", "test", "testing"} and (
             self.runner_api_token == "development-runner-token"
             or self.encryption_key == "development-only-change-me"

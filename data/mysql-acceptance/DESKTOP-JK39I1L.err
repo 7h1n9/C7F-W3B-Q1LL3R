@@ -1,0 +1,7 @@
+2026-07-30T01:24:37.928145Z 0 [System] [MY-013169] [Server] C:\Program Files\MySQL\MySQL Server 8.0\bin\mysqld.exe (mysqld 8.0.45) initializing of server in progress as process 23868
+2026-07-30T01:24:37.945582Z 1 [System] [MY-013576] [InnoDB] InnoDB initialization has started.
+2026-07-30T01:24:38.112483Z 1 [System] [MY-013577] [InnoDB] InnoDB initialization has ended.
+2026-07-30T01:24:39.164131Z 0 [ERROR] [MY-010147] [Server] Too many arguments (first extra is 'D:\desktop\毕业设计\C7F-W3B-Q1LL3R\data\mysql-acceptance\initialize.err').
+2026-07-30T01:24:39.164928Z 0 [ERROR] [MY-013236] [Server] The designated data directory D:\desktop\毕业设计\C7F-W3B-Q1LL3R\data\mysql-acceptance\ is unusable. You can remove all files that the server added to it.
+2026-07-30T01:24:39.165491Z 0 [ERROR] [MY-010119] [Server] Aborting
+2026-07-30T01:24:39.903173Z 0 [System] [MY-010910] [Server] C:\Program Files\MySQL\MySQL Server 8.0\bin\mysqld.exe: Shutdown complete (mysqld 8.0.45)  MySQL Community Server - GPL.

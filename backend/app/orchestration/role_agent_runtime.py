@@ -121,7 +121,7 @@ class RoleAgentRuntime:
         }
         if task.agent_role == AgentRole.PLANNER.value:
             schema = {"proposal": PlannerProposalContract.model_json_schema()}
-            instruction = "Output only PlannerProposalContract, either as the object itself or wrapped in {proposal: ...}. Do not output AgentTaskResult, status, new_facts, or proposed_next_action. allowed_tools must contain only exact names from the Controller catalog: http_request, content_discovery, sql_boolean_compare, oracle_probe_matrix, sqlite_metadata_discovery, boolean_config_extract, script_run, http_compare."
+            instruction = "Output only PlannerProposalContract, either as the object itself or wrapped in {proposal: ...}. Do not output AgentTaskResult, status, new_facts, or proposed_next_action. allowed_tools must contain only exact names from the Controller catalog: http_request, content_discovery, sql_boolean_compare, oracle_probe_matrix, mysql_metadata_discovery, boolean_config_extract, script_run, http_compare."
             if adapter:
                 instruction += " For the asset_warranty adapter, use only http_request for RECON proposals. Schedule exactly one bounded request per proposal; never use http_compare, never put a requests array in approved_arguments, and do not combine valid and invalid controls under max_logical_calls=1. Read the endpoint, method, fields, and control values from challenge_adapter."
         elif task.agent_role == AgentRole.ANALYSIS.value:

@@ -57,29 +57,18 @@ def upgrade() -> None:
             ids = connection.execute(sa.select(traces.c.id).where(predicate).order_by(traces.c.created_at.desc())).scalars().all()
             if len(ids) > 1:
                 connection.execute(traces.delete().where(traces.c.id.in_(ids[1:])))
-        if connection.dialect.name == "sqlite":
-            with op.batch_alter_table("tool_execution_traces") as batch:
-                batch.create_unique_constraint(
-                    "uq_tool_trace_identity",
-                    ["logical_tool_call_id", "execution_layer", "event_type", "external_id", "payload_digest"],
-                )
-        else:
-            op.create_unique_constraint(
-                "uq_tool_trace_identity",
-                "tool_execution_traces",
-                ["logical_tool_call_id", "execution_layer", "event_type", "external_id", "payload_digest"],
-            )
+        op.create_unique_constraint(
+            "uq_tool_trace_identity",
+            "tool_execution_traces",
+            ["logical_tool_call_id", "execution_layer", "event_type", "external_id", "payload_digest"],
+        )
 
 
 def downgrade() -> None:
     bind = op.get_bind()
     constraints = {item["name"] for item in sa.inspect(bind).get_unique_constraints("tool_execution_traces")}
     if "uq_tool_trace_identity" in constraints:
-        if bind.dialect.name == "sqlite":
-            with op.batch_alter_table("tool_execution_traces") as batch:
-                batch.drop_constraint("uq_tool_trace_identity")
-        else:
-            op.drop_constraint("uq_tool_trace_identity", "tool_execution_traces", type_="unique")
+        op.drop_constraint("uq_tool_trace_identity", "tool_execution_traces", type_="unique")
     indexes = {item["name"] for item in sa.inspect(bind).get_indexes("run_events")}
     if "ix_run_events_payload_digest" in indexes:
         op.drop_index("ix_run_events_payload_digest", table_name="run_events")

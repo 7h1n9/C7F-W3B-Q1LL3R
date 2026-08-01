@@ -4,6 +4,7 @@ category: web
 description: Bounded resumable extraction through a confirmed boolean oracle.
 risk_level: high
 parameters:
+  dbms: {type: string, required: false}
   request:
     type: object
     required: true
@@ -40,5 +41,6 @@ parameters:
   source_hypothesis_id: {type: string, required: true}
   approved_analysis_review_id: {type: string, required: true}
   assumption_status: {type: string, required: true}
+  resume: {type: boolean, required: false}
 limits: {max_requests: 1024, timeout_seconds: 30, concurrency: 2}
 permissions: {target_allowlist_required: true}

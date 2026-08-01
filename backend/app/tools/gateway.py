@@ -11,7 +11,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.exceptions import DomainError
 from app.models.challenge import Challenge
 from app.models.multi_agent import (
-    AgentTask,
     AnalysisReview,
     ApprovedAction,
     EvidenceLedger,
@@ -52,7 +51,7 @@ _SECRET_KEYS = {"token", "password", "passwd", "secret", "api_key", "authorizati
 def is_recon_sql_payload(arguments: dict) -> bool:
     """Detect SQL exploit syntax before a Recon request reaches the Runner."""
     flattened = json.dumps(arguments or {}, ensure_ascii=False, sort_keys=True).lower()
-    markers = ("1=1", "1 = 1", "1%3d1", "1=2", "1 = 2", "union select", "union+select", "select%20", "boolean extraction", "sqlite_master")
+    markers = ("1=1", "1 = 1", "1%3d1", "1=2", "1 = 2", "union select", "union+select", "select%20", "boolean extraction")
     return any(marker in flattened for marker in markers)
 
 
@@ -164,6 +163,14 @@ class ToolGateway:
             raise DomainError("AGENT_SCOPE_INVALID", "The task role does not match the tool-call scope.", {"agent_task_id": agent_task_id, "agent_role": agent_role}, 403)
         lease = coordinated["lease"]
         permitted_tools = await effective_tools_for(session, run, challenge)
+        metadata = challenge.metadata_json or {}
+        if metadata.get("adapter") == "asset_warranty" and str(metadata.get("dbms") or "").lower() == "mysql" and name == "sqlite_metadata_discovery":
+            raise DomainError(
+                "TOOL_NOT_ALLOWED_FOR_DBMS",
+                "SQLite metadata discovery is disabled for the MySQL asset-warranty challenge.",
+                {"adapter": "asset_warranty", "dbms": "mysql", "required_tool": "mysql_metadata_discovery"},
+                422,
+            )
         if name not in permitted_tools:
             raise DomainError(
                 "TOOL_NOT_ALLOWED_FOR_CHALLENGE",
@@ -214,13 +221,10 @@ class ToolGateway:
                 details.update({"missing_fields": details.get("errors", []), "unknown_fields": [], "expected_schema": definition.parameters, "corrected_example": adapt_arguments(name, arguments), "available_operations": [name]})
                 if approved_action_id:
                     approved = await session.get(ApprovedAction, approved_action_id)
-                    task = await session.get(AgentTask, agent_task_id) if agent_task_id else None
                     if approved is not None:
                         approved.status = "REJECTED"
                         approved.compile_status = "REJECTED"
                         approved.compile_error_json = {"code": error.code, "details": details}
-                    if task is not None:
-                        task.status = "NEED_REPLAN"
                     run.status = "PAUSED_CHECKPOINT"
                     run.last_error_code = "TOOL_INVALID_ARGUMENT"
                     run.last_error_message = error.message[:4000]
@@ -233,7 +237,7 @@ class ToolGateway:
             from app.models.multi_agent import VerifiedFact
             schema_facts = list((await session.scalars(select(VerifiedFact).where(VerifiedFact.run_id == run.id, VerifiedFact.id.in_(arguments.get("supporting_fact_ids") or [])))).all())
             verified_schema = any(str(item.fact_type).upper() in {"SQL_SCHEMA", "SQL_TABLE", "SQL_COLUMN", "SCHEMA"} and item.promotion_status == "VERIFIED" for item in schema_facts)
-        if name in {"boolean_config_extract", "sqlite_metadata_discovery"}:
+        if name in {"boolean_config_extract", "mysql_metadata_discovery", "sqlite_metadata_discovery"}:
             await self._validate_sql_sources(session, run, arguments)
             validate_sql_expression_provenance(arguments, verified_schema=verified_schema)
         elif name == "sqlmap_run" and str(arguments.get("action") or "detect") != "detect":

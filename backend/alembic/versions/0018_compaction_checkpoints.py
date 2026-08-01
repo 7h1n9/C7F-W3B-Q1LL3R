@@ -38,8 +38,8 @@ def upgrade() -> None:
             if name not in columns:
                 op.add_column("solve_runs", sa.Column(name, kind, nullable=True, server_default=default))
     if "run_events" in tables and "event_id" not in _columns("run_events"):
-        # Keep this nullable for old SQLite dumps; EventService assigns it for
-        # new rows and MySQL deployments can promote it to AUTO_INCREMENT.
+            # Keep this nullable for legacy rows; MySQL deployments can promote
+            # it to AUTO_INCREMENT.
         op.add_column("run_events", sa.Column("event_id", sa.BigInteger(), nullable=True, autoincrement=True))
         op.create_index("ix_run_events_event_id", "run_events", ["event_id"])
 

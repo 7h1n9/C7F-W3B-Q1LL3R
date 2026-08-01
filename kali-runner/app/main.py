@@ -19,6 +19,7 @@ from app.service import job_service
 from app.workspace.paths import DOWNLOAD_DIRS, UPLOAD_DIRS, initialize_workspace, safe_child, workspace_for
 from app.executors.session_store import session_store
 from app.executors.target_allowlist import enforced_proxy_available
+from app.tool_registry import TOOL_REGISTRY
 
 
 @asynccontextmanager
@@ -57,14 +58,8 @@ async def health() -> dict:
 
 
 async def capability_registry() -> dict:
-    tools = [
-        "http_request", "http_session_request", "http_extract", "whatweb_fingerprint", "js_asset_analyze", "source_map_analyze",
-        "file_type", "strings_extract", "archive_list", "content_discovery", "jwt_inspect", "session_inspect", "session_list_secret_refs", "jwt_clone_claims", "jwt_sign", "http_session_set_cookie_ref", "file_read",
-        "file_search", "python_run", "script_run", "sandbox_exec", "pcap_metadata", "pcap_protocols", "pcap_query", "pcap_tcp_stream",
-        "pcap_http_objects", "pcap_dns_summary", "pcap_credentials", "request_capture", "sqlmap_detect", "sqlmap_run", "sql_injection_probe", "sql_boolean_compare", "sql_union_probe", "oracle_probe_matrix", "boolean_config_extract", "sqlite_metadata_discovery",
-        "nikto_scan", "binwalk_scan", "exiftool_metadata",
-    ]
-    placeholder_tools = {"pcap_tcp_stream", "pcap_http_objects", "pcap_dns_summary", "pcap_credentials", "nmap_service_probe", "nikto_scan", "binwalk_scan", "exiftool_metadata"}
+    tools = [item.name for item in TOOL_REGISTRY]
+    placeholder_tools = {item.name for item in TOOL_REGISTRY if item.placeholder}
     command_map = {"python_run": ("python", "--version"), "script_run": ("python", "--version"), "sandbox_exec": ("file", "--version"), "sqlmap_detect": ("sqlmap", "--version"), "sqlmap_run": ("sqlmap", "--version")}
     async def self_test(command: tuple[str, str] | None) -> tuple[bool, str | None]:
         if command is None:
@@ -80,7 +75,7 @@ async def capability_registry() -> dict:
     tool_rows = []
     for name in tools:
         ok, version = await self_test(command_map.get(name))
-        implemented = name not in placeholder_tools
+        implemented = next(item.implemented for item in TOOL_REGISTRY if item.name == name)
         installed = ok if name in command_map else True
         row = {"name": name, "implemented": implemented, "installed": installed, "enabled": implemented and installed, "available": implemented and installed, "version": version or ("policy-wrapper" if implemented else None), "self_test_ok": ok and implemented, "last_self_check": None}
         if name == "script_run":
@@ -90,6 +85,8 @@ async def capability_registry() -> dict:
             row.update({"supported_network_modes": ["none"], "target_allowlist_enforced": False})
         tool_rows.append(row)
     return {
+        "mysql_metadata_discovery": any(item.name == "mysql_metadata_discovery" and item.implemented for item in TOOL_REGISTRY),
+        "supported_dbms": sorted({dbms for item in TOOL_REGISTRY for dbms in item.supported_dbms}),
         "tools": tool_rows,
         "binaries": {name: bool(shutil.which(name)) for name in ("tshark", "capinfos", "ffuf", "feroxbuster", "sqlmap", "nmap", "nikto", "binwalk", "exiftool")},
         "interpreters": {name: bool(shutil.which(name)) for name in ("python", "node", "bash")},

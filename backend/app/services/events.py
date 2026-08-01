@@ -18,8 +18,8 @@ class EventService:
     async def append(
         self, session: AsyncSession, run_id: str, event_type: str, payload: dict | None = None
     ) -> RunEvent:
-        # This service runs in one backend process. A per-run lock works on SQLite
-        # and the row lock/counter remains durable for production database sessions.
+        # This service runs in one backend process. A per-run lock complements
+        # the durable MySQL row lock/counter.
         lock = self._run_locks.setdefault(run_id, asyncio.Lock())
         async with lock:
             body = payload or {}
@@ -39,17 +39,8 @@ class EventService:
             sequence = int(
                 await session.scalar(select(func.max(RunEvent.sequence)).where(RunEvent.run_id == run_id)) or 0
             ) + 1
-            # MySQL assigns the global BIGINT AUTO_INCREMENT event_id.  The
-            # SQLite/dev schema keeps the field nullable and uses a durable
-            # per-run fallback so old dumps remain insertable.
-            event_id = None
-            if not (session.bind and session.bind.dialect.name in {"mysql", "mariadb"}):
-                event_id = int(
-                    await session.scalar(select(func.max(RunEvent.event_id)).where(RunEvent.run_id == run_id)) or 0
-                ) + 1
             event = RunEvent(
                 run_id=run_id,
-                event_id=event_id,
                 sequence=sequence,
                 event_type=event_type,
                 payload_json=body,
@@ -78,10 +69,7 @@ class EventService:
                 await session.scalars(
                     select(RunEvent)
                     .where(RunEvent.run_id == run_id, RunEvent.sequence > after)
-                    # MySQL does not support PostgreSQL's ``NULLS LAST``
-                    # syntax.  Old SQLite rows can have a null event_id, so
-                    # use the per-run sequence as a portable fallback.
-                    .order_by(func.coalesce(RunEvent.event_id, RunEvent.sequence), RunEvent.sequence)
+                    .order_by(RunEvent.event_id, RunEvent.sequence)
                 )
             ).all()
         )

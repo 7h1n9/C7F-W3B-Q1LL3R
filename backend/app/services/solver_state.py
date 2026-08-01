@@ -124,7 +124,7 @@ class SolverStateService:
             "oracle": oracle,
             "baseline_value": arguments.get("baseline_value"),
             "do_not_repeat": ["recon", "connectivity_probe", "sql_boolean_compare", "workspace_read:notes/oracle-confirmation.md"],
-            "next_required_action": {"type": "SQLITE_METADATA_DISCOVERY_OR_BOUNDED_EXTRACTION", "preferred_tools": ["sqlite_metadata_discovery", "boolean_config_extract", "script_run"]},
+            "next_required_action": {"type": "MYSQL_METADATA_DISCOVERY_OR_BOUNDED_EXTRACTION", "preferred_tools": ["mysql_metadata_discovery", "boolean_config_extract", "script_run"]},
             "success_condition": "verified_flag_candidate",
         }
         run.recovery_checkpoint_json = checkpoint
@@ -143,6 +143,7 @@ class SolverStateService:
         oracle: dict,
         evidence_ids: list[str],
         fact_ids: list[str] | None = None,
+        baseline_value: str = "",
         true_stable: bool = True,
         false_stable: bool = True,
         differential: bool = True,
@@ -156,9 +157,9 @@ class SolverStateService:
         evidence = list((await session.scalars(select(Observation).where(Observation.run_id == run.id))).all())
         if not evidence:
             raise ValueError("BOOLEAN_ORACLE_EVIDENCE_MISSING")
-        payload = {"confirmed": True, "evidence_ids": list(evidence_ids), "fact_ids": list(fact_ids or []), "request_spec": dict(request_spec), "test_field": test_field, "control_fields": dict(control_fields), "oracle": dict(oracle)}
+        payload = {"confirmed": True, "evidence_ids": list(evidence_ids), "fact_ids": list(fact_ids or []), "request_spec": dict(request_spec), "test_field": test_field, "baseline_value": baseline_value, "control_fields": dict(control_fields), "oracle": dict(oracle)}
         state.capability_ledger_json = {**(state.capability_ledger_json or {}), "boolean_oracle_confirmed": payload, "matched_boolean_oracle_confirmed": payload}
-        run.recovery_checkpoint_json = {"checkpoint_type": "CONFIRMED_BOOLEAN_ORACLE", "current_phase": "FLAG_SEARCH", "do_not_repeat": ["baseline", "connectivity_probe", "same_boolean_compare"], "next_required_action": {"type": "SQLITE_METADATA_DISCOVERY_OR_BOUNDED_EXTRACTION"}, **payload}
+        run.recovery_checkpoint_json = {"checkpoint_type": "CONFIRMED_BOOLEAN_ORACLE", "current_phase": "FLAG_SEARCH", "do_not_repeat": ["baseline", "connectivity_probe", "same_boolean_compare"], "next_required_action": {"type": "MYSQL_METADATA_DISCOVERY_OR_BOUNDED_EXTRACTION"}, **payload}
         run.current_phase = "FLAG_SEARCH"
         state.current_phase = "FLAG_SEARCH"
         await session.commit()

@@ -168,7 +168,7 @@ CODEX_NO_PROGRESS
 ```text
 backend: python -m ruff check app tests
 backend: python -m pytest tests -q
-backend: alembic upgrade head -> downgrade -1 -> upgrade head（临时 SQLite 库，未触碰当前 MySQL 现场）
+backend: alembic upgrade head -> downgrade -1 -> upgrade head（MySQL 测试数据库）
 codex-bridge: npm run build
 codex-bridge: npm test
 frontend: npm run build

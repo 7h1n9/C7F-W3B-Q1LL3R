@@ -77,10 +77,10 @@ DEFAULT_POLICIES: tuple[AgentRolePolicyContract, ...] = (
         system_prompt="Execute only the approved bounded task and return artifacts and evidence.",
         readable_memory_types=["WORKING", "VERIFIED_FACT", "HYPOTHESIS", "EVIDENCE"],
         allowed_tool_types=["EXPLOIT"],
-        allowed_tools=["sql_boolean_compare", "oracle_probe_matrix", "sqlite_metadata_discovery", "boolean_config_extract", "script_run", "http_request"],
+        allowed_tools=["sql_boolean_compare", "oracle_probe_matrix", "boolean_config_extract", "oracle_expression_calibration", "mysql_metadata_discovery", "script_run", "http_request"],
         allowed_outputs=["ARTIFACT", "EVIDENCE", "FLAG_CANDIDATE"],
         forbidden_operations=["REPLAN", "BUDGET_BYPASS", "RUN_STATUS_CHANGE", "FLAG_VERIFY"],
-        max_logical_calls=8, max_internal_requests=12, max_runtime_seconds=300, default_timeout_seconds=300,
+        max_logical_calls=8, max_internal_requests=40, max_runtime_seconds=600, default_timeout_seconds=600,
     ),
     AgentRolePolicyContract(
         role=AgentRole.VERIFY,
@@ -142,6 +142,32 @@ class PromotionGate:
                 continue
             existing = await session.scalar(select(VerifiedFact).where(VerifiedFact.run_id == task.run_id, VerifiedFact.fact_key == key))
             if existing:
+                raw_value = raw.get("value") if isinstance(raw.get("value"), dict) else {}
+                existing_value = existing.value_json if isinstance(existing.value_json, dict) else {}
+                replaces_failed_boolean = (
+                    str(raw.get("fact_type") or raw.get("type") or "").upper() == "BOOLEAN_ORACLE"
+                    and str(existing.fact_type or "").upper() == "BOOLEAN_ORACLE"
+                    and raw_value.get("stable") is True
+                    and raw_value.get("response_differential") is True
+                    and not (existing_value.get("stable") is True and existing_value.get("response_differential") is True)
+                )
+                raw_value = raw.get("value") if isinstance(raw.get("value"), dict) else {}
+                replaces_calibration = (
+                    key == "asset_warranty.oracle_calibration_matrix"
+                    and isinstance(raw_value.get("adaptive_extraction_profile"), dict)
+                    and bool(raw_value.get("adaptive_extraction_profile", {}).get("extraction_strategy"))
+                    and str(raw_value.get("status") or "") == "COMPLETED"
+                )
+                if replaces_failed_boolean or replaces_calibration:
+                    existing.fact_type = str(raw.get("fact_type") or raw.get("type") or existing.fact_type)
+                    existing.value_json = raw_value
+                    existing.confidence = max(0, min(100, int(raw.get("confidence", 0))))
+                    existing.evidence_ids_json = list(result.evidence_ids)
+                    existing.source_task_id = task.id
+                    existing.promotion_status = "CANDIDATE"
+                    await session.flush()
+                    promoted.append(existing.id)
+                    continue
                 duplicate = True
                 continue
             fact = VerifiedFact(

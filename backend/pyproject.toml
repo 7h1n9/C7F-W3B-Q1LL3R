@@ -4,7 +4,7 @@ version = "0.1.0"
 requires-python = ">=3.11"
 dependencies = [
   "fastapi>=0.115", "uvicorn[standard]>=0.30", "sqlalchemy>=2.0", "alembic>=1.13",
-  "asyncmy>=0.2.9", "aiosqlite>=0.20", "pydantic-settings>=2.4", "httpx>=0.27",
+  "asyncmy>=0.2.9,<1.0", "pydantic-settings>=2.4", "httpx>=0.27",
   "PyYAML>=6.0", "cryptography>=43.0", "python-multipart>=0.0.9"
 ]
 
@@ -14,6 +14,11 @@ dev = ["pytest>=8", "pytest-asyncio>=0.24", "ruff>=0.6"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+markers = [
+  "integration: tests requiring a live external service",
+  "mysql: tests requiring the Docker MySQL service",
+  "runner: tests requiring the live Kali Runner",
+]
 
 [tool.setuptools.packages.find]
 include = ["app*"]
