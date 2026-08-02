@@ -163,14 +163,22 @@ class RunFinalizer:
         if str(run.status) in TERMINAL_RUN_STATUSES:
             if str(run.status) == "COMPLETED_UNSOLVED":
                 existing_wp = (run.recovery_checkpoint_json or {}).get("wp") or {}
-                if not existing_wp or not existing_wp.get("confirmed_facts"):
+                required_wp_fields = {
+                    "confirmed_facts",
+                    "completed_stages",
+                    "failed_tools",
+                    "user_inputs",
+                    "next_steps",
+                }
+                if not existing_wp or required_wp_fields - set(existing_wp):
+                    rebuilt_wp = await self.build_wp(session, run, str(run.last_error_code or "COMPLETED_UNSOLVED"))
                     run.recovery_checkpoint_json = {
                         **dict(run.recovery_checkpoint_json or {}),
-                        "wp": await self.build_wp(session, run, str(run.last_error_code or "COMPLETED_UNSOLVED")),
+                        "wp": rebuilt_wp,
                     }
-                    run.report_json = run.recovery_checkpoint_json["wp"]
+                    run.report_json = rebuilt_wp
                     changed["wp_rebuilt"] = True
-                elif not (run.report_json or {}).get("confirmed_facts"):
+                elif required_wp_fields - set(run.report_json or {}):
                     run.report_json = existing_wp
                     changed["wp_rebuilt"] = True
             attempts = list((await session.scalars(select(RunAttempt).where(
@@ -284,7 +292,7 @@ class RunFinalizer:
 
     async def terminal_reconcile(self, session, run: SolveRun) -> dict:
         """Close every executable resource owned by a terminal Run."""
-        if str(run.status) not in {"COMPLETED_SOLVED", "COMPLETED_UNSOLVED", "CANCELLED"}:
+        if str(run.status) not in TERMINAL_RUN_STATUSES:
             return {}
         return await self.reconcile(session, run)
 

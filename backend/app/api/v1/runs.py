@@ -620,12 +620,12 @@ async def run_health(run_id: str, session: AsyncSession = Depends(get_session)) 
     checkpoint = dict(run.recovery_checkpoint_json or {})
     counters = dict(checkpoint.get("supervisor_counters") or {})
     status = str(run.status)
-    if queued_inputs:
+    if status in {item.value for item in TERMINAL}:
+        next_action = "terminal"
+    elif queued_inputs:
         next_action = "consume_user_input"
     elif status == RunStatus.WAITING_USER.value:
         next_action = "wait_for_user_input"
-    elif status in {item.value for item in TERMINAL}:
-        next_action = "terminal"
     elif lease is not None or running_task or running_tool:
         next_action = "execute_current_attempt"
     elif int(counters.get("no_progress_count") or 0) > 0:
@@ -652,6 +652,13 @@ async def run_health(run_id: str, session: AsyncSession = Depends(get_session)) 
         "next_action": next_action,
         "checkpoint": checkpoint,
     }}
+
+
+@router.get("/runs/{run_id}/self-check")
+async def run_self_check(run_id: str, session: AsyncSession = Depends(get_session)) -> dict:
+    """Return the read-only lifecycle acceptance result for a Run."""
+    run = await require_run(run_id, session)
+    return {"data": await run_diagnostics_service.system_self_check(session, run)}
 
 
 @router.post("/runs/{run_id}/messages")

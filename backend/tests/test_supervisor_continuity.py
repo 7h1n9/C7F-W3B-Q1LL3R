@@ -21,6 +21,7 @@ from app.services.user_input_consumer import consume_user_inputs
 from app.services.run_supervisor import RunSupervisor, run_supervisor
 from app.services.supervisor_progress import supervisor_progress_evaluator
 from app.services.run_finalizer import run_finalizer
+from app.services.run_diagnostics import run_diagnostics_service
 
 
 def test_failure_classification_normalizes_pydantic_object() -> None:
@@ -214,4 +215,42 @@ async def test_terminal_reconcile_removes_all_running_resources(tmp_path: Path) 
         assert tool_call.status == "INTERRUPTED"
         events = list((await session.scalars(select(RunEvent).where(RunEvent.run_id == run.id))).all())
         assert any(event.event_type == "run.lifecycle.cleaned" for event in events)
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_system_self_check_passes_after_terminal_cleanup(tmp_path: Path) -> None:
+    engine = create_async_engine(
+        f"sqlite+aiosqlite:///{tmp_path / 'self-check.db'}", poolclass=StaticPool
+    )
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    async with sessions() as session:
+        challenge = Challenge(name="self-check", target_url="http://target.test", allowed_hosts=["target.test"])
+        session.add(challenge)
+        await session.flush()
+        run = SolveRun(
+            challenge_id=challenge.id,
+            workspace_path=str(tmp_path),
+            status="COMPLETED_UNSOLVED",
+            current_phase="REPORTING",
+            report_json={
+                "confirmed_facts": [],
+                "completed_stages": ["BUSINESS_BASELINE"],
+                "failed_tools": ["mysql_metadata_discovery"],
+                "user_inputs": [],
+                "next_steps": ["fix runner"],
+            },
+        )
+        session.add(run)
+        await session.flush()
+        session.add(SolverState(run_id=run.id, current_phase="REPORTING"))
+        await session.commit()
+
+        result = await run_diagnostics_service.system_self_check(session, run)
+
+        assert result["status"] == "PASS"
+        assert all(item["status"] == "PASS" for item in result["checks"])
+        assert result["reasons"] == []
     await engine.dispose()
