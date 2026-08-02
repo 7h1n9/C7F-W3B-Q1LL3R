@@ -9,6 +9,12 @@ class JobStatus(StrEnum):
     COMPLETED = "COMPLETED"
     FAILED = "FAILED"
     CANCELLED = "CANCELLED"
+    # These are result-contract statuses.  Job lifecycle remains COMPLETED
+    # for SUCCESS/NO_FACT and FAILED for CONTRACT_ERROR; keeping the values
+    # here makes persisted jobs forward-compatible with older polling code.
+    SUCCESS = "SUCCESS"
+    NO_FACT = "NO_FACT"
+    CONTRACT_ERROR = "CONTRACT_ERROR"
 
 
 class JobRequest(BaseModel):

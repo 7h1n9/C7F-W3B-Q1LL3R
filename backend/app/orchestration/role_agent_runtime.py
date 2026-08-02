@@ -189,7 +189,7 @@ class RoleAgentRuntime:
             raise DomainError("APPROVED_ACTION_NOT_COMPILED", "Production task has no compiled ApprovedAction.")
         tool_name = approved.tool_name
         result = await self.tool_invoker(session, run, challenge, tool_name, dict(approved.compiled_arguments_json), execution_layer="multi_agent", logical_tool_call_id=f"mcp:{run.id}:{attempt.id}:agent-task:{task.id}:{uuid.uuid4().hex[:8]}", agent_task_id=task.id, agent_role=task.agent_role, task_lease_token=lease_token, approved_action_id=approved.id)
-        finish = AgentTaskResultContract(task_id=task.id, status=AgentTaskStatus.COMPLETED if str(result.get("status") or "").upper() == "COMPLETED" else AgentTaskStatus.PARTIAL, evidence_ids=[], handoff_summary="Mock role finished after the controller executed one action.")
+        finish = AgentTaskResultContract(task_id=task.id, status=AgentTaskStatus.COMPLETED if str(result.get("result_status") or result.get("status") or "").upper() in {"COMPLETED", "SUCCESS"} else AgentTaskStatus.PARTIAL, evidence_ids=[], handoff_summary="Mock role finished after the controller executed one action.")
         if finish.status == AgentTaskStatus.PARTIAL:
             finish = finish.model_copy(update={"failure_classification": {"fingerprint": "mock-tool-failure", "classification": "TOOL_FAILURE", "retryable": True, "reason": str(result.get("error") or result.get("summary") or "tool failed"), "next_allowed_condition": "replan"}})
         return finish, {"provider_request_id": f"mock:{task.id}", "action": {"type": "finish", "result": finish.model_dump(mode="json")}}

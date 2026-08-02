@@ -257,6 +257,7 @@ async def mysql_metadata_discovery(request: JobRequest) -> dict[str, Any]:
         return "".join(chars)
 
     partial_result: dict[str, Any] = {}
+    diagnostic_reason: str | None = None
     try:
         true_probe = await probe("1=1")
         false_probe = await probe("1=2")
@@ -294,8 +295,11 @@ async def mysql_metadata_discovery(request: JobRequest) -> dict[str, Any]:
             partial_result["columns"] = columns
             partial_result["candidate_columns"] = columns
     except RuntimeError as error:
+        # The HTTP probes completed, but the Boolean Oracle did not yield a
+        # usable fact.  This is an execution outcome, not a Runner contract
+        # failure.  Preserve the reason for the Controller's failure budget.
         if str(error) != "MAX_REQUESTS_REACHED":
-            raise HTTPException(422, detail=str(error)) from error
+            diagnostic_reason = str(error)
     structured = {
         "database_engine": "mysql",
         "stage": stage,
@@ -320,17 +324,55 @@ async def mysql_metadata_discovery(request: JobRequest) -> dict[str, Any]:
     }.get(stage)
     if not required_value:
         result_payload = {
-            "status": "FAILED",
+            "status": "NO_FACT",
             "error_code": "MYSQL_METADATA_EMPTY_RESULT",
-            "summary": "mysql_metadata_discovery completed without the required metadata fact.",
+            "summary": "mysql_metadata_discovery completed without a distinguishable metadata fact.",
             "stage": stage,
             "tool_execution_completed": True,
             "retryable": True,
+            "facts": {},
+            "extracted_facts": {},
+            "diagnostic": {
+                "reason": diagnostic_reason or "Boolean oracle did not produce enough signal",
+                "required_fact": stage,
+            },
+            "artifact_paths": [
+                str(result_path.relative_to(root)).replace("\\", "/"),
+                str(progress_path.relative_to(root)).replace("\\", "/"),
+                str(checkpoint_path.relative_to(root)).replace("\\", "/"),
+                str(request_contract_path.relative_to(root)).replace("\\", "/"),
+            ],
+            "result_path": str(result_path.relative_to(root)).replace("\\", "/"),
+            "progress_path": str(progress_path.relative_to(root)).replace("\\", "/"),
+            "checkpoint_path": str(checkpoint_path.relative_to(root)).replace("\\", "/"),
             "structured_result": structured,
         }
+        result_payload["structured_result"] = {
+            **structured,
+            "facts": {},
+            "extracted_facts": {},
+            "diagnostic": result_payload["diagnostic"],
+            "status": "NO_FACT",
+        }
         result_path.write_text(json.dumps(result_payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        checkpoint_path.write_text(json.dumps({
+            "status": "NO_FACT",
+            "position": request_count,
+            "request_hash": request_hash,
+            "expression": expression,
+            "candidate_table": candidate_table,
+            "requests": request_count,
+            "diagnostic": result_payload["diagnostic"],
+        }, ensure_ascii=False, indent=2), encoding="utf-8")
         return result_payload
-    result_payload = {"status": "COMPLETED", "summary": "Bounded MySQL metadata discovery completed", "structured_result": structured, "artifact_paths": [str(result_path.relative_to(root)).replace("\\", "/"), str(progress_path.relative_to(root)).replace("\\", "/"), str(checkpoint_path.relative_to(root)).replace("\\", "/"), str(request_contract_path.relative_to(root)).replace("\\", "/")], "progress_path": str(progress_path.relative_to(root)).replace("\\", "/"), "checkpoint_path": str(checkpoint_path.relative_to(root)).replace("\\", "/"), "result_path": str(result_path.relative_to(root)).replace("\\", "/")}
+    facts = {key: value for key, value in {
+        "version": structured.get("version"),
+        "version_comment": structured.get("version_comment"),
+        "database": structured.get("current_database"),
+        "tables": structured.get("tables"),
+        "columns": structured.get("columns"),
+    }.items() if value}
+    result_payload = {"status": "SUCCESS", "summary": "Bounded MySQL metadata discovery completed", "stage": stage, "tool_execution_completed": True, "facts": facts, "extracted_facts": facts, "structured_result": {**structured, "status": "SUCCESS", "facts": facts, "extracted_facts": facts}, "artifact_paths": [str(result_path.relative_to(root)).replace("\\", "/"), str(progress_path.relative_to(root)).replace("\\", "/"), str(checkpoint_path.relative_to(root)).replace("\\", "/"), str(request_contract_path.relative_to(root)).replace("\\", "/")], "progress_path": str(progress_path.relative_to(root)).replace("\\", "/"), "checkpoint_path": str(checkpoint_path.relative_to(root)).replace("\\", "/"), "result_path": str(result_path.relative_to(root)).replace("\\", "/")}
     result_path.write_text(json.dumps(result_payload, ensure_ascii=False, indent=2), encoding="utf-8")
     checkpoint_path.write_text(json.dumps({"status": "COMPLETED", "position": request_count, "request_hash": request_hash, "expression": expression, "candidate_table": candidate_table, "requests": request_count}, ensure_ascii=False, indent=2), encoding="utf-8")
     return result_payload

@@ -143,7 +143,8 @@ class RunnerClient:
         def terminal(result: dict) -> dict | None:
             if result.get("status") not in {"COMPLETED", "FAILED", "CANCELLED"}:
                 return None
-            return {**(result.get("result") or {}), "job_id": result.get("job_id"), "status": result["status"], "error": result.get("error")}
+            payload = dict(result.get("result") or {})
+            return {**payload, "job_id": result.get("job_id"), "status": payload.get("status") or result["status"], "job_status": result["status"], "error": result.get("error")}
 
         async with httpx.AsyncClient(timeout=None, trust_env=True) as client:
             try:

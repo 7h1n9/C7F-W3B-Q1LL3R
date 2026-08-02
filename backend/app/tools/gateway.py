@@ -45,6 +45,14 @@ from app.services.workspace_sync import workspace_sync_service
 from app.tools.policy import enforce_tool_policy
 
 
+_TOOL_SUCCESS_STATUSES = {"COMPLETED", "SUCCESS", "CACHED"}
+_TOOL_EXECUTION_COMPLETED_STATUSES = _TOOL_SUCCESS_STATUSES | {"NO_FACT"}
+
+
+def _result_contract_status(result: dict) -> str:
+    return str(result.get("result_status") or result.get("status") or "FAILED").upper()
+
+
 def _metadata_result_has_required_fact(arguments: dict, result: dict) -> bool:
     """Return whether a COMPLETED metadata result contains this stage's fact."""
     structured = result.get("structured_result") if isinstance(result.get("structured_result"), dict) else result
@@ -386,18 +394,25 @@ class ToolGateway:
                 if "tool_timeout_seconds" not in str(error):
                     raise
                 result = await runner_client.wait_job(job_id)
-            if name == "mysql_metadata_discovery" and result.get("status") == "COMPLETED" and not _metadata_result_has_required_fact(arguments, result):
+            contract_status = _result_contract_status(result)
+            # Compatibility path for a pre-contract Runner: an empty
+            # COMPLETED metadata response is a durable NO_FACT outcome, not a
+            # RESULT_CONTRACT/FAILED outcome.
+            if name == "mysql_metadata_discovery" and contract_status in {"COMPLETED", "SUCCESS"} and not _metadata_result_has_required_fact(arguments, result):
                 result = {
+                    **result,
                     "status": "FAILED",
+                    "result_status": "NO_FACT",
                     "error_code": "MYSQL_METADATA_EMPTY_RESULT",
-                    "summary": "mysql_metadata_discovery completed without the required metadata fact.",
-                    "stage": "RESULT_CONTRACT",
+                    "summary": "mysql_metadata_discovery completed without a distinguishable metadata fact.",
+                    "stage": str(arguments.get("stage") or result.get("stage") or "metadata").lower(),
                     "tool_execution_completed": True,
                     "retryable": True,
                 }
+                result["status"] = "NO_FACT"
             with contextlib.suppress(Exception):
                 await workspace_sync_service.sync_from_runner(run.id, Path(run.workspace_path))
-            if result.get("status") != "COMPLETED" and not result.get("error_code"):
+            if _result_contract_status(result) not in _TOOL_SUCCESS_STATUSES and not result.get("error_code"):
                 error_text = str(result.get("error") or result.get("summary") or "").lower()
                 if "not found" in error_text or "does not exist" in error_text:
                     result["error_code"] = "FILE_NOT_FOUND"
@@ -407,7 +422,7 @@ class ToolGateway:
                     result["error_code"] = "SCRIPT_NOT_SYNCED"
             if (
                 name in {"file_read", "python_run", "script_run"}
-                and result.get("status") != "COMPLETED"
+                and _result_contract_status(result) not in _TOOL_SUCCESS_STATUSES
                 and "not found" in str(result.get("error") or result.get("summary") or "").lower()
             ):
                 # A Runner workspace can lag after attachment updates or a
@@ -426,7 +441,7 @@ class ToolGateway:
                     if "tool_timeout_seconds" not in str(error):
                         raise
                     result = await runner_client.wait_job(retry_job_id)
-                if result.get("status") != "COMPLETED" and name == "file_read":
+                if _result_contract_status(result) not in _TOOL_SUCCESS_STATUSES and name == "file_read":
                     result["error_code"] = "FILE_NOT_FOUND"
             if result.get("error_code") in {"TARGET_UNAVAILABLE", "BACKEND_UNAVAILABLE", "RUNNER_UNAVAILABLE", "TOOL_RESULT_DELIVERY_FAILED"}:
                 record_failure(run, code=str(result["error_code"]), message=str(result.get("error") or result.get("summary") or result["error_code"]), stage=str(result.get("stage") or "EXECUTION"))
@@ -449,8 +464,9 @@ class ToolGateway:
             if code == "RUNNER_UNAVAILABLE":
                 record_failure(run, code=code, message=result["error"], stage="RUNNER")
             await session.commit()
+        contract_status = _result_contract_status(result)
         call.status, call.runner_job_id, call.finished_at = (
-            ("COMPLETED" if result.get("status") == "COMPLETED" else "FAILED"),
+            ("COMPLETED" if contract_status in _TOOL_EXECUTION_COMPLETED_STATUSES else "FAILED"),
             result.get("job_id"),
             datetime.now(UTC),
         )
@@ -472,7 +488,7 @@ class ToolGateway:
                     "status": "FAILED",
                     "error_code": "TOOL_RESULT_DELIVERY_FAILED",
                     "stage": "ARTIFACT_DOWNLOAD",
-                    "tool_execution_completed": result.get("status") == "COMPLETED",
+                    "tool_execution_completed": contract_status in _TOOL_EXECUTION_COMPLETED_STATUSES,
                     "summary": "Artifact download failed",
                     "error": str(error),
                 }
@@ -569,12 +585,21 @@ class ToolGateway:
             lifecycle = "BLOCKED_DEPLOYMENT" if failed_code in {"TARGET_NETWORK_ENFORCEMENT_UNAVAILABLE", "SCRIPT_TARGET_NETWORK_UNAVAILABLE"} else "PARTIAL" if result.get("status") == "PARTIAL" else "FAILED"
             await self._set_script_record_status(session, run, script_record, lifecycle, execution_error=None if lifecycle == "PARTIAL" else failed_code)
         unified = self._unified_result(result, artifact, permitted_tools)
+        if name == "mysql_metadata_discovery":
+            await solver_state_service.record_metadata_progress(
+                session,
+                run,
+                stage=str(arguments.get("stage") or result.get("stage") or "").lower(),
+                result_status=unified.status,
+                error_code=unified.error_code,
+                diagnostic=(result.get("diagnostic") if isinstance(result.get("diagnostic"), dict) else {}),
+            )
         if approved_action_id:
             approved = await session.get(ApprovedAction, approved_action_id)
             if approved is not None:
-                if unified.status == "COMPLETED" and int(approved.used_logical_calls or 0) >= int(approved.max_logical_calls or 1):
+                if unified.status in _TOOL_SUCCESS_STATUSES and int(approved.used_logical_calls or 0) >= int(approved.max_logical_calls or 1):
                     approved.status = "CONSUMED"
-                elif unified.status != "COMPLETED":
+                elif unified.status not in _TOOL_SUCCESS_STATUSES:
                     approved.status = "REJECTED"
                 await session.flush()
         facts = self._facts(name, result, relative.replace("\\", "/"))
@@ -595,12 +620,12 @@ class ToolGateway:
                 session,
                 logical,
                 execution_layer=execution_layer,
-                event_type="completed" if unified.status == "COMPLETED" else "failed",
+                event_type="completed" if unified.status in _TOOL_SUCCESS_STATUSES else "failed",
                 external_id=call.runner_job_id,
                 payload=result,
             )
             await session.commit()
-            if unified.status == "COMPLETED":
+            if unified.status in _TOOL_SUCCESS_STATUSES:
                 clear_failure(run)
                 await session.commit()
         except Exception as error:
@@ -610,7 +635,7 @@ class ToolGateway:
                 "status": "FAILED",
                 "error_code": "BACKEND_PERSISTENCE_FAILED",
                 "stage": "TRACE_WRITE",
-                "tool_execution_completed": result.get("status") == "COMPLETED",
+                "tool_execution_completed": _result_contract_status(result) in _TOOL_EXECUTION_COMPLETED_STATUSES,
                 "summary": "Tool completed but trace persistence failed",
                 "error": str(error),
             }
@@ -637,7 +662,7 @@ class ToolGateway:
                     end_line=int(structured.get("end_line") or arguments.get("end_line") or 1),
                     content_sha256=str(structured.get("content_sha256")),
                 )
-        event_type = "tool.completed" if unified.status == "COMPLETED" else "tool.failed"
+        event_type = "tool.completed" if unified.status in _TOOL_SUCCESS_STATUSES else "tool.failed"
         await event_service.append(
             session, run.id, event_type, {"tool_call_id": call.id, "logical_tool_call_id": call.logical_tool_call_id, "tool": name, "execution_layer": call.execution_layer, "result": unified.model_dump()}
         )
@@ -712,11 +737,11 @@ class ToolGateway:
     def _unified_result(
         self, result: dict, artifact: Artifact | None, permitted_tools: set[str]
     ) -> ToolExecutionResult:
-        status = str(result.get("status") or "FAILED")
-        if status not in {"COMPLETED", "FAILED", "TIMEOUT", "CANCELLED"}:
+        status = _result_contract_status(result)
+        if status not in _TOOL_SUCCESS_STATUSES | {"NO_FACT", "CONTRACT_ERROR", "FAILED", "TIMEOUT", "CANCELLED"}:
             status = "FAILED"
         structured = result.get("structured_result") if isinstance(result.get("structured_result"), dict) else result
-        facts = dict(structured.get("extracted_facts") or result.get("extracted_facts") or {})
+        facts = dict(structured.get("extracted_facts") or result.get("extracted_facts") or result.get("facts") or {})
         for key in ("status_code", "final_url", "redirect_history", "content_type", "selected_headers", "cookie_names", "body_length", "html_title", "html_comments", "forms", "form_actions", "parameter_names", "links", "script_urls", "json_keys", "suspected_credentials", "suspected_flags", "path", "start_line", "end_line", "content_sha256", "matching_paths", "match_snippets", "line_numbers", "generated_files", "stdout_excerpt", "stderr_excerpt", "network_targets", "runtime_ms", "injectable", "parameter", "technique", "dbms", "databases", "tables", "columns", "dumped_rows", "flag_candidates", "raw_output_path", "sqlmap_extraction_completed"):
             if key in structured and key not in facts:
                 facts[key] = structured[key]
@@ -726,9 +751,10 @@ class ToolGateway:
         warnings = []
         if structured.get("truncated"):
             warnings.append("结果正文已截断，完整内容保存在 Artifact")
-        if status != "COMPLETED":
+        if status not in _TOOL_SUCCESS_STATUSES:
             warnings.append("工具执行未成功完成")
         suggestions = []
+        diagnostic = result.get("diagnostic") if isinstance(result.get("diagnostic"), dict) else {}
         if facts.get("status_code") in {301, 302, 303, 307, 308}:
             suggestions.append("检查重定向目标和登录流程")
         if facts.get("suspected_credentials"):
@@ -743,26 +769,27 @@ class ToolGateway:
                 suggested_next_dimensions=suggestions,
             ),
             artifacts=[ToolArtifactRef(artifact_id=artifact.id, relative_path=artifact.file_path, sha256=artifact.sha256, size=artifact.size, mime_type=artifact.mime_type or "text/plain")] if artifact else [],
-            error_code=str(result.get("error_code") or "RUNNER_ERROR") if status != "COMPLETED" else None,
-            error_message=str(result.get("error") or result.get("error_message")) if status != "COMPLETED" else None,
-            retryable=status in {"FAILED", "TIMEOUT"},
+            error_code=str(result.get("error_code") or ("MYSQL_METADATA_EMPTY_RESULT" if status == "NO_FACT" else "MYSQL_METADATA_CONTRACT_ERROR" if status == "CONTRACT_ERROR" else "RUNNER_ERROR")) if status not in _TOOL_SUCCESS_STATUSES else None,
+            error_message=str(result.get("error") or result.get("error_message") or diagnostic.get("reason") or "") if status not in _TOOL_SUCCESS_STATUSES else None,
+            retryable=bool(result.get("retryable", status in {"FAILED", "TIMEOUT", "NO_FACT"})),
             stage=str(result.get("stage") or "EXECUTION"),
             diagnostic_id=str(result.get("diagnostic_id")) if result.get("diagnostic_id") else None,
-            tool_execution_completed=bool(result.get("tool_execution_completed", status == "COMPLETED")),
+            tool_execution_completed=bool(result.get("tool_execution_completed", status in _TOOL_EXECUTION_COMPLETED_STATUSES)),
             error_details={
-                "reason": str(result.get("error") or result.get("error_message") or result.get("summary") or ""),
+                "reason": str(result.get("error") or result.get("error_message") or diagnostic.get("reason") or result.get("summary") or ""),
                 "available_tools": sorted(permitted_tools),
                 "readable_workspace": ["challenge.json", "AGENTS.md", "source/**", "attachments/**", "requests/**", "responses/**", "outputs/**", "evidence/**", "scripts/**", "notes/**", "final/**", "scratch/**"],
                 "recommended_action": "Fix the bounded arguments or choose a different minimal experiment; the run may continue.",
-                "auto_retry": status in {"TIMEOUT"},
-            } if status != "COMPLETED" else {},
+                "auto_retry": status in {"TIMEOUT", "NO_FACT"},
+                "contract_status": status,
+            } if status not in _TOOL_SUCCESS_STATUSES else {},
         )
 
     @staticmethod
     def _facts(name: str, result: dict, artifact_path: str) -> dict:
         base = {
             "tool": name,
-            "ok": result.get("status") == "COMPLETED",
+            "ok": _result_contract_status(result) in _TOOL_SUCCESS_STATUSES,
             "artifact_path": artifact_path,
         }
         structured = result.get("structured_result", result)

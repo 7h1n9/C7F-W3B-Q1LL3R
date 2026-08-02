@@ -25,7 +25,7 @@ class ToolArtifactRef(BaseModel):
 
 
 class ToolExecutionResult(BaseModel):
-    status: Literal["COMPLETED", "CACHED", "FAILED", "TIMEOUT", "CANCELLED"]
+    status: Literal["COMPLETED", "SUCCESS", "NO_FACT", "CONTRACT_ERROR", "CACHED", "FAILED", "TIMEOUT", "CANCELLED"]
     model_view: ToolModelView
     artifacts: list[ToolArtifactRef] = Field(default_factory=list)
     error_code: str | None = None

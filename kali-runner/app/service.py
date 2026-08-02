@@ -109,16 +109,22 @@ class JobService:
 
     @staticmethod
     def _result_payload(result: dict) -> dict:
-        status = str(result.get("status") or "COMPLETED").upper()
-        if status not in {item.value for item in JobStatus}:
-            status = "FAILED"
+        contract_status = str(result.get("status") or "COMPLETED").upper()
+        lifecycle_status = {
+            "SUCCESS": "COMPLETED",
+            "NO_FACT": "COMPLETED",
+            "CONTRACT_ERROR": "FAILED",
+        }.get(contract_status, contract_status)
+        if lifecycle_status not in {"QUEUED", "RUNNING", "COMPLETED", "FAILED", "CANCELLED"}:
+            lifecycle_status = "FAILED"
         return {
             **result,
-            "status": status,
+            "status": lifecycle_status,
+            "result_status": contract_status,
             "error_code": result.get("error_code"),
-            "diagnostic_id": result.get("diagnostic_id") or (str(uuid.uuid4()) if status == "FAILED" else None),
-            "tool_execution_completed": bool(result.get("tool_execution_completed", status == "COMPLETED")),
-            "retryable": bool(result.get("retryable", status in {"FAILED"})),
+            "diagnostic_id": result.get("diagnostic_id") or (str(uuid.uuid4()) if contract_status in {"FAILED", "CONTRACT_ERROR"} else None),
+            "tool_execution_completed": bool(result.get("tool_execution_completed", contract_status in {"COMPLETED", "SUCCESS", "NO_FACT"})),
+            "retryable": bool(result.get("retryable", contract_status in {"FAILED", "NO_FACT"})),
             "stage": str(result.get("stage") or "EXECUTION"),
             "summary": str(result.get("summary") or ""),
             "structured_result": result.get("structured_result") if isinstance(result.get("structured_result"), dict) else result,
@@ -159,6 +165,10 @@ class JobService:
             if job.request.tool == "script_run":
                 self._persist_standard_script_artifacts(job, normalized)
             job.result = self._persist_artifact(job, normalized)
+            # The HTTP job lifecycle is terminal above, but callers need the
+            # original contract status for SUCCESS/NO_FACT/CONTRACT_ERROR.
+            job.result["status"] = normalized.get("result_status") or normalized["status"]
+            job.result["job_status"] = normalized["status"]
             job.status = JobStatus(normalized["status"])
             job.error = normalized.get("error") or normalized.get("error_message")
         except asyncio.CancelledError:
@@ -168,11 +178,17 @@ class JobService:
             code = detail.split(":", 1)[0] if detail and detail.split(":", 1)[0].isupper() else "RUNNER_JOB_FAILED"
             job.status = JobStatus.FAILED
             job.error = detail
-            job.result = self._persist_artifact(job, self._result_payload({"status": "FAILED", "error_code": code, "summary": detail, "error": detail, "stage": "VALIDATION" if error.status_code < 500 else "EXECUTION"}))
+            failure_status = "CONTRACT_ERROR" if job.request.tool == "mysql_metadata_discovery" else "FAILED"
+            job.result = self._persist_artifact(job, self._result_payload({"status": failure_status, "error_code": code, "summary": detail, "error": detail, "stage": "VALIDATION" if error.status_code < 500 else "EXECUTION", "diagnostic": {"reason": detail}}))
+            job.result["status"] = failure_status
+            job.result["job_status"] = "FAILED"
         except Exception as error:
             job.status = JobStatus.FAILED
             job.error = str(error)
-            job.result = self._persist_artifact(job, {"status": "FAILED", "error_code": "RUNNER_JOB_FAILED", "summary": "Runner execution failed", "error": str(error), "stage": "EXECUTION"})
+            failure_status = "CONTRACT_ERROR" if job.request.tool == "mysql_metadata_discovery" else "FAILED"
+            job.result = self._persist_artifact(job, self._result_payload({"status": failure_status, "error_code": "MYSQL_METADATA_CONTRACT_ERROR" if failure_status == "CONTRACT_ERROR" else "RUNNER_JOB_FAILED", "summary": "Runner execution failed", "error": str(error), "stage": "EXECUTION", "diagnostic": {"reason": str(error)}}))
+            job.result["status"] = failure_status
+            job.result["job_status"] = "FAILED"
         finally:
             job.finished_at = self._now()
             self._save(job)

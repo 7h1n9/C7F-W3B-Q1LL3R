@@ -27,6 +27,48 @@ class SolverStateService:
     async def load(self, session: AsyncSession, run_id: str) -> SolverState | None:
         return await session.scalar(select(SolverState).where(SolverState.run_id == run_id))
 
+    async def record_metadata_progress(
+        self,
+        session: AsyncSession,
+        run: SolveRun,
+        *,
+        stage: str,
+        result_status: str,
+        error_code: str | None = None,
+        diagnostic: dict | None = None,
+    ) -> dict:
+        """Persist the bounded metadata state machine at the execution edge.
+
+        The stage status is deliberately separate from the generic tool
+        failure ledger.  A NO_FACT result means the Runner completed its
+        work, but the stage still failed to produce the required fact.
+        """
+        normalized_stage = str(stage or "").strip().lower()
+        if normalized_stage not in {"version", "version_comment", "database", "tables", "columns"}:
+            return {}
+        state = await self.load(session, run.id)
+        if state is None:
+            return {}
+        ledger = dict(state.capability_ledger_json or {})
+        progress = dict(ledger.get("metadata_progress") or {})
+        previous = dict(progress.get(normalized_stage) or {})
+        contract_status = str(result_status or "").upper()
+        stage_status = "SUCCESS" if contract_status in {"SUCCESS", "COMPLETED"} else "FAILED"
+        entry = {
+            **previous,
+            "stage": normalized_stage,
+            "status": stage_status,
+            "last_result_status": contract_status,
+            "attempts": int(previous.get("attempts") or 0) + 1,
+            "error_code": error_code,
+            "diagnostic": dict(diagnostic or {}),
+            "updated_at": datetime.now(UTC).isoformat(),
+        }
+        progress[normalized_stage] = entry
+        state.capability_ledger_json = {**ledger, "metadata_progress": progress}
+        await session.flush()
+        return entry
+
     async def initialize(
         self,
         session: AsyncSession,
@@ -38,6 +80,14 @@ class SolverStateService:
     ) -> SolverState:
         state = await self.load(session, run.id)
         if state:
+            if "metadata_progress" not in (state.capability_ledger_json or {}):
+                state.capability_ledger_json = {
+                    **(state.capability_ledger_json or {}),
+                    "metadata_progress": {
+                        stage: {"stage": stage, "status": "PENDING", "attempts": 0}
+                        for stage in ("version", "version_comment", "database", "tables", "columns")
+                    },
+                }
             if not state.attack_chain_plan_json:
                 state.attack_chain_plan_json = build_attack_chain(challenge_name, challenge_description)
                 await session.commit()
@@ -64,7 +114,12 @@ class SolverStateService:
                 "hypothesis_queue": [], "current_experiment": None, "next_actions": [],
                 "exit_conditions": ["verified flag", "explicit unrecoverable blocker"],
             },
-            capability_ledger_json={},
+            capability_ledger_json={
+                "metadata_progress": {
+                    stage: {"stage": stage, "status": "PENDING", "attempts": 0}
+                    for stage in ("version", "version_comment", "database", "tables", "columns")
+                },
+            },
             attack_chain_plan_json=build_attack_chain(challenge_name, challenge_description),
             experiment_dimensions_json=[],
         )

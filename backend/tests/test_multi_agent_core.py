@@ -445,7 +445,7 @@ async def test_metadata_empty_stage_pauses_after_two_consecutive_attempts(sessio
         orchestrator = MultiAgentOrchestrator()
         assert await orchestrator._handle_mysql_metadata_empty_result(session, run, challenge, action, task) is False
         assert await orchestrator._handle_mysql_metadata_empty_result(session, run, challenge, action, task) is True
-        assert run.status == RunStatus.PAUSED_CHECKPOINT.value
+        assert run.status == RunStatus.WAITING_USER.value
         assert run.last_error_code == "MYSQL_METADATA_STAGE_EMPTY_RESULT"
         assert run.recovery_checkpoint_json["attempts"] == 2
         assert run.recovery_checkpoint_json["target_expression"] == "VERSION()"

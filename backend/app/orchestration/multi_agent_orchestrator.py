@@ -1829,7 +1829,8 @@ class MultiAgentOrchestrator:
         )).all())
         if not calls:
             return await checkpoint("COMPILED_ACTION_NOT_DISPATCHED", "The compiled action completed without creating a ToolCall.")
-        if str(result.get("status") or "").upper() != "COMPLETED":
+        result_status = str(result.get("result_status") or result.get("status") or "").upper()
+        if result_status not in {"COMPLETED", "SUCCESS"}:
             failure_code = str(result.get("error_code") or "TOOL_FAILURE")
             partial = AgentTaskResultContract(
                 task_id=task.id,
@@ -1838,6 +1839,7 @@ class MultiAgentOrchestrator:
                     "fingerprint": "compiled-action-tool-failed",
                     "classification": failure_code,
                     "retryable": True,
+                    "result_status": result_status,
                     "reason": str(result.get("error") or result.get("summary") or "The compiled tool action failed."),
                     "next_allowed_condition": "replan from the durable tool result",
                 },
@@ -2130,10 +2132,33 @@ class MultiAgentOrchestrator:
                 # row/lease transaction.
                 await session.commit()
                 if exec_result.status in {AgentTaskStatus.FAILED, AgentTaskStatus.PARTIAL}:
-                    failure_classification = normalize_failure_classification(exec_result.failure_classification)
-                    failure_classification = str(failure_classification.get("classification") or "")
+                    classification_payload = normalize_failure_classification(exec_result.failure_classification)
+                    failure_classification = str(classification_payload.get("classification") or "")
+                    result_status = str(classification_payload.get("result_status") or "").upper()
                     metadata_empty = failure_classification in {"MYSQL_METADATA_EMPTY_RESULT", "ORACLE_RESPONSE_UNRECOGNIZED"}
+                    metadata_contract_error = (
+                        result_status == "CONTRACT_ERROR"
+                        or failure_classification.startswith("MYSQL_METADATA_CONTRACT")
+                        or failure_classification == "RESULT_CONTRACT"
+                    )
                     failure_entry = await record_tool_failure(session, run, approved, failure_classification or "TOOL_FAILURE")
+                    if metadata_contract_error:
+                        run.last_error_code = failure_classification or "MYSQL_METADATA_CONTRACT_ERROR"
+                        run.last_error_message = "The Runner returned a metadata contract error; repair the Runner before retrying."
+                        run.recovery_checkpoint_json = {
+                            **(run.recovery_checkpoint_json or {}),
+                            "checkpoint_type": "MYSQL_METADATA_RUNNER_CONTRACT_ERROR",
+                            "current_phase": "WAITING_USER",
+                            "reason": "Runner needs repair",
+                            "contract_status": "CONTRACT_ERROR",
+                            "failure": failure_entry,
+                            "question": "mysql_metadata_discovery Runner contract error",
+                            "options": ["retry_after_fix", "finish_unsolved_wp", "try_alternative_strategy"],
+                        }
+                        await self._phase(session, run, "WAITING_USER")
+                        await self._status(session, run, RunStatus.WAITING_USER)
+                        await session.commit()
+                        return {"status": run.status, "error_code": run.last_error_code, "runner_contract_error": True}
                     if failure_entry["count"] >= 2 and not metadata_empty:
                         run.last_error_code = failure_classification or "TOOL_FAILURE_REPEATED"
                         run.last_error_message = "The same tool and arguments failed twice; further identical execution is blocked."
