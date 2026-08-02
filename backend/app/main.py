@@ -88,6 +88,7 @@ async def lifespan(_: FastAPI):
                 with contextlib.suppress(Exception):
                     await run_supervisor.run_background(paused_run.id)
 
+    await run_supervisor.start_worker()
     cleanup_task = asyncio.create_task(cleanup_loop())
     supervisor_task = asyncio.create_task(supervisor_loop())
     try:
@@ -95,6 +96,7 @@ async def lifespan(_: FastAPI):
     finally:
         cleanup_task.cancel()
         supervisor_task.cancel()
+        await run_supervisor.stop_worker()
         with contextlib.suppress(asyncio.CancelledError):
             await cleanup_task
         with contextlib.suppress(asyncio.CancelledError):

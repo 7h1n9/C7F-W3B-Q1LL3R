@@ -49,6 +49,35 @@ async def record_tool_failure(session, run, approved: ApprovedAction, error_code
         ledger = dict(state.capability_ledger_json or {})
         ledger_counts = dict(ledger.get("tool_failure_counts") or {})
         ledger_counts[fingerprint] = entry
-        state.capability_ledger_json = {**ledger, "tool_failure_counts": ledger_counts}
+        history = [*list(ledger.get("failure_history") or []), entry][-100:]
+        state.capability_ledger_json = {
+            **ledger,
+            "tool_failure_counts": ledger_counts,
+            "failure_history": history,
+        }
     await session.commit()
     return entry
+
+
+def blocked_failure_for_action(run, tool_name: str, arguments: dict, arguments_digest: str) -> dict | None:
+    """Return the open circuit matching a compiled action, if any.
+
+    The error code is intentionally not part of this lookup: once the exact
+    tool/stage/target/argument contract has failed twice, a changed error
+    label must not provide a route to a third identical execution.
+    """
+    stage = str(arguments.get("stage") or run.current_phase or "")
+    target = str(arguments.get("target_expression") or "")
+    counts = (run.recovery_checkpoint_json or {}).get("tool_failure_counts") or {}
+    for entry in counts.values():
+        if not isinstance(entry, dict):
+            continue
+        if (
+            int(entry.get("count") or 0) >= 2
+            and entry.get("tool_name") == tool_name
+            and entry.get("stage") == stage
+            and entry.get("target_expression", "") == target
+            and str(entry.get("compiled_arguments_digest") or "") == str(arguments_digest or "")
+        ):
+            return entry
+    return None

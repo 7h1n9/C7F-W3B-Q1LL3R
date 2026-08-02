@@ -66,7 +66,7 @@ from app.services.multi_agent import deterministic_controller
 from app.services.solver_state import solver_state_service
 from app.services.run_finalizer import run_finalizer
 from app.services.tool_result_fact_reducer import tool_result_fact_reducer
-from app.services.tool_failure_policy import record_tool_failure
+from app.services.tool_failure_policy import blocked_failure_for_action, record_tool_failure
 from app.tools.gateway import tool_gateway
 
 logger = logging.getLogger(__name__)
@@ -1008,6 +1008,22 @@ class MultiAgentOrchestrator:
             session.add(item)
             await session.flush()
             raise
+        blocked = blocked_failure_for_action(run, tool_name, compiled.arguments, compiled.arguments_digest)
+        if blocked is not None:
+            raise DomainError(
+                "TOOL_FAILURE_CIRCUIT_OPEN",
+                "The same tool, stage and arguments failed twice; identical execution is blocked.",
+                {
+                    "reason": "same tool failure repeated twice",
+                    "tool": blocked.get("tool_name"),
+                    "stage": blocked.get("stage"),
+                    "target_expression": blocked.get("target_expression"),
+                    "attempts": blocked.get("count"),
+                    "fingerprint": blocked.get("fingerprint"),
+                    "question": "The same tool failure repeated twice. Fix the target or choose another strategy.",
+                    "options": ["retry_after_fix", "finish_unsolved_wp", "try_alternative_strategy"],
+                },
+            )
         state = await solver_state_service.load(session, run.id)
         experiment_fingerprint = fingerprint_compiled_action(tool_name, compiled.arguments_digest, proposal.success_condition)
         prior = (state.action_fingerprints_json if state else {}).get(experiment_fingerprint)
@@ -2432,7 +2448,7 @@ class MultiAgentOrchestrator:
             run.last_error_code = error.code
             run.last_error_message = error.message[:4000]
             run.recovery_checkpoint_json = {"terminal_reason": error.code, "details": error.details or {}}
-            control_errors = {"TOOL_INVALID_ARGUMENT", "APPROVED_ACTION_COMPILE_FAILED", "APPROVED_ACTION_NOT_COMPILED", "TOOL_SCHEMA_VERSION_CHANGED", "SQL_EXPRESSION_PROVENANCE_REQUIRED", "RESULT_REVIEW_PROMOTION_EMPTY", "APPROVED_ARGUMENT_DIGEST_MISMATCH", "EXPERIMENT_ALREADY_CONFIRMED", "RESULT_CONTEXT_TIMEOUT", "RESULT_CONTEXT_DURABILITY_TIMEOUT", "RESULT_CONTEXT_RECORD_MISSING", "RESULT_CONTEXT_TOOLCALL_MISSING", "RESULT_CONTEXT_ARTIFACT_MISSING", "RESULT_CONTEXT_OBSERVATION_MISSING", "RESULT_CONTEXT_EVIDENCE_MISSING", "RESULT_CONTEXT_TASK_NOT_COMPLETED", "RESULT_CONTEXT_TASK_RESULT_MISSING", "RESULT_CONTEXT_APPROVED_ACTION_NOT_CONSUMED"}
+            control_errors = {"TOOL_INVALID_ARGUMENT", "APPROVED_ACTION_COMPILE_FAILED", "APPROVED_ACTION_NOT_COMPILED", "TOOL_SCHEMA_VERSION_CHANGED", "SQL_EXPRESSION_PROVENANCE_REQUIRED", "RESULT_REVIEW_PROMOTION_EMPTY", "APPROVED_ARGUMENT_DIGEST_MISMATCH", "EXPERIMENT_ALREADY_CONFIRMED", "TOOL_FAILURE_CIRCUIT_OPEN", "RESULT_CONTEXT_TIMEOUT", "RESULT_CONTEXT_DURABILITY_TIMEOUT", "RESULT_CONTEXT_RECORD_MISSING", "RESULT_CONTEXT_TOOLCALL_MISSING", "RESULT_CONTEXT_ARTIFACT_MISSING", "RESULT_CONTEXT_OBSERVATION_MISSING", "RESULT_CONTEXT_EVIDENCE_MISSING", "RESULT_CONTEXT_TASK_NOT_COMPLETED", "RESULT_CONTEXT_TASK_RESULT_MISSING", "RESULT_CONTEXT_APPROVED_ACTION_NOT_CONSUMED"}
             if error.code in control_errors:
                 active_tasks = list((await session.scalars(select(AgentTask).where(AgentTask.run_id == run.id, AgentTask.status == AgentTaskStatus.RUNNING.value))).all())
                 for active_task in active_tasks:
@@ -2440,7 +2456,14 @@ class MultiAgentOrchestrator:
                 actions = list((await session.scalars(select(ApprovedAction).where(ApprovedAction.run_id == run.id, ApprovedAction.status == "ACTIVE"))).all())
                 for action in actions:
                     action.status = "REJECTED"
-                target = RunStatus.PAUSED_RECOVERY if error.code in {"RESULT_CONTEXT_DURABILITY_TIMEOUT", "RESULT_CONTEXT_TASK_NOT_COMPLETED", "RESULT_CONTEXT_TASK_RESULT_MISSING", "RESULT_CONTEXT_APPROVED_ACTION_NOT_CONSUMED"} else RunStatus.PLANNING if error.code == "RESULT_REVIEW_PROMOTION_EMPTY" else RunStatus.PAUSED_CHECKPOINT
+                target = RunStatus.WAITING_USER if error.code == "TOOL_FAILURE_CIRCUIT_OPEN" else RunStatus.PAUSED_RECOVERY if error.code in {"RESULT_CONTEXT_DURABILITY_TIMEOUT", "RESULT_CONTEXT_TASK_NOT_COMPLETED", "RESULT_CONTEXT_TASK_RESULT_MISSING", "RESULT_CONTEXT_APPROVED_ACTION_NOT_CONSUMED"} else RunStatus.PLANNING if error.code == "RESULT_REVIEW_PROMOTION_EMPTY" else RunStatus.PAUSED_CHECKPOINT
+                if error.code == "TOOL_FAILURE_CIRCUIT_OPEN":
+                    run.current_phase = "WAITING_USER"
+                    run.recovery_checkpoint_json = {
+                        **(run.recovery_checkpoint_json or {}),
+                        **(error.details or {}),
+                        "current_phase": "WAITING_USER",
+                    }
             else:
                 target = RunStatus.PAUSED_CHECKPOINT if error.code == "MODEL_OUTPUT_SCHEMA_INVALID" else RunStatus.PAUSED_DEPLOYMENT if error.code in {"TARGET_NETWORK_ENFORCEMENT_UNAVAILABLE", "SCRIPT_TARGET_NETWORK_UNAVAILABLE", "TOOL_CATALOG_DRIFT"} else RunStatus.PAUSED_RECOVERY if error.code in {"RUNNER_UNAVAILABLE", "CODEX_STREAM_INTERRUPTED"} else RunStatus.FAILED_ENGINE
             if RunStatus(run.status) not in {RunStatus.COMPLETED_SOLVED, RunStatus.COMPLETED_UNSOLVED, RunStatus.CANCELLED}:

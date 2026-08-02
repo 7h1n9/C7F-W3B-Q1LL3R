@@ -1,12 +1,13 @@
 """Chinese WP renderer with complete, copyable reproduction evidence."""
 
+import json
 import re
 
 from app.services.reproduction_commands import reproduction_command_renderer
 
 
 class ManualWriteupRenderer:
-    def render(self, challenge, run, result, calls, observations, hypotheses, flags, steps, failure_reason):
+    def render(self, challenge, run, result, calls, observations, hypotheses, flags, steps, failure_reason, wp=None):
         target = re.sub(r"https?://[^/]+", "{{target_host}}", str(challenge.target_url or "{{target_url}}"))
         verified = [item for item in flags if item.verified and item.review_state == "VALID"]
         lines = [
@@ -40,5 +41,15 @@ class ManualWriteupRenderer:
         lines += [f"- 已验证候选数：{len(verified)}", "- 来源：sqlmap/script/HTTP 输出 Artifact；具体字段、表和列以 `final/evidence-manifest.json` 为准。", "- 动态 Flag：flag{<redacted>}", "", "## 8. 最小复现步骤", ""]
         for step in steps:
             lines += [f"{step.order}. {step.title_zh}", f"   - 命令：`{step.manual_command or reproduction_command_renderer.render(step.tool_name, step.normalized_arguments)}`", f"   - 预期：{'; '.join(step.expected_evidence) or '产生对应 Artifact'}"]
-        lines += ["", "## 9. 失败路径", "", f"- {failure_reason or '工具失败时切换到脚本或保留缓存，不重复执行同一读取。'}", "", "## 10. 修复建议", "", "使用参数化查询、严格输入校验、最小数据库权限，并记录安全审计日志。", "", "## 11. 证据清单", "", "- `final/minimal-solution-path.json`", "- `final/reproduction-commands.sh`", "- `final/reproduction-validation.json`", "- `final/evidence-manifest.json`"]
+        lines += ["", "## 9. 失败路径", "", f"- {failure_reason or '工具失败时切换到脚本或保留缓存，不重复执行同一读取。'}", "", "## 10. 修复建议", "", "使用参数化查询、严格输入校验、最小数据库权限，并记录安全审计日志。", "", "## 11. 证据清单", "", "- `final/minimal-solution-path.json`", "- `final/reproduction-commands.sh`", "- `final/reproduction-validation.json`", "- `final/evidence-manifest.json"]
+        wp = wp or {}
+        lines += ["", "## 12. Supervisor WP", "", "```json", json.dumps({
+            "confirmed_facts": wp.get("confirmed_facts", []),
+            "tested_fields": wp.get("tested_fields", []),
+            "failed_tools": wp.get("failed_tools", []),
+            "user_inputs": wp.get("user_inputs", []),
+            "repeated_failures": wp.get("repeated_failures", []),
+            "current_blocker": wp.get("current_blocker"),
+            "next_manual_steps": wp.get("next_manual_steps", []),
+        }, ensure_ascii=False, indent=2), "```"]
         return "\n".join(lines) + "\n"

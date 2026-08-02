@@ -335,6 +335,9 @@ class ReportService:
         if not barrier["allowed"]:
             raise ValueError("REPORT_GENERATION_BLOCKED: " + ", ".join(barrier["missing"]))
         await event_service.append(session, run.id, "report.started", {})
+        from app.services.run_finalizer import run_finalizer
+
+        wp_payload = await run_finalizer.build_wp(session, run, failure_reason or result)
         calls = list(
             (
                 await session.scalars(
@@ -416,8 +419,11 @@ class ReportService:
             json.dumps(manifest, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
+        report_json = {"result": result, "failure_reason": failure_reason, "wp": wp_payload}
+        report_json_raw = json.dumps(report_json, ensure_ascii=False, indent=2).encode("utf-8")
+        (final / "report.json").write_bytes(report_json_raw)
         raw = ManualWriteupRenderer().render(
-            challenge, run, result, calls, observations, hypotheses, flags, steps, failure_reason
+            challenge, run, result, calls, observations, hypotheses, flags, steps, failure_reason, wp_payload
         ).encode("utf-8")
         path = final / "writeup.zh-CN.md"
         path.write_bytes(raw)
@@ -432,10 +438,24 @@ class ReportService:
             summary="中文版可复现解题报告",
             status="ACTIVE",
         )
+        wp_artifact = Artifact(
+            run_id=run.id,
+            artifact_type="report_json",
+            file_path="final/report.json",
+            mime_type="application/json",
+            size=len(report_json_raw),
+            sha256=hashlib.sha256(report_json_raw).hexdigest(),
+            summary="Durable report payload including WP facts, inputs and failure history.",
+            status="ACTIVE",
+        )
         old_reports = list((await session.scalars(select(Artifact).where(Artifact.run_id == run.id, Artifact.artifact_type == "report", Artifact.status == "ACTIVE"))).all())
         for old in old_reports:
             old.status = "STALE"
+        old_wp_reports = list((await session.scalars(select(Artifact).where(Artifact.run_id == run.id, Artifact.artifact_type == "report_json", Artifact.status == "ACTIVE"))).all())
+        for old in old_wp_reports:
+            old.status = "STALE"
         session.add(artifact)
+        session.add(wp_artifact)
         await session.commit()
         await event_service.append(
             session, run.id, "artifact.created", {"artifact_id": artifact.id, "path": artifact.file_path}

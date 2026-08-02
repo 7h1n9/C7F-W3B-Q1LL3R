@@ -48,7 +48,7 @@ async def consume_user_inputs(session, run: SolveRun, attempt: RunAttempt | None
         decision_card["user_inputs"] = user_inputs
         state.last_decision_card_json = decision_card
     await session.commit()
-    await event_service.append(session, run.id, "user.input_consumed", {
+    await event_service.append(session, run.id, "user_input.consumed", {
         "input_ids": [item["id"] for item in user_inputs],
         "revisions": [item["revision"] for item in user_inputs],
         "attempt_id": attempt.id if attempt else None,

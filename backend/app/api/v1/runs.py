@@ -1,12 +1,13 @@
 import asyncio
 import contextlib
+import json
 import shutil
 from datetime import UTC, datetime
 from pathlib import Path
 from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends
-from sqlalchemy import delete, select, update
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.challenges import require_challenge
@@ -588,6 +589,71 @@ async def list_run_messages(run_id: str, session: AsyncSession = Depends(get_ses
     return {"data": [{"id": item.id, "content": item.content, "input_type": item.input_type, "status": item.status, "revision": item.revision, "created_at": item.created_at.isoformat(), "consumed_at": item.consumed_at.isoformat() if item.consumed_at else None} for item in items]}
 
 
+@router.get("/runs/{run_id}/health")
+async def run_health(run_id: str, session: AsyncSession = Depends(get_session)) -> dict:
+    """Expose the durable reasons a Run is waiting or not progressing."""
+    run = await require_run(run_id, session)
+    lease = await session.scalar(select(RunExecutionLease).where(RunExecutionLease.run_id == run.id))
+    running_task = await session.scalar(select(AgentTask.id).where(
+        AgentTask.run_id == run.id,
+        AgentTask.status.in_(["RUNNING", "CLAIMED"]),
+    ))
+    running_tool = await session.scalar(select(ToolCall.id).where(
+        ToolCall.run_id == run.id,
+        ToolCall.status.in_(["REQUESTED", "STARTED", "RUNNING"]),
+    ))
+    queued_inputs = int(await session.scalar(select(func.count()).select_from(RunUserInput).where(
+        RunUserInput.run_id == run.id,
+        RunUserInput.status == "QUEUED",
+        RunUserInput.consumed_at.is_(None),
+    )) or 0)
+    consumed_inputs = int(await session.scalar(select(func.count()).select_from(RunUserInput).where(
+        RunUserInput.run_id == run.id,
+        RunUserInput.status == "CONSUMED",
+    )) or 0)
+    last_fact = await session.scalar(select(VerifiedFact).where(
+        VerifiedFact.run_id == run.id,
+    ).order_by(VerifiedFact.updated_at.desc(), VerifiedFact.created_at.desc()))
+    last_tool = await session.scalar(select(ToolCall).where(
+        ToolCall.run_id == run.id,
+    ).order_by(ToolCall.created_at.desc()))
+    checkpoint = dict(run.recovery_checkpoint_json or {})
+    counters = dict(checkpoint.get("supervisor_counters") or {})
+    status = str(run.status)
+    if queued_inputs:
+        next_action = "consume_user_input"
+    elif status == RunStatus.WAITING_USER.value:
+        next_action = "wait_for_user_input"
+    elif status in {item.value for item in TERMINAL}:
+        next_action = "terminal"
+    elif lease is not None or running_task or running_tool:
+        next_action = "execute_current_attempt"
+    elif int(counters.get("no_progress_count") or 0) > 0:
+        next_action = "finish_unsolved_with_wp"
+    else:
+        next_action = "continue_supervisor"
+    return {"data": {
+        "status": status,
+        "current_phase": run.current_phase,
+        "last_error_code": run.last_error_code,
+        "runtime": {
+            "active_lease": lease is not None,
+            "lease_owner": lease.owner_instance_id if lease else None,
+            "running_task": running_task is not None,
+            "running_tool": running_tool is not None,
+        },
+        "input": {"queued": queued_inputs, "consumed": consumed_inputs},
+        "progress": {
+            "last_fact": last_fact.fact_key if last_fact else None,
+            "last_tool": last_tool.tool_name if last_tool else None,
+            "last_tool_status": last_tool.status if last_tool else None,
+            "no_progress_count": int(counters.get("no_progress_count") or 0),
+        },
+        "next_action": next_action,
+        "checkpoint": checkpoint,
+    }}
+
+
 @router.post("/runs/{run_id}/messages")
 async def enqueue_run_message(run_id: str, payload: dict, session: AsyncSession = Depends(get_session)) -> dict:
     run = await require_run(run_id, session)
@@ -609,11 +675,11 @@ async def enqueue_run_message(run_id: str, payload: dict, session: AsyncSession 
     run.assistance_sources_json = sources[-100:]
     run.context_revision += 1
     await session.commit()
-    await event_service.append(session, run.id, "user.input_received", {"revision": revision, "input_type": item.input_type})
-    # A running turn is never interrupted. Paused runs can safely resume so
-    # this input is consumed on the next Agent Step.
-    if run.id not in orchestrator.active_tasks and RunStatus(run.status) in {RunStatus.WAITING_USER, RunStatus.PAUSED_CHECKPOINT, RunStatus.PAUSED_RECOVERY, RunStatus.PAUSED_DEPLOYMENT, RunStatus.WAITING_CONFIGURATION, RunStatus.PAUSED_RATE_LIMIT}:
-        asyncio.create_task(run_supervisor.run_after_user_input_background(run.id))
+    await event_service.append(session, run.id, "user_input.received", {"revision": revision, "input_type": item.input_type})
+    # Persisting the input is not enough: the durable event is followed by an
+    # explicit Supervisor wakeup.  The Supervisor owns deduplication and
+    # continues only after it has consumed the queued rows.
+    await run_supervisor.enqueue(run.id, reason="USER_INPUT_RECEIVED")
     return {"data": {"accepted": True, "revision": revision, "status": "QUEUED", "message": "补充信息已加入，将在下一 Agent Step 使用。"}}
 
 
@@ -984,7 +1050,9 @@ async def get_report(run_id: str, session: AsyncSession = Depends(get_session)) 
         raise DomainError(
             "REPORT_NOT_FOUND", "No report has been generated for this run.", status_code=404
         )
-    return {"data": {"content": path.read_text(encoding="utf-8"), "path": "final/writeup.md"}}
+    report_json_path = Path(run.workspace_path) / "final" / "report.json"
+    report_json = json.loads(report_json_path.read_text(encoding="utf-8")) if report_json_path.is_file() else None
+    return {"data": {"content": path.read_text(encoding="utf-8"), "path": "final/writeup.md", "report_json": report_json}}
 
 
 @router.get("/runs/{run_id}/compaction/status")

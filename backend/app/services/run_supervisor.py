@@ -1,16 +1,17 @@
 """Backend-owned continuous driver for multi_agent_v1 Runs."""
 
+import asyncio
+import contextlib
+import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
 from sqlalchemy import select
 
-from app.core.database import SessionLocal
 from app.models.challenge import Challenge
 from app.models.multi_agent import VerifiedFact
 from app.models.run import FlagCandidate, RunExecutionLease, SolveRun, ToolCall
 from app.models.solver_state import SolverState
-from app.orchestration.orchestrator import orchestrator
 from app.orchestration.state_machine import RunStatus, transition
 from app.services.run_finalizer import run_finalizer
 from app.services.stage_decider import stage_decider
@@ -20,6 +21,7 @@ from app.services.writeup_builder import writeup_builder
 
 
 USER_VISIBLE_TERMINAL = {"WAITING_USER", "COMPLETED_SOLVED", "COMPLETED_UNSOLVED", "CANCELLED"}
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -39,6 +41,48 @@ class RunOutcome:
 class RunSupervisor:
     def __init__(self) -> None:
         self._active_runs: set[str] = set()
+        self._wake_queue: asyncio.Queue[tuple[str, str]] | None = None
+        self._worker_task: asyncio.Task | None = None
+        self._queued_runs: set[str] = set()
+
+    async def start_worker(self) -> None:
+        if self._worker_task is not None and not self._worker_task.done():
+            return
+        self._wake_queue = asyncio.Queue()
+        self._worker_task = asyncio.create_task(self._worker_loop(), name="run-supervisor-worker")
+
+    async def stop_worker(self) -> None:
+        task = self._worker_task
+        self._worker_task = None
+        self._wake_queue = None
+        self._queued_runs.clear()
+        if task is not None:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
+    async def enqueue(self, run_id: str, *, reason: str) -> None:
+        await self.start_worker()
+        if run_id in self._queued_runs:
+            return
+        self._queued_runs.add(run_id)
+        assert self._wake_queue is not None
+        await self._wake_queue.put((run_id, reason))
+
+    async def _worker_loop(self) -> None:
+        assert self._wake_queue is not None
+        while True:
+            run_id, reason = await self._wake_queue.get()
+            self._queued_runs.discard(run_id)
+            try:
+                if reason == "USER_INPUT_RECEIVED":
+                    await self.run_after_user_input_background(run_id)
+                else:
+                    await self.run_background(run_id)
+            except Exception:
+                logger.exception("Supervisor wakeup failed run_id=%s reason=%s", run_id, reason)
+            finally:
+                self._wake_queue.task_done()
 
     def _asset_mysql(self, challenge: Challenge | None) -> bool:
         metadata = (challenge.metadata_json or {}) if challenge else {}
@@ -127,6 +171,8 @@ class RunSupervisor:
         return await self.continue_until_terminal(session, run_id, consumed["text"])
 
     async def continue_until_terminal(self, session, run_id: str, user_message: str | None = None) -> RunOutcome:
+        from app.orchestration.orchestrator import orchestrator
+
         for _ in range(32):
             await session.rollback()
             run = await session.get(SolveRun, run_id)
@@ -210,6 +256,8 @@ class RunSupervisor:
         if run_id in self._active_runs:
             return RunOutcome(run_id, "RUNNING", "", "RUN_ALREADY_OWNED")
         self._active_runs.add(run_id)
+        from app.core.database import SessionLocal
+
         async with SessionLocal() as session:
             try:
                 return await self.continue_until_terminal(session, run_id, user_message)
@@ -220,6 +268,8 @@ class RunSupervisor:
         if run_id in self._active_runs:
             return RunOutcome(run_id, "RUNNING", "", "RUN_ALREADY_OWNED")
         self._active_runs.add(run_id)
+        from app.core.database import SessionLocal
+
         async with SessionLocal() as session:
             try:
                 return await self.continue_after_user_input(session, run_id)
