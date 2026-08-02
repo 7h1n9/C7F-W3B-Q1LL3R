@@ -53,7 +53,13 @@ class SolverStateService:
         progress = dict(ledger.get("metadata_progress") or {})
         previous = dict(progress.get(normalized_stage) or {})
         contract_status = str(result_status or "").upper()
-        stage_status = "SUCCESS" if contract_status in {"SUCCESS", "COMPLETED"} else "FAILED"
+        stage_status = (
+            "SUCCESS"
+            if contract_status in {"SUCCESS", "COMPLETED"}
+            else "NO_FACT"
+            if contract_status == "NO_FACT"
+            else "FAILED"
+        )
         entry = {
             **previous,
             "stage": normalized_stage,

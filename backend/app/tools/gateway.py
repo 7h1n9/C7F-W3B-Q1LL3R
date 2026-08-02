@@ -401,7 +401,7 @@ class ToolGateway:
             if name == "mysql_metadata_discovery" and contract_status in {"COMPLETED", "SUCCESS"} and not _metadata_result_has_required_fact(arguments, result):
                 result = {
                     **result,
-                    "status": "FAILED",
+                    "status": "NO_FACT",
                     "result_status": "NO_FACT",
                     "error_code": "MYSQL_METADATA_EMPTY_RESULT",
                     "summary": "mysql_metadata_discovery completed without a distinguishable metadata fact.",
@@ -409,7 +409,6 @@ class ToolGateway:
                     "tool_execution_completed": True,
                     "retryable": True,
                 }
-                result["status"] = "NO_FACT"
             with contextlib.suppress(Exception):
                 await workspace_sync_service.sync_from_runner(run.id, Path(run.workspace_path))
             if _result_contract_status(result) not in _TOOL_SUCCESS_STATUSES and not result.get("error_code"):
