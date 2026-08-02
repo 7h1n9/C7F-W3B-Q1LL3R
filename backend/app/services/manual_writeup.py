@@ -43,13 +43,22 @@ class ManualWriteupRenderer:
             lines += [f"{step.order}. {step.title_zh}", f"   - 命令：`{step.manual_command or reproduction_command_renderer.render(step.tool_name, step.normalized_arguments)}`", f"   - 预期：{'; '.join(step.expected_evidence) or '产生对应 Artifact'}"]
         lines += ["", "## 9. 失败路径", "", f"- {failure_reason or '工具失败时切换到脚本或保留缓存，不重复执行同一读取。'}", "", "## 10. 修复建议", "", "使用参数化查询、严格输入校验、最小数据库权限，并记录安全审计日志。", "", "## 11. 证据清单", "", "- `final/minimal-solution-path.json`", "- `final/reproduction-commands.sh`", "- `final/reproduction-validation.json`", "- `final/evidence-manifest.json"]
         wp = wp or {}
-        lines += ["", "## 12. Supervisor WP", "", "```json", json.dumps({
-            "confirmed_facts": wp.get("confirmed_facts", []),
-            "tested_fields": wp.get("tested_fields", []),
-            "failed_tools": wp.get("failed_tools", []),
-            "user_inputs": wp.get("user_inputs", []),
-            "repeated_failures": wp.get("repeated_failures", []),
-            "current_blocker": wp.get("current_blocker"),
-            "next_manual_steps": wp.get("next_manual_steps", []),
-        }, ensure_ascii=False, indent=2), "```"]
+        lines += ["", "# Challenge", "", f"- {wp.get('challenge', {}).get('name', challenge.name)}", f"- Target: {wp.get('target') or challenge.target_url}", "", "## 已确认", ""]
+        lines.extend(f"- {json.dumps(fact, ensure_ascii=False)}" for fact in wp.get("confirmed_facts", []))
+        if not wp.get("confirmed_facts"):
+            lines.append("- 暂无已确认事实")
+        lines += ["", "## 已执行阶段", ""]
+        lines.extend(f"- {stage}" for stage in wp.get("completed_stages", []))
+        if not wp.get("completed_stages"):
+            lines.append("- 暂无已完成阶段")
+        lines += ["", "## 当前阻塞", "", f"- {wp.get('current_blocker') or failure_reason or '未记录'}", "", "## 工具失败", ""]
+        lines.extend(f"- {tool}" for tool in wp.get("failed_tools", []))
+        if not wp.get("failed_tools"):
+            lines.append("- 暂无失败工具")
+        lines += ["", "## 用户输入", ""]
+        lines.extend(f"- v{item.get('revision')}: {item.get('content')}" for item in wp.get("user_inputs", []))
+        if not wp.get("user_inputs"):
+            lines.append("- 无")
+        lines += ["", "## 下一步建议", ""]
+        lines.extend(f"{index}. {step}" for index, step in enumerate(wp.get("next_steps") or wp.get("next_manual_steps", []), 1))
         return "\n".join(lines) + "\n"

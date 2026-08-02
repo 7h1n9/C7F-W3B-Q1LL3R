@@ -41,7 +41,7 @@ class RunOutcome:
 
 class RunSupervisor:
     def __init__(self) -> None:
-        self._active_runs: set[str] = set()
+        self.run_supervisor_lock: dict[str, asyncio.Lock] = {}
         self._wake_queue: asyncio.Queue[tuple[str, str]] | None = None
         self._worker_task: asyncio.Task | None = None
         self._queued_runs: set[str] = set()
@@ -69,6 +69,11 @@ class RunSupervisor:
         self._queued_runs.add(run_id)
         assert self._wake_queue is not None
         await self._wake_queue.put((run_id, reason))
+
+    def _release_run_lock(self, run_id: str, lock: asyncio.Lock) -> None:
+        lock.release()
+        if not lock.locked() and self.run_supervisor_lock.get(run_id) is lock:
+            self.run_supervisor_lock.pop(run_id, None)
 
     async def _worker_loop(self) -> None:
         assert self._wake_queue is not None
@@ -229,6 +234,8 @@ class RunSupervisor:
             raise ValueError("RUN_NOT_FOUND")
         if str(run.status) in {"COMPLETED_SOLVED", "COMPLETED_UNSOLVED", "CANCELLED"}:
             return RunOutcome(run.id, str(run.status), str(run.current_phase or ""), "RUN_ALREADY_TERMINAL")
+        if str(run.status) not in {"WAITING_USER", "PAUSED_CHECKPOINT", "PAUSED_RECOVERY"}:
+            return RunOutcome(run.id, str(run.status), str(run.current_phase or ""), "RUN_NOT_WAITING")
         consumed = await consume_user_inputs(session, run, wake_supervisor=False)
         if not consumed["items"]:
             consumed = await self._recover_consumed_user_input(session, run)
@@ -344,21 +351,23 @@ class RunSupervisor:
         return await self._outcome(session, run)
 
     async def run_background(self, run_id: str, user_message: str | None = None) -> RunOutcome:
-        if run_id in self._active_runs:
-            return RunOutcome(run_id, "RUNNING", "", "RUN_ALREADY_OWNED")
-        self._active_runs.add(run_id)
+        lock = self.run_supervisor_lock.setdefault(run_id, asyncio.Lock())
+        if lock.locked():
+            return RunOutcome(run_id, "RUNNING", "", "RUN_ALREADY_RUNNING")
+        await lock.acquire()
         from app.core.database import SessionLocal
 
         async with SessionLocal() as session:
             try:
                 return await self.continue_until_terminal(session, run_id, user_message)
             finally:
-                self._active_runs.discard(run_id)
+                self._release_run_lock(run_id, lock)
 
     async def run_after_user_input_background(self, run_id: str) -> RunOutcome:
-        if run_id in self._active_runs:
-            return RunOutcome(run_id, "RUNNING", "", "RUN_ALREADY_OWNED")
-        self._active_runs.add(run_id)
+        lock = self.run_supervisor_lock.setdefault(run_id, asyncio.Lock())
+        if lock.locked():
+            return RunOutcome(run_id, "RUNNING", "", "RUN_ALREADY_RUNNING")
+        await lock.acquire()
         from app.core.database import SessionLocal
 
         async with SessionLocal() as session:
@@ -377,7 +386,7 @@ class RunSupervisor:
                     return await self._mark_user_input_no_progress(session, run, current)
                 return RunOutcome.from_run(run)
             finally:
-                self._active_runs.discard(run_id)
+                self._release_run_lock(run_id, lock)
 
 
 run_supervisor = RunSupervisor()

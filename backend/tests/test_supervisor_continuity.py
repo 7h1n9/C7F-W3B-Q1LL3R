@@ -6,10 +6,12 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
+from datetime import UTC, datetime, timedelta
 
 from app.models.base import Base
 from app.models.challenge import Challenge
-from app.models.run import RunEvent, RunUserInput, SolveRun
+from app.models.multi_agent import AgentTask
+from app.models.run import RunAttempt, RunEvent, RunExecutionLease, RunUserInput, SolveRun, ToolCall
 from app.models.solver_state import SolverState
 from app.schemas.multi_agent import FailureClassification
 from app.services.failure_classification import normalize_failure_classification
@@ -18,6 +20,7 @@ from app.services.tool_failure_policy import blocked_failure_for_action, tool_fa
 from app.services.user_input_consumer import consume_user_inputs
 from app.services.run_supervisor import RunSupervisor, run_supervisor
 from app.services.supervisor_progress import supervisor_progress_evaluator
+from app.services.run_finalizer import run_finalizer
 
 
 def test_failure_classification_normalizes_pydantic_object() -> None:
@@ -163,3 +166,52 @@ async def test_supervisor_enqueue_wakes_user_input_worker() -> None:
     await asyncio.sleep(0)
     await supervisor.stop_worker()
     assert called == ["run-1"]
+
+
+@pytest.mark.asyncio
+async def test_supervisor_rejects_duplicate_run_lock() -> None:
+    supervisor = RunSupervisor()
+    lock = asyncio.Lock()
+    await lock.acquire()
+    supervisor.run_supervisor_lock["run-1"] = lock
+    outcome = await supervisor.run_background("run-1")
+    assert outcome.error_code == "RUN_ALREADY_RUNNING"
+    lock.release()
+
+
+@pytest.mark.asyncio
+async def test_terminal_reconcile_removes_all_running_resources(tmp_path: Path) -> None:
+    engine = create_async_engine(
+        f"sqlite+aiosqlite:///{tmp_path / 'terminal.db'}", poolclass=StaticPool
+    )
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    async with sessions() as session:
+        challenge = Challenge(name="terminal", target_url="http://target.test", allowed_hosts=["target.test"])
+        session.add(challenge)
+        await session.flush()
+        run = SolveRun(challenge_id=challenge.id, workspace_path=str(tmp_path), status="COMPLETED_UNSOLVED", current_phase="REPORTING")
+        session.add(run)
+        await session.flush()
+        now = datetime.now(UTC)
+        attempt = RunAttempt(run_id=run.id, attempt_number=1, engine_type="mock", status="RUNNING", finished_at=now)
+        task = AgentTask(run_id=run.id, agent_role="RECON", task_kind="RECON", objective="test", status="RUNNING")
+        session.add_all([attempt, task])
+        await session.flush()
+        lease = RunExecutionLease(run_id=run.id, attempt_id=attempt.id, owner_instance_id="test", lease_token="terminal-lease", acquired_at=now, heartbeat_at=now, expires_at=now + timedelta(minutes=1))
+        tool_call = ToolCall(run_id=run.id, tool_name="mysql_metadata_discovery", arguments_json={"stage": "version"}, status="STARTED")
+        session.add_all([lease, tool_call])
+        await session.commit()
+
+        await run_finalizer.terminal_reconcile(session, run)
+        await session.refresh(attempt)
+        await session.refresh(task)
+        await session.refresh(tool_call)
+        assert attempt.status != "RUNNING"
+        assert await session.scalar(select(RunExecutionLease).where(RunExecutionLease.run_id == run.id)) is None
+        assert task.status == "INTERRUPTED"
+        assert tool_call.status == "INTERRUPTED"
+        events = list((await session.scalars(select(RunEvent).where(RunEvent.run_id == run.id))).all())
+        assert any(event.event_type == "run.lifecycle.cleaned" for event in events)
+    await engine.dispose()

@@ -14,6 +14,7 @@ from app.models.multi_agent import AgentTask, AgentTaskResult, ApprovedAction, E
 from app.models.run import RunAttempt, RunExecutionLease, RunUserInput, SolveRun, ToolCall, ToolInvocationTicket
 from app.models.solver_state import SolverState
 from app.schemas.multi_agent import AgentTaskStatus
+from app.services.events import event_service
 
 
 TERMINAL_RUN_STATUSES = {
@@ -154,7 +155,8 @@ class RunFinalizer:
     async def reconcile(self, session, run: SolveRun) -> dict:
         now = datetime.now(UTC)
         changed = {"leases_deleted": 0, "attempts_closed": 0, "tasks_replanned": 0,
-                   "actions_rejected": 0, "tool_calls_closed": 0, "phase_synced": False, "wp_rebuilt": False}
+                   "actions_rejected": 0, "tool_calls_closed": 0, "phase_synced": False,
+                   "wp_rebuilt": False, "terminal_cleaned": False}
 
         # A terminal Run owns no executable resource, regardless of which
         # process or request created that resource.
@@ -172,7 +174,8 @@ class RunFinalizer:
                     run.report_json = existing_wp
                     changed["wp_rebuilt"] = True
             attempts = list((await session.scalars(select(RunAttempt).where(
-                RunAttempt.run_id == run.id, RunAttempt.finished_at.is_(None)
+                RunAttempt.run_id == run.id,
+                (RunAttempt.status == "RUNNING") | RunAttempt.finished_at.is_(None),
             ))).all())
             for attempt in attempts:
                 attempt.status = str(run.status)
@@ -180,8 +183,8 @@ class RunFinalizer:
                 attempt.error_code = run.last_error_code
                 changed["attempts_closed"] += 1
             await session.execute(delete(ToolInvocationTicket).where(ToolInvocationTicket.run_id == run.id))
-            await session.execute(delete(RunExecutionLease).where(RunExecutionLease.run_id == run.id))
-            changed["leases_deleted"] += 1
+            lease_result = await session.execute(delete(RunExecutionLease).where(RunExecutionLease.run_id == run.id))
+            changed["leases_deleted"] += int(lease_result.rowcount or 0)
             tasks = list((await session.scalars(select(AgentTask).where(
                 AgentTask.run_id == run.id, AgentTask.status == AgentTaskStatus.RUNNING.value
             ))).all())
@@ -199,8 +202,23 @@ class RunFinalizer:
                 changed["actions_rejected"] += 1
             result = await session.execute(ToolCall.__table__.update().where(
                 ToolCall.run_id == run.id, ToolCall.status.in_(["REQUESTED", "STARTED"])
-            ).values(status="CANCELLED", finished_at=now))
+            ).values(status="INTERRUPTED", finished_at=now))
             changed["tool_calls_closed"] += int(result.rowcount or 0)
+            changed["terminal_cleaned"] = bool(
+                changed["attempts_closed"]
+                or changed["leases_deleted"]
+                or changed["tasks_replanned"]
+                or changed["tool_calls_closed"]
+            )
+            if changed["terminal_cleaned"]:
+                await event_service.append(session, run.id, "run.lifecycle.cleaned", {
+                    "run_id": run.id,
+                    "status": run.status,
+                    "attempts_closed": changed["attempts_closed"],
+                    "leases_deleted": changed["leases_deleted"],
+                    "tasks_interrupted": changed["tasks_replanned"],
+                    "tool_calls_closed": changed["tool_calls_closed"],
+                })
 
         # A live task/action without the execution lease is an interrupted
         # process, not a reason to leave the Run permanently paused.
@@ -264,9 +282,19 @@ class RunFinalizer:
         await self.reconcile(session, run)
         return run
 
+    async def terminal_reconcile(self, session, run: SolveRun) -> dict:
+        """Close every executable resource owned by a terminal Run."""
+        if str(run.status) not in {"COMPLETED_SOLVED", "COMPLETED_UNSOLVED", "CANCELLED"}:
+            return {}
+        return await self.reconcile(session, run)
+
 
 run_finalizer = RunFinalizer()
 
 
 async def reconcile_run(session, run_id: str) -> SolveRun:
     return await run_finalizer.reconcile_run(session, run_id)
+
+
+async def terminal_reconcile(session, run: SolveRun) -> dict:
+    return await run_finalizer.terminal_reconcile(session, run)
