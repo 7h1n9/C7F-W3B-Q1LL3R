@@ -10,7 +10,7 @@ from sqlalchemy import func, select
 
 from app.models.challenge import Challenge
 from app.models.multi_agent import AgentTask, PlannerProposal, VerifiedFact
-from app.models.run import FlagCandidate, RunEvent, RunExecutionLease, RunUserInput, SolveRun, ToolCall
+from app.models.run import FlagCandidate, RunAttempt, RunEvent, RunExecutionLease, RunUserInput, SolveRun, ToolCall
 from app.models.solver_state import SolverState
 from app.orchestration.state_machine import RunStatus, transition
 from app.services.run_finalizer import run_finalizer
@@ -122,7 +122,13 @@ class RunSupervisor:
             "tool_call_count": int(await session.scalar(select(func.count()).select_from(ToolCall).where(ToolCall.run_id == run_id)) or 0),
             "verified_fact_count": int(await session.scalar(select(func.count()).select_from(VerifiedFact).where(VerifiedFact.run_id == run_id, VerifiedFact.promotion_status == "VERIFIED")) or 0),
             "capability_count": capability_count,
-            "event_sequence": int(await session.scalar(select(func.max(RunEvent.sequence)).where(RunEvent.run_id == run_id)) or 0),
+            # Tool-manifest refresh is bootstrap bookkeeping, not a post-input
+            # execution decision. Exclude it from the progress signal so a
+            # manifest-only attempt cannot satisfy the resume watchdog.
+            "event_sequence": int(await session.scalar(select(func.max(RunEvent.sequence)).where(
+                RunEvent.run_id == run_id,
+                RunEvent.event_type != "attempt.tool_manifest_refreshed",
+            )) or 0),
         }
 
     async def has_unfinished_user_input(self, session, run: SolveRun) -> bool:
@@ -158,15 +164,16 @@ class RunSupervisor:
         }
 
     async def _mark_user_input_no_progress(self, session, run: SolveRun, snapshot: dict) -> RunOutcome:
-        run.last_error_code = "USER_INPUT_NO_PROGRESS"
-        run.last_error_message = "User input was consumed, but no durable task, proposal, tool call, fact or event appeared within 30 seconds."
+        run.last_error_code = "USER_INPUT_ACCEPTED_BUT_NO_EXECUTION_PATH"
+        run.last_error_message = "User input was consumed, but the multi-agent supervisor did not create a post-input execution decision within 30 seconds."
         run.current_phase = "WAITING_USER"
         run.recovery_checkpoint_json = {
             **(run.recovery_checkpoint_json or {}),
             "current_phase": "WAITING_USER",
-            "no_progress_reason": "USER_INPUT_NO_PROGRESS",
+            "no_progress_reason": "USER_INPUT_ACCEPTED_BUT_NO_EXECUTION_PATH",
+            "user_input_resume_pending": True,
             "progress_snapshot": snapshot,
-            "question": "The input was accepted but execution made no durable progress. Choose how to continue.",
+            "question": "The input was accepted, but no Planner/Task/Tool execution path was created. Choose how to continue.",
             "options": ["retry", "finish_unsolved_wp", "try_alternative_strategy"],
         }
         run.status = RunStatus.WAITING_USER.value
@@ -206,7 +213,11 @@ class RunSupervisor:
     async def _outcome(self, session, run: SolveRun) -> RunOutcome:
         if str(run.status) == "WAITING_USER":
             checkpoint = dict(run.recovery_checkpoint_json or {})
-            if not checkpoint.get("current_wp"):
+            resume_broken = checkpoint.get("user_input_resume_pending") and run.last_error_code in {
+                "USER_INPUT_ACCEPTED_BUT_NO_EXECUTION_PATH",
+                "USER_INPUT_NO_PROGRESS",
+            }
+            if not resume_broken and not checkpoint.get("current_wp"):
                 checkpoint["current_wp"] = await writeup_builder.build_partial_wp(
                     session, run, str(run.last_error_code or "Waiting for user input.")
                 )
@@ -237,7 +248,20 @@ class RunSupervisor:
             return RunOutcome(run.id, str(run.status), str(run.current_phase or ""), "RUN_ALREADY_TERMINAL")
         if str(run.status) not in {"WAITING_USER", "PAUSED_CHECKPOINT", "PAUSED_RECOVERY"}:
             return RunOutcome(run.id, str(run.status), str(run.current_phase or ""), "RUN_NOT_WAITING")
-        consumed = await consume_user_inputs(session, run, wake_supervisor=False)
+        # Establish the resume execution context before consuming input so
+        # user_input.consumed carries an attempt_id. The orchestrator reuses
+        # this lease instead of bootstrapping a manifest-only attempt.
+        await run_attempt_service.reclaim_expired_lease(session, run.id)
+        pending_id = await session.scalar(select(RunUserInput.id).where(
+            RunUserInput.run_id == run.id,
+            RunUserInput.status == "QUEUED",
+            RunUserInput.consumed_at.is_(None),
+        ).order_by(RunUserInput.revision, RunUserInput.created_at))
+        lease = await session.scalar(select(RunExecutionLease).where(RunExecutionLease.run_id == run.id)) if pending_id else None
+        attempt = await session.get(RunAttempt, lease.attempt_id) if lease is not None else None
+        if pending_id and attempt is None:
+            attempt, lease = await run_attempt_service.begin(session, run)
+        consumed = await consume_user_inputs(session, run, attempt, wake_supervisor=False)
         if not consumed["items"]:
             consumed = await self._recover_consumed_user_input(session, run)
             if not consumed["items"]:
@@ -248,6 +272,17 @@ class RunSupervisor:
             await session.commit()
         if str(run.status) in {"WAITING_USER", "PAUSED_CHECKPOINT", "PAUSED_RECOVERY"}:
             await self._resolve_waiting_input(session, run)
+        # Make the resume context explicit for the next Planner snapshot.
+        checkpoint = dict(run.recovery_checkpoint_json or {})
+        progress = dict((await self._facts(session, run))[1].get("metadata_progress") or {})
+        blocked = [f"MYSQL_METADATA_DISCOVERY.{stage}" for stage, item in progress.items() if isinstance(item, dict) and str(item.get("status") or "").upper() == "BLOCKED"]
+        checkpoint.update({
+            "resume_reason": "USER_INPUT_RECEIVED",
+            "blocked_stage": blocked[-1] if blocked else None,
+            "suggested_strategy": "try next unblocked metadata stage or alternative bounded extraction",
+        })
+        run.recovery_checkpoint_json = checkpoint
+        await session.commit()
         try:
             outcome = await self.continue_until_terminal(session, run_id, consumed["text"])
             run = await session.get(SolveRun, run_id)
@@ -305,6 +340,20 @@ class RunSupervisor:
                 run.recovery_checkpoint_json = {**(run.recovery_checkpoint_json or {}), "classification": decision.terminal_reason, **decision.details}
                 await run_finalizer.finish_unsolved_with_wp(session, run, decision.reason)
                 return RunOutcome.from_run(run)
+            if decision.requires_user:
+                run.status = RunStatus.WAITING_USER.value
+                run.current_phase = "WAITING_USER"
+                run.last_error_code = "METADATA_ESSENTIAL_STAGES_BLOCKED"
+                run.last_error_message = decision.reason
+                run.recovery_checkpoint_json = {
+                    **(run.recovery_checkpoint_json or {}),
+                    "current_phase": "WAITING_USER",
+                    "question": decision.reason,
+                    "options": ["retry_after_fix", "finish_unsolved_wp", "try_alternative_strategy"],
+                    **decision.details,
+                }
+                await session.commit()
+                return await self._outcome(session, run)
             await self._recover_internal_pause(session, run, decision.stage)
             run = await session.get(SolveRun, run_id)
             if run is None:
@@ -333,6 +382,8 @@ class RunSupervisor:
                 **(after.recovery_checkpoint_json or {}),
                 "progress_snapshot": after_snapshot,
             }
+            if after_snapshot != before_snapshot:
+                after.recovery_checkpoint_json.pop("resume_reason", None)
             await session.commit()
             if str(after.status) in USER_VISIBLE_TERMINAL:
                 return await self._outcome(session, after)
@@ -343,11 +394,15 @@ class RunSupervisor:
                 await session.commit()
                 return await self._outcome(session, after)
             if observed.terminal_unsolved:
+                if (after.recovery_checkpoint_json or {}).get("resume_reason") == "USER_INPUT_RECEIVED" and observed.reason == "NO_PROGRESS_LOOP":
+                    return await self._mark_user_input_no_progress(session, after, after_snapshot)
                 await run_finalizer.finish_unsolved_with_wp(session, after, observed.reason)
                 return await self._outcome(session, after)
         run = await session.get(SolveRun, run_id)
         if run is None:
             raise ValueError("RUN_NOT_FOUND")
+        if (run.recovery_checkpoint_json or {}).get("resume_reason") == "USER_INPUT_RECEIVED":
+            return await self._mark_user_input_no_progress(session, run, {"reason": "NO_PROGRESS_LOOP"})
         await run_finalizer.finish_unsolved_with_wp(session, run, "NO_PROGRESS_LOOP")
         return await self._outcome(session, run)
 

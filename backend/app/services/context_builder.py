@@ -224,6 +224,12 @@ class ContextBuilder:
             },
             "Evidence Snapshot": snapshot_data or None,
             "Authorized Methodology Hints": run.hints_json or {},
+            "User Resume Context": {
+                "user_inputs": list((run.hints_json or {}).get("user_inputs") or [])[-20:],
+                "resume_reason": (run.recovery_checkpoint_json or {}).get("resume_reason"),
+                "blocked_stage": (run.recovery_checkpoint_json or {}).get("blocked_stage"),
+                "suggested_strategy": (run.recovery_checkpoint_json or {}).get("suggested_strategy"),
+            },
             "RunPlan": (snapshot_data.get("current_exploit_plan") if snapshot_data else None) or (state.run_plan_json if state else {}),
             "AttackChainPlan": (snapshot_data.get("attack_chain") if snapshot_data else None) or (state.attack_chain_plan_json if state else {}),
             "Capability Ledger": (snapshot_data.get("confirmed_capabilities") if snapshot_data else None) or (state.capability_ledger_json if state else {}),

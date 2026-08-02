@@ -23,7 +23,8 @@ class StageDecider:
 
     def decide(self, *, asset_warranty_mysql: bool, verified_fact_keys: set[str],
                capability_ledger: dict | None = None, candidate_exists: bool = False,
-               declared_fields: set[str] | None = None, tested_fields: set[str] | None = None) -> StageDecision:
+               declared_fields: set[str] | None = None, tested_fields: set[str] | None = None,
+               metadata_progress: dict | None = None) -> StageDecision:
         if not asset_warranty_mysql:
             return StageDecision("FLAG_VERIFICATION" if candidate_exists else "HYPOTHESIS")
         if "asset_warranty.valid_baseline" not in verified_fact_keys or "asset_warranty.invalid_baseline" not in verified_fact_keys:
@@ -42,15 +43,30 @@ class StageDecider:
         if "asset_warranty.oracle_calibration_matrix" not in verified_fact_keys or "asset_warranty.mysql_dbms" not in verified_fact_keys:
             return StageDecision("ORACLE_CALIBRATION")
         metadata_order = [
-            ("asset_warranty.mysql_version", "version"),
-            ("asset_warranty.mysql_version_comment", "version_comment"),
-            ("asset_warranty.current_database", "database"),
-            ("asset_warranty.mysql_user_tables", "tables"),
-            ("asset_warranty.mysql_candidate_columns", "columns"),
+            ("asset_warranty.mysql_version", "version", False),
+            ("asset_warranty.mysql_version_comment", "version_comment", False),
+            ("asset_warranty.current_database", "database", True),
+            ("asset_warranty.mysql_user_tables", "tables", True),
+            ("asset_warranty.mysql_candidate_columns", "columns", True),
         ]
-        for fact_key, metadata_stage in metadata_order:
+        progress = metadata_progress or (capability_ledger or {}).get("metadata_progress") or {}
+        blocked_essential = []
+        optional_blocked = any(
+            str((progress.get(stage) or {}).get("status") or "").upper() == "BLOCKED"
+            for stage in ("version", "version_comment")
+        )
+        for fact_key, metadata_stage, essential in metadata_order:
             if fact_key not in verified_fact_keys:
-                return StageDecision("MYSQL_METADATA_DISCOVERY", details={"stage": metadata_stage, "missing_fact": fact_key})
+                status = str((progress.get(metadata_stage) or {}).get("status") or "PENDING").upper()
+                if not essential and optional_blocked:
+                    continue
+                if status == "BLOCKED":
+                    if essential:
+                        blocked_essential.append(metadata_stage)
+                    continue
+                return StageDecision("MYSQL_METADATA_DISCOVERY", details={"stage": metadata_stage, "missing_fact": fact_key, "metadata_status": status})
+        if len(blocked_essential) == 3:
+            return StageDecision("WAITING_USER", requires_user=True, reason="All essential MySQL metadata stages are blocked.", details={"blocked_stages": blocked_essential})
         if candidate_exists:
             return StageDecision("FLAG_VERIFICATION")
         return StageDecision("BOUNDED_EXTRACTION")
@@ -61,7 +77,8 @@ stage_decider = StageDecider()
 
 def decide_required_stage(*, asset_warranty_mysql: bool, verified_fact_keys: set[str],
                           capability_ledger: dict | None = None, candidate_exists: bool = False,
-                          declared_fields: set[str] | None = None, tested_fields: set[str] | None = None) -> StageDecision:
+                          declared_fields: set[str] | None = None, tested_fields: set[str] | None = None,
+                          metadata_progress: dict | None = None) -> StageDecision:
     return stage_decider.decide(
         asset_warranty_mysql=asset_warranty_mysql,
         verified_fact_keys=verified_fact_keys,
@@ -69,6 +86,7 @@ def decide_required_stage(*, asset_warranty_mysql: bool, verified_fact_keys: set
         candidate_exists=candidate_exists,
         declared_fields=declared_fields,
         tested_fields=tested_fields,
+        metadata_progress=metadata_progress,
     )
 
 
@@ -76,6 +94,7 @@ async def decide_required_stage_for_run(session, run, challenge) -> StageDecisio
     from sqlalchemy import select
     from app.models.multi_agent import VerifiedFact
     from app.models.run import FlagCandidate, ToolCall
+    from app.models.solver_state import SolverState
 
     keys = set((await session.scalars(select(VerifiedFact.fact_key).where(
         VerifiedFact.run_id == run.id, VerifiedFact.promotion_status == "VERIFIED"
@@ -90,7 +109,10 @@ async def decide_required_stage_for_run(session, run, challenge) -> StageDecisio
         ToolCall.run_id == run.id, ToolCall.tool_name == "sql_boolean_compare", ToolCall.status == "COMPLETED"
     ))).all())
     tested = {str((call.arguments_json or {}).get("test_field")) for call in calls if isinstance(call.arguments_json, dict) and (call.arguments_json or {}).get("test_field")}
+    state = await session.scalar(select(SolverState).where(SolverState.run_id == run.id))
+    ledger = dict(state.capability_ledger_json or {}) if state else {}
     return stage_decider.decide(
         asset_warranty_mysql=asset_mysql, verified_fact_keys=keys, candidate_exists=candidate,
         declared_fields={str(item) for item in (metadata.get("fields") or []) if str(item)}, tested_fields=tested,
+        capability_ledger=ledger, metadata_progress=ledger.get("metadata_progress") or {},
     )
