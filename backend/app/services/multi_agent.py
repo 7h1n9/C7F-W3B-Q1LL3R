@@ -26,6 +26,7 @@ from app.models.multi_agent import (
 )
 from app.models.run import Artifact, FlagCandidate, FlagProvenance, SolveRun, ToolCall
 from app.orchestration.state_machine import RunStatus, transition
+from app.services.failure_classification import normalize_failure_classification
 from app.schemas.multi_agent import (
     AgentRole,
     AgentRolePolicyContract,
@@ -486,11 +487,12 @@ class DeterministicController:
             raise DomainError("AGENT_TASK_LEASE_INVALID", "The task lease is invalid or missing.")
         if task.cancel_requested:
             result = result.model_copy(update={"status": AgentTaskStatus.CANCELLED})
+        failure_classification = normalize_failure_classification(result.failure_classification)
         stored = AgentTaskResult(
             task_id=task.id, status=result.status.value, new_facts_json=result.new_facts,
             updated_hypotheses_json=result.updated_hypotheses, evidence_ids_json=result.evidence_ids,
             accepted_solution_steps_json=result.accepted_solution_steps, rejected_paths_json=result.rejected_paths,
-            failure_classification_json=result.failure_classification.model_dump() if result.failure_classification else None,
+            failure_classification_json=failure_classification or None,
             proposed_next_action_json=result.proposed_next_action, handoff_summary=result.handoff_summary,
             schema_version=result.schema_version,
         )
@@ -498,8 +500,8 @@ class DeterministicController:
         task.status = result.status.value
         task.optimistic_version += 1
         task.lease_expires_at = None
-        if result.failure_classification:
-            await self.record_failure(session, task.run_id, result.failure_classification.model_dump())
+        if failure_classification:
+            await self.record_failure(session, task.run_id, failure_classification)
         decision = await self.promotion_gate.promote_result(session, task, result)
         await session.flush()
         return decision

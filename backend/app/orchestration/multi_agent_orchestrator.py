@@ -61,10 +61,12 @@ from app.schemas.multi_agent import (
 from app.services.action_fingerprint import fingerprint_compiled_action
 from app.services.approved_action_compiler import approved_action_compiler
 from app.services.events import event_service
+from app.services.failure_classification import normalize_failure_classification
 from app.services.multi_agent import deterministic_controller
 from app.services.solver_state import solver_state_service
 from app.services.run_finalizer import run_finalizer
 from app.services.tool_result_fact_reducer import tool_result_fact_reducer
+from app.services.tool_failure_policy import record_tool_failure
 from app.tools.gateway import tool_gateway
 
 logger = logging.getLogger(__name__)
@@ -271,8 +273,8 @@ class MultiAgentOrchestrator:
                 "reason": "Tool completed but produced no metadata facts",
                 "next_allowed_condition": "Fix mysql_metadata_discovery result contract or runner extraction",
                 "task_id": task.id,
-                "question": "mysql_metadata_discovery repeatedly produced empty results. Fix the Runner extraction or continue with an alternative strategy?",
-                "options": ["retry_after_fix", "finish_unsolved_wp", "increase_budget"],
+                "question": "metadata extractor returned empty result twice",
+                "options": ["retry_after_fix", "finish_unsolved_wp", "try_alternative_strategy"],
             }
             await self._phase(session, run, "WAITING_USER")
             await self._status(session, run, RunStatus.WAITING_USER)
@@ -2112,8 +2114,23 @@ class MultiAgentOrchestrator:
                 # row/lease transaction.
                 await session.commit()
                 if exec_result.status in {AgentTaskStatus.FAILED, AgentTaskStatus.PARTIAL}:
-                    failure_classification = str(exec_result.failure_classification.get("classification") or "")
+                    failure_classification = normalize_failure_classification(exec_result.failure_classification)
+                    failure_classification = str(failure_classification.get("classification") or "")
                     metadata_empty = failure_classification in {"MYSQL_METADATA_EMPTY_RESULT", "ORACLE_RESPONSE_UNRECOGNIZED"}
+                    failure_entry = await record_tool_failure(session, run, approved, failure_classification or "TOOL_FAILURE")
+                    if failure_entry["count"] >= 2 and not metadata_empty:
+                        run.last_error_code = failure_classification or "TOOL_FAILURE_REPEATED"
+                        run.last_error_message = "The same tool and arguments failed twice; further identical execution is blocked."
+                        run.recovery_checkpoint_json = {
+                            **(run.recovery_checkpoint_json or {}),
+                            "current_phase": run.current_phase,
+                            "repeated_failure": failure_entry,
+                            "question": "The same tool and arguments failed twice. Fix the tool/target or choose another strategy.",
+                            "options": ["retry_after_fix", "finish_unsolved_wp", "try_alternative_strategy"],
+                        }
+                        await self._status(session, run, RunStatus.WAITING_USER)
+                        await session.commit()
+                        return {"status": run.status, "error_code": run.last_error_code, "repeated_failure": True}
                     if approved.tool_name == "mysql_metadata_discovery" and metadata_empty:
                         paused = await self._handle_mysql_metadata_empty_result(session, run, challenge, approved, exec_task)
                         if not paused:

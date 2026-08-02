@@ -591,7 +591,7 @@ async def list_run_messages(run_id: str, session: AsyncSession = Depends(get_ses
 @router.post("/runs/{run_id}/messages")
 async def enqueue_run_message(run_id: str, payload: dict, session: AsyncSession = Depends(get_session)) -> dict:
     run = await require_run(run_id, session)
-    if RunStatus(run.status) in TERMINAL:
+    if RunStatus(run.status) in {RunStatus.COMPLETED_SOLVED, RunStatus.COMPLETED_UNSOLVED, RunStatus.CANCELLED}:
         raise DomainError("RUN_TERMINAL", "Cannot add information to a terminal run.", status_code=409)
     content = str(payload.get("content") or "").strip()
     if not content:
@@ -612,8 +612,8 @@ async def enqueue_run_message(run_id: str, payload: dict, session: AsyncSession 
     await event_service.append(session, run.id, "user.input_received", {"revision": revision, "input_type": item.input_type})
     # A running turn is never interrupted. Paused runs can safely resume so
     # this input is consumed on the next Agent Step.
-    if run.id not in orchestrator.active_tasks and RunStatus(run.status) in {RunStatus.WAITING_USER, RunStatus.PAUSED_RECOVERY, RunStatus.PAUSED_DEPLOYMENT, RunStatus.WAITING_CONFIGURATION, RunStatus.PAUSED_RATE_LIMIT}:
-        asyncio.create_task(run_supervisor.run_background(run.id))
+    if run.id not in orchestrator.active_tasks and RunStatus(run.status) in {RunStatus.WAITING_USER, RunStatus.PAUSED_CHECKPOINT, RunStatus.PAUSED_RECOVERY, RunStatus.PAUSED_DEPLOYMENT, RunStatus.WAITING_CONFIGURATION, RunStatus.PAUSED_RATE_LIMIT}:
+        asyncio.create_task(run_supervisor.run_after_user_input_background(run.id))
     return {"data": {"accepted": True, "revision": revision, "status": "QUEUED", "message": "补充信息已加入，将在下一 Agent Step 使用。"}}
 
 

@@ -58,6 +58,7 @@ from app.services.codex_preflight import codex_preflight_service
 from app.services.context_builder import context_builder
 from app.services.crypto import decrypt_api_key
 from app.services.events import event_service
+from app.services.user_input_consumer import consume_user_inputs
 from app.services.evidence_pipeline import evidence_pipeline
 from app.services.finish_gate import finish_gate
 from app.services.flags import flag_service
@@ -220,17 +221,11 @@ class SolveOrchestrator:
             await event_service.append(session, run.id, "run.phase_changed", {"previous_phase": previous_phase, "phase": current_phase})
 
     async def _consume_queued_inputs(self, session, run: SolveRun, attempt=None) -> str | None:
-        queued = list((await session.scalars(select(RunUserInput).where(RunUserInput.run_id == run.id, RunUserInput.status == "QUEUED").order_by(RunUserInput.revision))).all())
-        if not queued:
-            return None
-        from datetime import UTC, datetime
-        now = datetime.now(UTC)
-        for item in queued:
-            item.status, item.consumed_at, item.consumed_by_attempt_id = "CONSUMED", now, (attempt.id if attempt else None)
-        await session.commit()
-        await event_service.append(session, run.id, "user.input_consumed", {"revisions": [item.revision for item in queued], "attempt_id": attempt.id if attempt else None})
-        await event_service.append(session, run.id, "run.guidance_updated", {"context_revision": run.context_revision})
-        return "\n\n".join(f"用户补充信息 v{item.revision}: {item.content}" for item in queued)
+        consumed = await consume_user_inputs(session, run, attempt)
+        if consumed["items"]:
+            await event_service.append(session, run.id, "run.guidance_updated", {"context_revision": run.context_revision})
+            return consumed["text"]
+        return None
 
     async def _stop_if_no_progress(
         self,

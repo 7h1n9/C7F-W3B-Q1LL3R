@@ -33,8 +33,8 @@ class SupervisorProgressEvaluator:
             return ProgressDecision(needs_user=True, reason="Metadata discovery repeatedly returned no required facts.")
         if error_code == "MYSQL_PREDICATE_NOT_CONFIRMED":
             return ProgressDecision(terminal_unsolved=True, reason=error_code)
-        if counters["no_progress_count"] >= 3:
-            return ProgressDecision(terminal_unsolved=True, reason="No durable progress after bounded supervisor retries.")
+        if counters["no_progress_count"] >= 2:
+            return ProgressDecision(terminal_unsolved=True, reason="NO_PROGRESS_LOOP")
         return ProgressDecision(new_fact_or_capability=new_progress, retryable=True)
 
 

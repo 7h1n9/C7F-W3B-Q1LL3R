@@ -76,7 +76,13 @@ async def lifespan(_: FastAPI):
             await asyncio.sleep(5)
             async with SessionLocal() as supervisor_session:
                 paused_runs = list((await supervisor_session.scalars(select(SolveRun).where(
-                    SolveRun.status.in_([RunStatus.PAUSED_RECOVERY.value, RunStatus.PAUSED_CHECKPOINT.value])
+                    SolveRun.status.in_([
+                        RunStatus.PAUSED_RECOVERY.value,
+                        RunStatus.PAUSED_CHECKPOINT.value,
+                        RunStatus.PLANNING.value,
+                        RunStatus.ANALYZING.value,
+                        RunStatus.EVALUATING.value,
+                    ])
                 ))).all())
             for paused_run in paused_runs:
                 with contextlib.suppress(Exception):

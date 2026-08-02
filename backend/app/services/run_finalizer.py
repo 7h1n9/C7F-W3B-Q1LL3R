@@ -8,10 +8,10 @@ pause state.
 
 from datetime import UTC, datetime
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 
-from app.models.multi_agent import AgentTask, ApprovedAction
-from app.models.run import RunAttempt, RunExecutionLease, SolveRun, ToolCall, ToolInvocationTicket
+from app.models.multi_agent import AgentTask, AgentTaskResult, ApprovedAction, EvidenceLedger, PlannerProposal, SolutionChainNode, VerifiedFact
+from app.models.run import RunAttempt, RunExecutionLease, RunUserInput, SolveRun, ToolCall, ToolInvocationTicket
 from app.models.solver_state import SolverState
 from app.schemas.multi_agent import AgentTaskStatus
 
@@ -28,11 +28,37 @@ class RunFinalizer:
 
         challenge = await session.get(Challenge, run.challenge_id)
         state = await session.scalar(select(SolverState).where(SolverState.run_id == run.id))
-        facts = list((state.confirmed_facts_json or []) if state else [])
+        durable_facts = list((await session.scalars(select(VerifiedFact).where(
+            VerifiedFact.run_id == run.id, VerifiedFact.promotion_status == "VERIFIED"
+        ).order_by(VerifiedFact.updated_at, VerifiedFact.fact_key))).all())
+        facts = [{
+            "fact_key": fact.fact_key,
+            "fact_type": fact.fact_type,
+            "confidence": fact.confidence,
+            "value": fact.value_json,
+            "evidence_ids": fact.evidence_ids_json or [],
+        } for fact in durable_facts]
+        if not facts and state:
+            facts = list(state.confirmed_facts_json or [])
         checkpoint = dict(run.recovery_checkpoint_json or {})
         calls = list((await session.scalars(select(ToolCall).where(
             ToolCall.run_id == run.id, ToolCall.status == "COMPLETED"
         ).order_by(ToolCall.created_at))).all())
+        all_calls = list((await session.scalars(select(ToolCall).where(
+            ToolCall.run_id == run.id
+        ).order_by(ToolCall.created_at))).all())
+        user_inputs = list((await session.scalars(select(RunUserInput).where(
+            RunUserInput.run_id == run.id
+        ).order_by(RunUserInput.revision, RunUserInput.created_at))).all())
+        task_results = list((await session.scalars(select(AgentTaskResult).where(
+            AgentTaskResult.task_id.in_(select(AgentTask.id).where(AgentTask.run_id == run.id))
+        ))).all())
+        chain_nodes = list((await session.scalars(select(SolutionChainNode).where(
+            SolutionChainNode.run_id == run.id
+        ).order_by(SolutionChainNode.created_at))).all())
+        proposals = list((await session.scalars(select(PlannerProposal).where(
+            PlannerProposal.run_id == run.id
+        ).order_by(PlannerProposal.created_at))).all())
         tested_fields = sorted({
             str((call.arguments_json or {}).get("test_field"))
             for call in calls
@@ -40,16 +66,53 @@ class RunFinalizer:
             and isinstance(call.arguments_json, dict)
             and (call.arguments_json or {}).get("test_field")
         })
+        fact_stage_map = {
+            "asset_warranty.valid_baseline": "BUSINESS_BASELINE",
+            "asset_warranty.invalid_baseline": "BUSINESS_BASELINE",
+            "asset_warranty.mysql_boolean_oracle": "BOOLEAN_ORACLE",
+            "asset_warranty.mysql_dbms": "ORACLE_CALIBRATION",
+            "asset_warranty.oracle_calibration_matrix": "ORACLE_CALIBRATION",
+            "asset_warranty.mysql_version": "MYSQL_METADATA_DISCOVERY",
+            "asset_warranty.mysql_version_comment": "MYSQL_METADATA_DISCOVERY",
+            "asset_warranty.current_database": "MYSQL_METADATA_DISCOVERY",
+            "asset_warranty.mysql_user_tables": "MYSQL_METADATA_DISCOVERY",
+            "asset_warranty.mysql_candidate_columns": "MYSQL_METADATA_DISCOVERY",
+        }
+        repeated_failures = list((checkpoint.get("tool_failure_counts") or {}).values())
+        metadata_failures = [item for item in repeated_failures if item.get("tool_name") == "mysql_metadata_discovery"]
         return {
             "generated": True,
             "challenge": {"id": run.challenge_id, "name": challenge.name if challenge else ""},
             "target": challenge.target_url if challenge else "",
             "confirmed_facts": facts,
-            "completed_stages": sorted({str(item.get("stage") or item.get("source") or "") for item in facts if isinstance(item, dict)}),
-            "evidence_summary": {"confirmed_fact_count": len(facts)},
+            "completed_stages": sorted({
+                *[str(node.stage) for node in chain_nodes if node.stage],
+                *[str(proposal.current_stage) for proposal in proposals if proposal.status in {"PROPOSED", "COMPLETED", "APPROVED"}],
+                *[fact_stage_map[fact["fact_key"]] for fact in facts if isinstance(fact, dict) and fact.get("fact_key") in fact_stage_map],
+            }),
+            "evidence_summary": {
+                "confirmed_fact_count": len(durable_facts),
+                "evidence_ledger_count": int(await session.scalar(select(func.count()).select_from(EvidenceLedger).where(EvidenceLedger.run_id == run.id)) or 0),
+            },
+            "user_inputs": [{
+                "id": item.id, "revision": item.revision, "content": item.content,
+                "status": item.status, "consumed_at": item.consumed_at.isoformat() if item.consumed_at else None,
+            } for item in user_inputs],
+            "successful_tools": sorted({str(call.tool_name) for call in calls}),
+            "failed_tools": sorted({str(call.tool_name) for call in all_calls if call.status in {"FAILED", "CANCELLED", "TIMEOUT"}}),
+            "repeated_failures": repeated_failures,
+            "metadata_failure_summary": {
+                "stage": metadata_failures[-1].get("stage") if metadata_failures else None,
+                "error_code": metadata_failures[-1].get("error_code") if metadata_failures else None,
+                "repeated_count": metadata_failures[-1].get("count", 0) if metadata_failures else 0,
+                "likely_cause": "metadata extractor returned empty result twice" if metadata_failures else None,
+                "suggested_fix": "Fix Runner metadata extraction or try an alternative strategy." if metadata_failures else None,
+            },
+            "task_failure_classifications": [result.failure_classification_json for result in task_results if result.failure_classification_json],
             "tested_fields": tested_fields,
             "completed_tool_calls": [{"id": call.id, "tool": call.tool_name} for call in calls[-50:]],
             "failed_stage": run.current_phase,
+            "current_blocker": run.last_error_code or reason,
             "likely_cause": reason,
             "checkpoint_details": checkpoint,
             "next_manual_steps": ["Inspect the failed stage output and Runner capability.", "Resume after correcting the input or extraction strategy."],
@@ -74,11 +137,19 @@ class RunFinalizer:
     async def reconcile(self, session, run: SolveRun) -> dict:
         now = datetime.now(UTC)
         changed = {"leases_deleted": 0, "attempts_closed": 0, "tasks_replanned": 0,
-                   "actions_rejected": 0, "tool_calls_closed": 0, "phase_synced": False}
+                   "actions_rejected": 0, "tool_calls_closed": 0, "phase_synced": False, "wp_rebuilt": False}
 
         # A terminal Run owns no executable resource, regardless of which
         # process or request created that resource.
         if str(run.status) in TERMINAL_RUN_STATUSES:
+            if str(run.status) == "COMPLETED_UNSOLVED":
+                existing_wp = (run.recovery_checkpoint_json or {}).get("wp") or {}
+                if not existing_wp or not existing_wp.get("confirmed_facts"):
+                    run.recovery_checkpoint_json = {
+                        **dict(run.recovery_checkpoint_json or {}),
+                        "wp": await self.build_wp(session, run, str(run.last_error_code or "COMPLETED_UNSOLVED")),
+                    }
+                    changed["wp_rebuilt"] = True
             attempts = list((await session.scalars(select(RunAttempt).where(
                 RunAttempt.run_id == run.id, RunAttempt.finished_at.is_(None)
             ))).all())
@@ -161,7 +232,7 @@ class RunFinalizer:
                 plan["current_phase"] = phase
                 state.run_plan_json = plan
                 changed["phase_synced"] = True
-        if changed["leases_deleted"] or changed["attempts_closed"] or changed["tasks_replanned"] or changed["actions_rejected"] or changed["tool_calls_closed"] or changed["phase_synced"]:
+        if any(changed.values()):
             await session.commit()
         return changed
 

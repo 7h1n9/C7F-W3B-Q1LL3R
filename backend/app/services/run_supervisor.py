@@ -1,19 +1,21 @@
 """Backend-owned continuous driver for multi_agent_v1 Runs."""
 
 from dataclasses import dataclass
+from datetime import UTC, datetime
 
 from sqlalchemy import select
 
 from app.core.database import SessionLocal
 from app.models.challenge import Challenge
 from app.models.multi_agent import VerifiedFact
-from app.models.run import FlagCandidate, SolveRun, ToolCall
+from app.models.run import FlagCandidate, RunExecutionLease, SolveRun, ToolCall
 from app.models.solver_state import SolverState
 from app.orchestration.orchestrator import orchestrator
 from app.orchestration.state_machine import RunStatus, transition
 from app.services.run_finalizer import run_finalizer
 from app.services.stage_decider import stage_decider
 from app.services.supervisor_progress import supervisor_progress_evaluator
+from app.services.user_input_consumer import consume_user_inputs
 from app.services.writeup_builder import writeup_builder
 
 
@@ -31,10 +33,13 @@ class RunOutcome:
     @classmethod
     def from_run(cls, run: SolveRun) -> "RunOutcome":
         checkpoint = run.recovery_checkpoint_json or {}
-        return cls(run.id, str(run.status), str(run.current_phase or ""), run.last_error_code, checkpoint.get("wp"))
+        return cls(run.id, str(run.status), str(run.current_phase or ""), run.last_error_code, checkpoint.get("wp") or checkpoint.get("current_wp"))
 
 
 class RunSupervisor:
+    def __init__(self) -> None:
+        self._active_runs: set[str] = set()
+
     def _asset_mysql(self, challenge: Challenge | None) -> bool:
         metadata = (challenge.metadata_json or {}) if challenge else {}
         return str(metadata.get("adapter") or "").lower() == "asset_warranty" and str(metadata.get("dbms") or "").lower() == "mysql"
@@ -94,6 +99,33 @@ class RunSupervisor:
                 await session.commit()
         return RunOutcome.from_run(run)
 
+    async def _resolve_waiting_input(self, session, run: SolveRun) -> None:
+        checkpoint = dict(run.recovery_checkpoint_json or {})
+        checkpoint.pop("question", None)
+        checkpoint.pop("options", None)
+        checkpoint["waiting_resolved_at"] = datetime.now(UTC).isoformat()
+        run.recovery_checkpoint_json = checkpoint
+        run.last_error_code = None
+        run.last_error_message = None
+        try:
+            transition(run, RunStatus.PLANNING)
+        except Exception:
+            run.status = RunStatus.PLANNING.value
+        await session.commit()
+
+    async def continue_after_user_input(self, session, run_id: str) -> RunOutcome:
+        run = await session.get(SolveRun, run_id)
+        if run is None:
+            raise ValueError("RUN_NOT_FOUND")
+        if str(run.status) in {"COMPLETED_SOLVED", "COMPLETED_UNSOLVED", "CANCELLED"}:
+            return RunOutcome(run.id, str(run.status), str(run.current_phase or ""), "RUN_ALREADY_TERMINAL")
+        consumed = await consume_user_inputs(session, run)
+        if not consumed["items"]:
+            return RunOutcome(run.id, str(run.status), str(run.current_phase or ""), "NO_PENDING_USER_INPUT")
+        if str(run.status) in {"WAITING_USER", "PAUSED_CHECKPOINT", "PAUSED_RECOVERY"}:
+            await self._resolve_waiting_input(session, run)
+        return await self.continue_until_terminal(session, run_id, consumed["text"])
+
     async def continue_until_terminal(self, session, run_id: str, user_message: str | None = None) -> RunOutcome:
         for _ in range(32):
             await session.rollback()
@@ -102,7 +134,20 @@ class RunSupervisor:
                 raise ValueError("RUN_NOT_FOUND")
             await run_finalizer.reconcile(session, run)
             await session.refresh(run)
-            if str(run.status) in USER_VISIBLE_TERMINAL:
+            if str(run.status) in {"COMPLETED_SOLVED", "COMPLETED_UNSOLVED", "CANCELLED"}:
+                return await self._outcome(session, run)
+            consumed = await consume_user_inputs(session, run)
+            if consumed["items"] and str(run.status) in {"WAITING_USER", "PAUSED_CHECKPOINT", "PAUSED_RECOVERY"}:
+                await self._resolve_waiting_input(session, run)
+                run = await session.get(SolveRun, run_id)
+            if str(run.status) == "WAITING_USER":
+                return await self._outcome(session, run)
+            active_lease = await session.scalar(select(RunExecutionLease).where(RunExecutionLease.run_id == run.id))
+            if active_lease is not None and run_id not in orchestrator.active_tasks:
+                return RunOutcome(run.id, str(run.status), str(run.current_phase or ""), "RUN_ALREADY_OWNED")
+            counters = dict((run.recovery_checkpoint_json or {}).get("supervisor_counters") or {})
+            if active_lease is None and int(counters.get("no_progress_count") or 0) >= 1:
+                await run_finalizer.finish_unsolved_with_wp(session, run, "NO_PROGRESS_LOOP")
                 return await self._outcome(session, run)
             challenge = await session.get(Challenge, run.challenge_id)
             before_keys, before_ledger, candidate, tested = await self._facts(session, run)
@@ -127,7 +172,9 @@ class RunSupervisor:
                 raise ValueError("RUN_NOT_FOUND")
             if str(run.status) in USER_VISIBLE_TERMINAL:
                 return await self._outcome(session, run)
-            await orchestrator.start(run_id, user_message if user_message and _ == 0 else None)
+            await self._set_stage(session, run, decision.stage)
+            next_message = consumed["text"] or (user_message if user_message and _ == 0 else None)
+            await orchestrator.start(run_id, next_message)
             user_message = None
             await session.rollback()
             after = await session.get(SolveRun, run_id)
@@ -156,12 +203,28 @@ class RunSupervisor:
         run = await session.get(SolveRun, run_id)
         if run is None:
             raise ValueError("RUN_NOT_FOUND")
-        await run_finalizer.finish_unsolved_with_wp(session, run, "Supervisor cycle limit exhausted.")
+        await run_finalizer.finish_unsolved_with_wp(session, run, "NO_PROGRESS_LOOP")
         return await self._outcome(session, run)
 
     async def run_background(self, run_id: str, user_message: str | None = None) -> RunOutcome:
+        if run_id in self._active_runs:
+            return RunOutcome(run_id, "RUNNING", "", "RUN_ALREADY_OWNED")
+        self._active_runs.add(run_id)
         async with SessionLocal() as session:
-            return await self.continue_until_terminal(session, run_id, user_message)
+            try:
+                return await self.continue_until_terminal(session, run_id, user_message)
+            finally:
+                self._active_runs.discard(run_id)
+
+    async def run_after_user_input_background(self, run_id: str) -> RunOutcome:
+        if run_id in self._active_runs:
+            return RunOutcome(run_id, "RUNNING", "", "RUN_ALREADY_OWNED")
+        self._active_runs.add(run_id)
+        async with SessionLocal() as session:
+            try:
+                return await self.continue_after_user_input(session, run_id)
+            finally:
+                self._active_runs.discard(run_id)
 
 
 run_supervisor = RunSupervisor()
@@ -169,3 +232,7 @@ run_supervisor = RunSupervisor()
 
 async def continue_until_terminal(session, run_id: str, user_message: str | None = None) -> RunOutcome:
     return await run_supervisor.continue_until_terminal(session, run_id, user_message)
+
+
+async def continue_after_user_input(session, run_id: str) -> RunOutcome:
+    return await run_supervisor.continue_after_user_input(session, run_id)
