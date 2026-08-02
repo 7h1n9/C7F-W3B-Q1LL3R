@@ -604,6 +604,42 @@ class MultiAgentOrchestrator:
         await session.flush()
         return row
 
+    async def _validate_controller_result_review(self, session, run: SolveRun, proposal: PlannerProposal, task: AgentTask, contract: AnalysisReviewContract) -> None:
+        """Validate a Result Review synthesized from durable controller facts."""
+        if contract.proposal_id != proposal.proposal_id or task.task_kind != AgentTaskKind.RESULT_REVIEW.value or not task.created_by_task_id:
+            raise DomainError("CONTROLLER_REVIEW_VALIDATION_FAILED", "Controller review identity is incomplete.")
+        facts = list((await session.scalars(select(VerifiedFact).where(
+            VerifiedFact.run_id == run.id,
+            VerifiedFact.source_task_id == task.created_by_task_id,
+            VerifiedFact.promotion_status == "CANDIDATE",
+        ).order_by(VerifiedFact.created_at))).all())
+        selected = list(contract.approved_fact_indexes or [])
+        if any(index < 0 or index >= len(facts) for index in selected):
+            raise DomainError("CONTROLLER_REVIEW_VALIDATION_FAILED", "Approved fact index is outside producing-task candidates.")
+        if contract.decision == AnalysisDecision.APPROVE.value and selected:
+            if not contract.approved_evidence_ids or not any(facts[index].evidence_ids_json for index in selected):
+                raise DomainError("CONTROLLER_REVIEW_VALIDATION_FAILED", "Approved controller facts require evidence.")
+        stage = str(proposal.current_stage or "").upper()
+        selected_facts = [facts[index] for index in selected]
+        keys = {fact.fact_key for fact in selected_facts}
+        if stage == "ORACLE_CALIBRATION":
+            calibration = next((fact for fact in selected_facts if fact.fact_key == "asset_warranty.oracle_calibration_matrix"), None)
+            value = calibration.value_json if calibration and isinstance(calibration.value_json, dict) else {}
+            capabilities = value.get("capabilities") if isinstance(value.get("capabilities"), dict) else {}
+            profile = value.get("adaptive_extraction_profile")
+            complete = isinstance(profile, dict) and bool(profile.get("extraction_strategy"))
+            complete = complete or all(capabilities.get(name) is True for name in ("scalar_subquery_oracle_confirmed", "bounded_character_enumeration_supported", "mysql_dbms_confirmed"))
+            if "asset_warranty.mysql_dbms" not in keys or calibration is None or value.get("status") != "COMPLETED" or not complete:
+                raise DomainError("CONTROLLER_REVIEW_VALIDATION_FAILED", "Completed calibration candidates are incomplete.")
+        elif stage == "BOOLEAN_ORACLE" and selected_facts:
+            if not any(isinstance(fact.value_json, dict) and fact.value_json.get("stable") is True and fact.value_json.get("response_differential") is True for fact in selected_facts):
+                raise DomainError("CONTROLLER_REVIEW_VALIDATION_FAILED", "Boolean candidate is not stable and differential.")
+        elif stage == "BUSINESS_BASELINE" and (not selected_facts or not all(fact.fact_type == "BUSINESS_RESPONSE_BASELINE" for fact in selected_facts)):
+            raise DomainError("CONTROLLER_REVIEW_VALIDATION_FAILED", "Baseline review has no candidate baseline fact.")
+        elif stage == "MYSQL_METADATA_DISCOVERY" and contract.decision == AnalysisDecision.APPROVE.value:
+            if not selected_facts or not any(fact.fact_key.startswith("asset_warranty.mysql_") or fact.fact_key == "asset_warranty.current_database" for fact in selected_facts):
+                raise DomainError("CONTROLLER_REVIEW_VALIDATION_FAILED", "Metadata review has no candidate metadata fact.")
+
     async def _review(self, session, run: SolveRun, proposal: PlannerProposal, task: AgentTask, result: AgentTaskResultContract) -> AnalysisReview:
         raw = (result.proposed_next_action or {}).get("review") or {}
         try:
@@ -963,12 +999,28 @@ class MultiAgentOrchestrator:
                         "approved_arguments": approved_arguments,
                         "reason": "Controller-normalized bounded Boolean Oracle contract after an unsuccessful field experiment.",
                     })
-        proposal_contract = PlannerProposalContract(proposal_id=proposal.proposal_id, run_id=run.id, current_stage=proposal.current_stage, decision_question=proposal.decision_question, next_agent=proposal.next_agent, objective=proposal.objective, input_fact_ids=proposal.input_fact_ids_json, input_evidence_ids=proposal.input_evidence_ids_json, required_capabilities=proposal.required_capabilities_json, allowed_tools=proposal.allowed_tools_json, budget=proposal.budget_json, success_condition=proposal.success_condition, stop_conditions=proposal.stop_conditions_json, fallback=proposal.fallback)
-        try:
-            deterministic_controller.validate_review(proposal_contract, contract)
-        except DomainError as error:
-            if contract.decision == AnalysisDecision.APPROVE:
-                contract = contract.model_copy(update={"decision": AnalysisDecision.REVISE, "audit_reason": error.code, "reason": error.message})
+        controller_owned = task.task_kind == AgentTaskKind.RESULT_REVIEW.value and contract.audit_reason in {
+            "controller_calibration_result_route",
+            "mysql_metadata_result_review_controller_route",
+            "boolean_field_rejection_or_promotion_controller_route",
+            "business_baseline_result_review_controller_route",
+        }
+        if controller_owned:
+            # The controller owns the review identity and must not inherit a
+            # model-supplied proposal_id that belongs to another proposal.
+            contract = contract.model_copy(update={"proposal_id": proposal.proposal_id})
+            try:
+                await self._validate_controller_result_review(session, run, proposal, task, contract)
+            except DomainError as error:
+                if contract.decision == AnalysisDecision.APPROVE:
+                    contract = contract.model_copy(update={"decision": AnalysisDecision.REVISE, "audit_reason": "CONTROLLER_REVIEW_VALIDATION_FAILED", "reason": error.message})
+        else:
+            proposal_contract = PlannerProposalContract(proposal_id=proposal.proposal_id, run_id=run.id, current_stage=proposal.current_stage, decision_question=proposal.decision_question, next_agent=proposal.next_agent, objective=proposal.objective, input_fact_ids=proposal.input_fact_ids_json, input_evidence_ids=proposal.input_evidence_ids_json, required_capabilities=proposal.required_capabilities_json, allowed_tools=proposal.allowed_tools_json, budget=proposal.budget_json, success_condition=proposal.success_condition, stop_conditions=proposal.stop_conditions_json, fallback=proposal.fallback)
+            try:
+                deterministic_controller.validate_review(proposal_contract, contract)
+            except DomainError as error:
+                if contract.decision == AnalysisDecision.APPROVE:
+                    contract = contract.model_copy(update={"decision": AnalysisDecision.REVISE, "audit_reason": error.code, "reason": error.message})
         row = await session.scalar(select(AnalysisReview).where(AnalysisReview.proposal_id == proposal.id, AnalysisReview.task_kind == contract.task_kind))
         values = dict(decision=contract.decision.value, confidence=contract.confidence, question_being_tested=contract.question_being_tested, supporting_evidence_ids_json=contract.supporting_evidence_ids, independent_variable=contract.independent_variable, required_controls_json=contract.required_controls, expected_true_signal_json=contract.expected_true_signal, expected_false_signal_json=contract.expected_false_signal, recommended_tool=contract.recommended_tool, reason=contract.reason, audit_reason=contract.audit_reason, approved_arguments_json=contract.approved_arguments, approved_fact_indexes_json=contract.approved_fact_indexes, approved_evidence_ids_json=contract.approved_evidence_ids, approved_hypothesis_updates_json=contract.approved_hypothesis_updates, capabilities_added_json=contract.capabilities_added, solution_step_accepted=contract.solution_step_accepted, next_phase=contract.next_phase)
         if row is None:
