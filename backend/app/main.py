@@ -20,6 +20,7 @@ from app.services.multi_agent import deterministic_controller
 from app.services.run_attempts import run_attempt_service
 from app.services.run_finalizer import run_finalizer
 from app.services.run_supervisor import run_supervisor
+from app.services.runtime_reconciler import reconcile_runtime_state
 from app.services.temporary_data import temporary_data_janitor
 
 
@@ -66,10 +67,15 @@ async def lifespan(_: FastAPI):
                 )
     async def cleanup_loop() -> None:
         while True:
-            await asyncio.sleep(300)
+            await asyncio.sleep(10)
             async with SessionLocal() as cleanup_session:
-                await run_attempt_service.cleanup_tickets(cleanup_session)
-                await temporary_data_janitor.run_once(cleanup_session)
+                await reconcile_runtime_state(cleanup_session)
+                # The janitor is intentionally less frequent than runtime
+                # reconciliation because it scans temporary filesystem data.
+                if int(asyncio.get_running_loop().time()) % 30 < 10:
+                    await run_attempt_service.cleanup_tickets(cleanup_session)
+                if int(asyncio.get_running_loop().time()) % 300 < 10:
+                    await temporary_data_janitor.run_once(cleanup_session)
 
     async def supervisor_loop() -> None:
         while True:

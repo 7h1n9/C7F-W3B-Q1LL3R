@@ -131,6 +131,7 @@ class FailureClassification(BaseModel):
     retryable: bool = False
     reason: str = Field(default="", max_length=4000)
     next_allowed_condition: str = Field(default="", max_length=2000)
+    result_status: str = Field(default="", max_length=40)
 
 
 class AgentTaskResultContract(BaseModel):

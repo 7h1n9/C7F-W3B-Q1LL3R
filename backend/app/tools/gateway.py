@@ -585,14 +585,24 @@ class ToolGateway:
             await self._set_script_record_status(session, run, script_record, lifecycle, execution_error=None if lifecycle == "PARTIAL" else failed_code)
         unified = self._unified_result(result, artifact, permitted_tools)
         if name == "mysql_metadata_discovery":
-            await solver_state_service.record_metadata_progress(
+            metadata_fingerprint = hashlib.sha256(json.dumps({
+                "tool": name,
+                "stage": arguments.get("stage") or result.get("stage"),
+                "arguments": arguments,
+            }, ensure_ascii=False, sort_keys=True, default=str).encode()).hexdigest()
+            metadata_progress = await solver_state_service.record_metadata_progress(
                 session,
                 run,
                 stage=str(arguments.get("stage") or result.get("stage") or "").lower(),
                 result_status=unified.status,
                 error_code=unified.error_code,
                 diagnostic=(result.get("diagnostic") if isinstance(result.get("diagnostic"), dict) else {}),
+                fingerprint=metadata_fingerprint,
             )
+            if metadata_progress.get("status") == "BLOCKED":
+                result["error_code"] = "MYSQL_METADATA_STAGE_BLOCKED"
+                result["result_status"] = "NO_FACT"
+                result["outcome"] = "NO_FACT"
         if approved_action_id:
             approved = await session.get(ApprovedAction, approved_action_id)
             if approved is not None:

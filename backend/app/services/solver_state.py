@@ -36,6 +36,7 @@ class SolverStateService:
         result_status: str,
         error_code: str | None = None,
         diagnostic: dict | None = None,
+        fingerprint: str | None = None,
     ) -> dict:
         """Persist the bounded metadata state machine at the execution edge.
 
@@ -53,6 +54,9 @@ class SolverStateService:
         progress = dict(ledger.get("metadata_progress") or {})
         previous = dict(progress.get(normalized_stage) or {})
         contract_status = str(result_status or "").upper()
+        same_fingerprint = bool(fingerprint) and fingerprint == previous.get("fingerprint")
+        previous_no_fact_count = int(previous.get("same_fingerprint_no_fact_count") or 0)
+        same_fingerprint_no_fact_count = previous_no_fact_count + 1 if same_fingerprint and contract_status == "NO_FACT" else 1 if contract_status == "NO_FACT" else 0
         stage_status = (
             "SUCCESS"
             if contract_status in {"SUCCESS", "COMPLETED"}
@@ -60,6 +64,8 @@ class SolverStateService:
             if contract_status == "NO_FACT"
             else "FAILED"
         )
+        if contract_status == "NO_FACT" and same_fingerprint_no_fact_count >= 2:
+            stage_status = "BLOCKED"
         entry = {
             **previous,
             "stage": normalized_stage,
@@ -68,6 +74,8 @@ class SolverStateService:
             "attempts": int(previous.get("attempts") or 0) + 1,
             "error_code": error_code,
             "diagnostic": dict(diagnostic or {}),
+            "fingerprint": fingerprint,
+            "same_fingerprint_no_fact_count": same_fingerprint_no_fact_count,
             "updated_at": datetime.now(UTC).isoformat(),
         }
         progress[normalized_stage] = entry

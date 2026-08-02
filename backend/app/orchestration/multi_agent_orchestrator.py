@@ -62,6 +62,7 @@ from app.services.action_fingerprint import fingerprint_compiled_action
 from app.services.approved_action_compiler import approved_action_compiler
 from app.services.events import event_service
 from app.services.failure_classification import normalize_failure_classification
+from app.services.tool_outcome_classifier import ToolOutcome, classify_tool_outcome
 from app.services.multi_agent import deterministic_controller
 from app.services.solver_state import solver_state_service
 from app.services.run_finalizer import run_finalizer
@@ -2133,11 +2134,13 @@ class MultiAgentOrchestrator:
                 await session.commit()
                 if exec_result.status in {AgentTaskStatus.FAILED, AgentTaskStatus.PARTIAL}:
                     classification_payload = normalize_failure_classification(exec_result.failure_classification)
+                    outcome = classify_tool_outcome(classification_payload)
                     failure_classification = str(classification_payload.get("classification") or "")
                     result_status = str(classification_payload.get("result_status") or "").upper()
-                    metadata_empty = failure_classification in {"MYSQL_METADATA_EMPTY_RESULT", "ORACLE_RESPONSE_UNRECOGNIZED"}
+                    metadata_empty = outcome == ToolOutcome.NO_FACT or failure_classification in {"MYSQL_METADATA_EMPTY_RESULT", "ORACLE_RESPONSE_UNRECOGNIZED"}
                     metadata_contract_error = (
-                        result_status == "CONTRACT_ERROR"
+                        outcome == ToolOutcome.CONTRACT_ERROR
+                        or result_status == "CONTRACT_ERROR"
                         or failure_classification.startswith("MYSQL_METADATA_CONTRACT")
                         or failure_classification == "RESULT_CONTRACT"
                     )
