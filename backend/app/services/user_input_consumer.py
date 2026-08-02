@@ -18,6 +18,14 @@ async def consume_user_inputs(session, run: SolveRun, attempt: RunAttempt | None
     if not queued:
         return {"items": [], "input_ids": [], "user_inputs": [], "text": ""}
 
+    # API/user-input recovery can arrive after the previous attempt has been
+    # closed.  Create the bounded execution context before recording the
+    # consumed event so the event is resumable and carries an attempt_id.
+    if attempt is None and wake_supervisor and str(run.status) in {"WAITING_USER", "PAUSED_CHECKPOINT", "PAUSED_RECOVERY"}:
+        from app.services.run_attempts import run_attempt_service
+
+        attempt, _ = await run_attempt_service.begin(session, run)
+
     now = datetime.now(UTC)
     user_inputs = [{
         "id": item.id,

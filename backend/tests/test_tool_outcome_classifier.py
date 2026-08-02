@@ -9,6 +9,14 @@ def test_result_contract_is_not_retryable():
     assert classify_tool_outcome({"status": "FAILED", "stage": "RESULT_CONTRACT"}) is ToolOutcome.CONTRACT_ERROR
 
 
+def test_contract_stage_wins_over_legacy_empty_error_code():
+    assert classify_tool_outcome({
+        "status": "FAILED",
+        "stage": "RESULT_CONTRACT",
+        "error_code": "MYSQL_METADATA_EMPTY_RESULT",
+    }) is ToolOutcome.CONTRACT_ERROR
+
+
 def test_timeout_and_network_are_retryable():
     assert classify_tool_outcome({"status": "FAILED", "error": "network timeout"}) is ToolOutcome.RETRYABLE_ERROR
 

@@ -14,6 +14,7 @@ from app.models.run import FlagCandidate, RunEvent, RunExecutionLease, RunUserIn
 from app.models.solver_state import SolverState
 from app.orchestration.state_machine import RunStatus, transition
 from app.services.run_finalizer import run_finalizer
+from app.services.run_attempts import run_attempt_service
 from app.services.stage_decider import stage_decider
 from app.services.supervisor_progress import supervisor_progress_evaluator
 from app.services.user_input_consumer import consume_user_inputs
@@ -280,7 +281,7 @@ class RunSupervisor:
             if str(run.status) == "WAITING_USER":
                 return await self._outcome(session, run)
             active_lease = await session.scalar(select(RunExecutionLease).where(RunExecutionLease.run_id == run.id))
-            if active_lease is not None and run_id not in orchestrator.active_tasks:
+            if active_lease is not None and run_id not in orchestrator.active_tasks and active_lease.owner_instance_id != run_attempt_service.owner_instance_id:
                 return RunOutcome(run.id, str(run.status), str(run.current_phase or ""), "RUN_ALREADY_OWNED")
             counters = dict((run.recovery_checkpoint_json or {}).get("supervisor_counters") or {})
             if active_lease is None and int(counters.get("no_progress_count") or 0) >= 1:

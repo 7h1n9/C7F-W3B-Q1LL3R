@@ -14,7 +14,9 @@ class ToolOutcome(str, Enum):
     NO_FACT = "NO_FACT"
     RETRYABLE_ERROR = "RETRYABLE_ERROR"
     CONTRACT_ERROR = "CONTRACT_ERROR"
-    INFRA_ERROR = "INFRA_ERROR"
+    TERMINAL_FAILURE = "TERMINAL_FAILURE"
+    # Backwards-compatible name used by the first implementation.
+    INFRA_ERROR = "TERMINAL_FAILURE"
 
 
 def _value(result: Any, key: str, default: Any = None) -> Any:
@@ -37,13 +39,13 @@ def classify_tool_outcome(result: Any) -> ToolOutcome:
 
     if status in {"SUCCESS", "COMPLETED", "CACHED"}:
         return ToolOutcome.SUCCESS
-    if status == "NO_FACT" or error_code in {"MYSQL_METADATA_EMPTY_RESULT", "MYSQL_METADATA_STAGE_EMPTY_RESULT"}:
-        return ToolOutcome.NO_FACT
     if status in {"CONTRACT_ERROR", "RESULT_CONTRACT"} or stage == "RESULT_CONTRACT" or error_code.startswith("RESULT_CONTRACT") or error_code.startswith("MYSQL_METADATA_CONTRACT"):
         return ToolOutcome.CONTRACT_ERROR
+    if status == "NO_FACT" or error_code in {"MYSQL_METADATA_EMPTY_RESULT", "MYSQL_METADATA_STAGE_EMPTY_RESULT"}:
+        return ToolOutcome.NO_FACT
     if status in {"TIMEOUT", "CANCELLED"} or _value(result, "retryable", False) or any(token in error for token in ("timeout", "timed out", "network", "connection")) or error_code in {"RUNNER_UNAVAILABLE", "RUNNER_JOB_FAILED", "TOOL_RESULT_DELIVERY_FAILED"}:
         return ToolOutcome.RETRYABLE_ERROR
-    return ToolOutcome.INFRA_ERROR
+    return ToolOutcome.TERMINAL_FAILURE
 
 
 class ToolOutcomeClassifier:

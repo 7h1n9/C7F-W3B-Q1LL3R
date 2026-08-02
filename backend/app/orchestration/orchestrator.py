@@ -630,7 +630,16 @@ class SolveOrchestrator:
                 if run.engine_type == "codex_sdk" and run.solver_mode != "multi_agent_v1":
                     await solver_state_service.ensure_confirmed_boolean_checkpoint(session, run)
                 try:
-                    attempt, lease = await run_attempt_service.begin(session, run)
+                    existing_lease = await session.scalar(
+                        select(RunExecutionLease).where(RunExecutionLease.run_id == run.id)
+                    )
+                    if existing_lease is not None and existing_lease.owner_instance_id == run_attempt_service.owner_instance_id:
+                        lease = existing_lease
+                        attempt = await session.get(RunAttempt, lease.attempt_id)
+                        if attempt is None:
+                            raise DomainError("RUN_ATTEMPT_MISSING", "Active execution lease has no attempt.")
+                    else:
+                        attempt, lease = await run_attempt_service.begin(session, run)
                     challenge_for_manifest = await session.get(Challenge, run.challenge_id)
                     if challenge_for_manifest is not None:
                         manifest = await refresh_runtime_tool_manifest(
