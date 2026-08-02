@@ -507,6 +507,7 @@ class DeterministicController:
         return decision
 
     async def record_failure(self, session: AsyncSession, run_id: str, failure: dict[str, Any]) -> FailureSignature:
+        failure = normalize_failure_classification(failure)
         fingerprint = str(failure["fingerprint"])
         signature = await session.scalar(select(FailureSignature).where(FailureSignature.run_id == run_id, FailureSignature.fingerprint == fingerprint))
         if signature is None:

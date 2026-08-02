@@ -16,7 +16,8 @@ from app.services.failure_classification import normalize_failure_classification
 from app.services.stage_decider import stage_decider
 from app.services.tool_failure_policy import blocked_failure_for_action, tool_failure_fingerprint
 from app.services.user_input_consumer import consume_user_inputs
-from app.services.run_supervisor import RunSupervisor
+from app.services.run_supervisor import RunSupervisor, run_supervisor
+from app.services.supervisor_progress import supervisor_progress_evaluator
 
 
 def test_failure_classification_normalizes_pydantic_object() -> None:
@@ -73,8 +74,24 @@ def test_tool_failure_circuit_blocks_the_third_identical_action() -> None:
     assert blocked["count"] == 2
 
 
+def test_progress_snapshot_counts_as_progress() -> None:
+    checkpoint = {}
+    decision = supervisor_progress_evaluator.observe(
+        checkpoint,
+        stage="MYSQL_METADATA_DISCOVERY",
+        error_code=None,
+        before_facts=set(),
+        after_facts=set(),
+        before_capabilities=set(),
+        after_capabilities=set(),
+        progress_snapshot_changed=True,
+    )
+    assert decision.new_fact_or_capability is True
+    assert checkpoint["supervisor_counters"]["no_progress_count"] == 0
+
+
 @pytest.mark.asyncio
-async def test_consume_user_inputs_marks_all_queued_rows_and_updates_hints(tmp_path: Path) -> None:
+async def test_consume_user_inputs_marks_all_queued_rows_and_updates_hints(tmp_path: Path, monkeypatch) -> None:
     engine = create_async_engine(
         f"sqlite+aiosqlite:///{tmp_path / 'inputs.db'}", poolclass=StaticPool
     )
@@ -95,6 +112,12 @@ async def test_consume_user_inputs_marks_all_queued_rows_and_updates_hints(tmp_p
             RunUserInput(run_id=run.id, revision=1, content="continue metadata"),
         ])
         await session.commit()
+        wakes = []
+
+        async def fake_enqueue(run_id, *, reason):
+            wakes.append((run_id, reason))
+
+        monkeypatch.setattr(run_supervisor, "enqueue", fake_enqueue)
         consumed = await consume_user_inputs(session, run)
         rows = list((await session.scalars(select(RunUserInput).where(RunUserInput.run_id == run.id).order_by(RunUserInput.revision))).all())
         refreshed_state = await session.get(SolverState, state.id)
@@ -102,8 +125,11 @@ async def test_consume_user_inputs_marks_all_queued_rows_and_updates_hints(tmp_p
         assert all(item.status == "CONSUMED" and item.consumed_at is not None for item in rows)
         assert run.hints_json["user_inputs"][0]["content"] == "continue metadata"
         assert refreshed_state.last_decision_card_json["user_inputs"]
+        assert wakes == [(run.id, "USER_INPUT_CONSUMED")]
         events = list((await session.scalars(select(RunEvent).where(RunEvent.run_id == run.id))).all())
-        assert any(event.event_type == "user_input.consumed" for event in events)
+        consumed_event = next(event for event in events if event.event_type == "user_input.consumed")
+        assert consumed_event.payload_json["run_id"] == run.id
+        assert consumed_event.payload_json["revision"] == [1, 2]
         run.status = "WAITING_USER"
         run.recovery_checkpoint_json = {"question": "continue?", "options": ["retry"]}
         session.add(RunUserInput(run_id=run.id, revision=3, content="resume with the saved hint"))

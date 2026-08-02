@@ -420,6 +420,7 @@ class ReportService:
             encoding="utf-8",
         )
         report_json = {"result": result, "failure_reason": failure_reason, "wp": wp_payload}
+        run.report_json = wp_payload
         report_json_raw = json.dumps(report_json, ensure_ascii=False, indent=2).encode("utf-8")
         (final / "report.json").write_bytes(report_json_raw)
         raw = ManualWriteupRenderer().render(

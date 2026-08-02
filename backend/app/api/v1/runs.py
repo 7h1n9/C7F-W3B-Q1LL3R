@@ -1051,7 +1051,7 @@ async def get_report(run_id: str, session: AsyncSession = Depends(get_session)) 
             "REPORT_NOT_FOUND", "No report has been generated for this run.", status_code=404
         )
     report_json_path = Path(run.workspace_path) / "final" / "report.json"
-    report_json = json.loads(report_json_path.read_text(encoding="utf-8")) if report_json_path.is_file() else None
+    report_json = run.report_json or (json.loads(report_json_path.read_text(encoding="utf-8")) if report_json_path.is_file() else None)
     return {"data": {"content": path.read_text(encoding="utf-8"), "path": "final/writeup.md", "report_json": report_json}}
 
 

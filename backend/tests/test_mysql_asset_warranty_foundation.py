@@ -120,7 +120,7 @@ def test_mysql_migration_fresh_database() -> None:
                 async with engine.connect() as connection:
                     assert (await connection.execute(text("SELECT VERSION()"))).scalar()
                     assert (await connection.execute(text("SELECT DATABASE()"))).scalar() == database
-                    assert (await connection.execute(text("SELECT version_num FROM alembic_version"))).scalar() == "0036_asset_warranty_mysql_metadata"
+                    assert (await connection.execute(text("SELECT version_num FROM alembic_version"))).scalar() == "0037_run_report_payload"
             finally:
                 await engine.dispose()
 

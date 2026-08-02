@@ -79,6 +79,7 @@ async def lifespan(_: FastAPI):
                     SolveRun.status.in_([
                         RunStatus.PAUSED_RECOVERY.value,
                         RunStatus.PAUSED_CHECKPOINT.value,
+                        RunStatus.WAITING_USER.value,
                         RunStatus.PLANNING.value,
                         RunStatus.ANALYZING.value,
                         RunStatus.EVALUATING.value,
@@ -86,7 +87,13 @@ async def lifespan(_: FastAPI):
                 ))).all())
             for paused_run in paused_runs:
                 with contextlib.suppress(Exception):
-                    await run_supervisor.run_background(paused_run.id)
+                    if RunStatus(paused_run.status) == RunStatus.WAITING_USER:
+                        async with SessionLocal() as recovery_session:
+                            current = await recovery_session.get(SolveRun, paused_run.id)
+                            if current and await run_supervisor.has_unfinished_user_input(recovery_session, current):
+                                await run_supervisor.enqueue(current.id, reason="USER_INPUT_CONSUMED")
+                    else:
+                        await run_supervisor.run_background(paused_run.id)
 
     await run_supervisor.start_worker()
     cleanup_task = asyncio.create_task(cleanup_loop())

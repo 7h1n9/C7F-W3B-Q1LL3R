@@ -15,4 +15,4 @@ def normalize_failure_classification(value) -> dict:
     attributes = getattr(value, "__dict__", None)
     if isinstance(attributes, dict):
         return dict(attributes)
-    return {"value": str(value)}
+    return {"message": str(value)}

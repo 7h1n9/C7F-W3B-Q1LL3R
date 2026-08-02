@@ -16,13 +16,19 @@ class SupervisorProgressEvaluator:
     def observe(self, checkpoint: dict, *, stage: str, error_code: str | None,
                 before_facts: set[str], after_facts: set[str],
                 before_capabilities: set[str], after_capabilities: set[str],
-                candidate_exists: bool = False) -> ProgressDecision:
+                candidate_exists: bool = False,
+                progress_snapshot_changed: bool = False) -> ProgressDecision:
         counters = dict(checkpoint.get("supervisor_counters") or {})
         counters["stage_attempt_count"] = int(counters.get("stage_attempt_count", 0)) + 1
         counters["no_progress_count"] = int(counters.get("no_progress_count", 0)) + 1
         counters["same_error_count"] = int(counters.get("same_error_count", 0)) + 1 if error_code else 0
         counters["last_key"] = f"{stage}:{error_code or 'NONE'}"
-        new_progress = bool((after_facts - before_facts) or (after_capabilities - before_capabilities) or candidate_exists)
+        new_progress = bool(
+            (after_facts - before_facts)
+            or (after_capabilities - before_capabilities)
+            or candidate_exists
+            or progress_snapshot_changed
+        )
         if new_progress:
             counters["no_progress_count"] = 0
             counters["same_error_count"] = 0

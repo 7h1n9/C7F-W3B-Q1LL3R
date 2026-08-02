@@ -6,11 +6,11 @@ import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from app.models.challenge import Challenge
-from app.models.multi_agent import VerifiedFact
-from app.models.run import FlagCandidate, RunExecutionLease, SolveRun, ToolCall
+from app.models.multi_agent import AgentTask, PlannerProposal, VerifiedFact
+from app.models.run import FlagCandidate, RunEvent, RunExecutionLease, RunUserInput, SolveRun, ToolCall
 from app.models.solver_state import SolverState
 from app.orchestration.state_machine import RunStatus, transition
 from app.services.run_finalizer import run_finalizer
@@ -18,6 +18,7 @@ from app.services.stage_decider import stage_decider
 from app.services.supervisor_progress import supervisor_progress_evaluator
 from app.services.user_input_consumer import consume_user_inputs
 from app.services.writeup_builder import writeup_builder
+from app.services.events import event_service
 
 
 USER_VISIBLE_TERMINAL = {"WAITING_USER", "COMPLETED_SOLVED", "COMPLETED_UNSOLVED", "CANCELLED"}
@@ -75,7 +76,7 @@ class RunSupervisor:
             run_id, reason = await self._wake_queue.get()
             self._queued_runs.discard(run_id)
             try:
-                if reason == "USER_INPUT_RECEIVED":
+                if reason in {"USER_INPUT_RECEIVED", "USER_INPUT_CONSUMED"}:
                     await self.run_after_user_input_background(run_id)
                 else:
                     await self.run_background(run_id)
@@ -105,6 +106,70 @@ class RunSupervisor:
         ))).all())
         tested = {str((call.arguments_json or {}).get("test_field")) for call in calls if isinstance(call.arguments_json, dict) and (call.arguments_json or {}).get("test_field")}
         return keys, ledger, candidate, tested
+
+    async def _progress_snapshot(self, session, run_id: str) -> dict[str, int]:
+        state = await session.scalar(select(SolverState).where(SolverState.run_id == run_id))
+        capability_count = len((state.capability_ledger_json or {}) if state else {})
+        return {
+            "task_count": int(await session.scalar(select(func.count()).select_from(AgentTask).where(AgentTask.run_id == run_id)) or 0),
+            "proposal_count": int(await session.scalar(select(func.count()).select_from(PlannerProposal).where(PlannerProposal.run_id == run_id)) or 0),
+            "tool_call_count": int(await session.scalar(select(func.count()).select_from(ToolCall).where(ToolCall.run_id == run_id)) or 0),
+            "verified_fact_count": int(await session.scalar(select(func.count()).select_from(VerifiedFact).where(VerifiedFact.run_id == run_id, VerifiedFact.promotion_status == "VERIFIED")) or 0),
+            "capability_count": capability_count,
+            "event_sequence": int(await session.scalar(select(func.max(RunEvent.sequence)).where(RunEvent.run_id == run_id)) or 0),
+        }
+
+    async def has_unfinished_user_input(self, session, run: SolveRun) -> bool:
+        checkpoint = dict(run.recovery_checkpoint_json or {})
+        if checkpoint.get("user_input_resume_pending"):
+            return True
+        last_input = await session.scalar(select(RunUserInput).where(
+            RunUserInput.run_id == run.id,
+            RunUserInput.status == "CONSUMED",
+        ).order_by(RunUserInput.consumed_at.desc(), RunUserInput.created_at.desc()))
+        if last_input is None or last_input.consumed_at is None:
+            return False
+        last_event = await session.scalar(select(RunEvent).where(
+            RunEvent.run_id == run.id,
+        ).order_by(RunEvent.event_id.desc(), RunEvent.sequence.desc()))
+        return bool(last_event and last_event.event_type in {"user_input.consumed", "user.input_consumed"})
+
+    async def _recover_consumed_user_input(self, session, run: SolveRun) -> dict:
+        checkpoint = dict(run.recovery_checkpoint_json or {})
+        ids = list(checkpoint.get("last_user_input_ids") or [])
+        query = select(RunUserInput).where(
+            RunUserInput.run_id == run.id,
+            RunUserInput.status == "CONSUMED",
+        )
+        if ids:
+            query = query.where(RunUserInput.id.in_(ids))
+        rows = list((await session.scalars(query.order_by(RunUserInput.revision, RunUserInput.created_at))).all())
+        if not rows:
+            return {"items": [], "text": ""}
+        return {
+            "items": rows,
+            "text": "\n\n".join(f"User supplemental input v{item.revision}: {item.content}" for item in rows),
+        }
+
+    async def _mark_user_input_no_progress(self, session, run: SolveRun, snapshot: dict) -> RunOutcome:
+        run.last_error_code = "USER_INPUT_NO_PROGRESS"
+        run.last_error_message = "User input was consumed, but no durable task, proposal, tool call, fact or event appeared within 30 seconds."
+        run.current_phase = "WAITING_USER"
+        run.recovery_checkpoint_json = {
+            **(run.recovery_checkpoint_json or {}),
+            "current_phase": "WAITING_USER",
+            "no_progress_reason": "USER_INPUT_NO_PROGRESS",
+            "progress_snapshot": snapshot,
+            "question": "The input was accepted but execution made no durable progress. Choose how to continue.",
+            "options": ["retry", "finish_unsolved_wp", "try_alternative_strategy"],
+        }
+        run.status = RunStatus.WAITING_USER.value
+        await event_service.append(session, run.id, "supervisor.no_progress", {
+            "run_id": run.id,
+            "reason": "USER_INPUT_NO_PROGRESS",
+            "progress_snapshot": snapshot,
+        })
+        return await self._outcome(session, run)
 
     async def _set_stage(self, session, run: SolveRun, stage: str) -> None:
         run.current_phase = stage
@@ -140,6 +205,7 @@ class RunSupervisor:
                     session, run, str(run.last_error_code or "Waiting for user input.")
                 )
                 run.recovery_checkpoint_json = checkpoint
+                run.report_json = checkpoint["current_wp"]
                 await session.commit()
         return RunOutcome.from_run(run)
 
@@ -163,12 +229,30 @@ class RunSupervisor:
             raise ValueError("RUN_NOT_FOUND")
         if str(run.status) in {"COMPLETED_SOLVED", "COMPLETED_UNSOLVED", "CANCELLED"}:
             return RunOutcome(run.id, str(run.status), str(run.current_phase or ""), "RUN_ALREADY_TERMINAL")
-        consumed = await consume_user_inputs(session, run)
+        consumed = await consume_user_inputs(session, run, wake_supervisor=False)
         if not consumed["items"]:
-            return RunOutcome(run.id, str(run.status), str(run.current_phase or ""), "NO_PENDING_USER_INPUT")
+            consumed = await self._recover_consumed_user_input(session, run)
+            if not consumed["items"]:
+                return RunOutcome(run.id, str(run.status), str(run.current_phase or ""), "NO_PENDING_USER_INPUT")
+            checkpoint = dict(run.recovery_checkpoint_json or {})
+            checkpoint["user_input_resume_pending"] = True
+            run.recovery_checkpoint_json = checkpoint
+            await session.commit()
         if str(run.status) in {"WAITING_USER", "PAUSED_CHECKPOINT", "PAUSED_RECOVERY"}:
             await self._resolve_waiting_input(session, run)
-        return await self.continue_until_terminal(session, run_id, consumed["text"])
+        try:
+            outcome = await self.continue_until_terminal(session, run_id, consumed["text"])
+            run = await session.get(SolveRun, run_id)
+            if run is not None:
+                checkpoint = dict(run.recovery_checkpoint_json or {})
+                checkpoint["user_input_resume_pending"] = False
+                run.recovery_checkpoint_json = checkpoint
+                await session.commit()
+            return outcome
+        except Exception:
+            # Keep the durable pending marker so the watchdog can retry after
+            # a process crash or a transient infrastructure failure.
+            raise
 
     async def continue_until_terminal(self, session, run_id: str, user_message: str | None = None) -> RunOutcome:
         from app.orchestration.orchestrator import orchestrator
@@ -182,7 +266,7 @@ class RunSupervisor:
             await session.refresh(run)
             if str(run.status) in {"COMPLETED_SOLVED", "COMPLETED_UNSOLVED", "CANCELLED"}:
                 return await self._outcome(session, run)
-            consumed = await consume_user_inputs(session, run)
+            consumed = await consume_user_inputs(session, run, wake_supervisor=False)
             if consumed["items"] and str(run.status) in {"WAITING_USER", "PAUSED_CHECKPOINT", "PAUSED_RECOVERY"}:
                 await self._resolve_waiting_input(session, run)
                 run = await session.get(SolveRun, run_id)
@@ -197,6 +281,7 @@ class RunSupervisor:
                 return await self._outcome(session, run)
             challenge = await session.get(Challenge, run.challenge_id)
             before_keys, before_ledger, candidate, tested = await self._facts(session, run)
+            before_snapshot = await self._progress_snapshot(session, run_id)
             metadata = (challenge.metadata_json or {}) if challenge else {}
             declared_fields = {str(item) for item in (metadata.get("fields") or []) if str(item)}
             decision = stage_decider.decide(
@@ -227,13 +312,19 @@ class RunSupervisor:
             if after is None:
                 raise ValueError("RUN_NOT_FOUND")
             after_keys, after_ledger, after_candidate, _ = await self._facts(session, after)
+            after_snapshot = await self._progress_snapshot(session, run_id)
             observed = supervisor_progress_evaluator.observe(
                 after.recovery_checkpoint_json or {}, stage=decision.stage,
                 error_code=after.last_error_code,
                 before_facts=before_keys, after_facts=after_keys,
                 before_capabilities=set(before_ledger), after_capabilities=set(after_ledger),
                 candidate_exists=after_candidate,
+                progress_snapshot_changed=before_snapshot != after_snapshot,
             )
+            after.recovery_checkpoint_json = {
+                **(after.recovery_checkpoint_json or {}),
+                "progress_snapshot": after_snapshot,
+            }
             await session.commit()
             if str(after.status) in USER_VISIBLE_TERMINAL:
                 return await self._outcome(session, after)
@@ -272,7 +363,19 @@ class RunSupervisor:
 
         async with SessionLocal() as session:
             try:
-                return await self.continue_after_user_input(session, run_id)
+                outcome = await self.continue_after_user_input(session, run_id)
+                if outcome.status in {"COMPLETED_SOLVED", "COMPLETED_UNSOLVED", "CANCELLED"}:
+                    return outcome
+                baseline = await self._progress_snapshot(session, run_id)
+                await asyncio.sleep(30)
+                await session.rollback()
+                run = await session.get(SolveRun, run_id)
+                if run is None or str(run.status) in {"COMPLETED_SOLVED", "COMPLETED_UNSOLVED", "CANCELLED"}:
+                    return outcome
+                current = await self._progress_snapshot(session, run_id)
+                if current == baseline:
+                    return await self._mark_user_input_no_progress(session, run, current)
+                return RunOutcome.from_run(run)
             finally:
                 self._active_runs.discard(run_id)
 

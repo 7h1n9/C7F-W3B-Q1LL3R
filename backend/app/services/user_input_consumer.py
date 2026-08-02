@@ -9,7 +9,7 @@ from app.models.solver_state import SolverState
 from app.services.events import event_service
 
 
-async def consume_user_inputs(session, run: SolveRun, attempt: RunAttempt | None = None) -> dict:
+async def consume_user_inputs(session, run: SolveRun, attempt: RunAttempt | None = None, *, wake_supervisor: bool = True) -> dict:
     queued = list((await session.scalars(select(RunUserInput).where(
         RunUserInput.run_id == run.id,
         RunUserInput.status == "QUEUED",
@@ -37,6 +37,7 @@ async def consume_user_inputs(session, run: SolveRun, attempt: RunAttempt | None
     checkpoint = dict(run.recovery_checkpoint_json or {})
     checkpoint["last_user_input_ids"] = [item["id"] for item in user_inputs]
     checkpoint["last_user_input_revisions"] = [item["revision"] for item in user_inputs]
+    checkpoint["user_input_resume_pending"] = True
     counters = dict(checkpoint.get("supervisor_counters") or {})
     counters["no_progress_count"] = 0
     counters["same_error_count"] = 0
@@ -49,10 +50,16 @@ async def consume_user_inputs(session, run: SolveRun, attempt: RunAttempt | None
         state.last_decision_card_json = decision_card
     await session.commit()
     await event_service.append(session, run.id, "user_input.consumed", {
+        "run_id": run.id,
         "input_ids": [item["id"] for item in user_inputs],
+        "revision": user_inputs[0]["revision"] if len(user_inputs) == 1 else [item["revision"] for item in user_inputs],
         "revisions": [item["revision"] for item in user_inputs],
         "attempt_id": attempt.id if attempt else None,
     })
+    if wake_supervisor:
+        from app.services.run_supervisor import run_supervisor
+
+        await run_supervisor.enqueue(run.id, reason="USER_INPUT_CONSUMED")
     return {
         "items": queued,
         "input_ids": [item["id"] for item in user_inputs],

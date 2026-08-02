@@ -78,8 +78,22 @@ class RunFinalizer:
             "asset_warranty.mysql_user_tables": "MYSQL_METADATA_DISCOVERY",
             "asset_warranty.mysql_candidate_columns": "MYSQL_METADATA_DISCOVERY",
         }
+        ledger = dict(state.capability_ledger_json or {}) if state else {}
         repeated_failures = list((checkpoint.get("tool_failure_counts") or {}).values())
+        if not repeated_failures:
+            repeated_failures = list((ledger.get("tool_failure_counts") or {}).values())
+        failure_history = list(ledger.get("failure_history") or [])
         metadata_failures = [item for item in repeated_failures if item.get("tool_name") == "mysql_metadata_discovery"]
+        failed_tools = sorted({
+            str(call.tool_name)
+            for call in all_calls
+            if call.status in {"FAILED", "CANCELLED", "TIMEOUT"}
+        } | {
+            str(item.get("tool_name"))
+            for item in repeated_failures
+            if item.get("tool_name")
+        })
+        next_steps = ["Inspect the failed stage output and Runner capability.", "Resume after correcting the input or extraction strategy."]
         return {
             "generated": True,
             "challenge": {"id": run.challenge_id, "name": challenge.name if challenge else ""},
@@ -99,8 +113,9 @@ class RunFinalizer:
                 "status": item.status, "consumed_at": item.consumed_at.isoformat() if item.consumed_at else None,
             } for item in user_inputs],
             "successful_tools": sorted({str(call.tool_name) for call in calls}),
-            "failed_tools": sorted({str(call.tool_name) for call in all_calls if call.status in {"FAILED", "CANCELLED", "TIMEOUT"}}),
+            "failed_tools": failed_tools,
             "repeated_failures": repeated_failures,
+            "failure_history": failure_history,
             "metadata_failure_summary": {
                 "stage": metadata_failures[-1].get("stage") if metadata_failures else None,
                 "error_code": metadata_failures[-1].get("error_code") if metadata_failures else None,
@@ -115,7 +130,8 @@ class RunFinalizer:
             "current_blocker": run.last_error_code or reason,
             "likely_cause": reason,
             "checkpoint_details": checkpoint,
-            "next_manual_steps": ["Inspect the failed stage output and Runner capability.", "Resume after correcting the input or extraction strategy."],
+            "next_manual_steps": next_steps,
+            "next_steps": next_steps,
         }
 
     async def finish_unsolved_with_wp(self, session, run: SolveRun, reason: str) -> dict:
@@ -124,6 +140,7 @@ class RunFinalizer:
         run.current_phase = "REPORTING"
         run.last_error_code = "COMPLETED_UNSOLVED_WITH_WP"
         run.last_error_message = reason[:4000]
+        run.report_json = wp
         run.recovery_checkpoint_json = {
             **dict(run.recovery_checkpoint_json or {}),
             "terminal_reason": reason,
@@ -149,6 +166,10 @@ class RunFinalizer:
                         **dict(run.recovery_checkpoint_json or {}),
                         "wp": await self.build_wp(session, run, str(run.last_error_code or "COMPLETED_UNSOLVED")),
                     }
+                    run.report_json = run.recovery_checkpoint_json["wp"]
+                    changed["wp_rebuilt"] = True
+                elif not (run.report_json or {}).get("confirmed_facts"):
+                    run.report_json = existing_wp
                     changed["wp_rebuilt"] = True
             attempts = list((await session.scalars(select(RunAttempt).where(
                 RunAttempt.run_id == run.id, RunAttempt.finished_at.is_(None)

@@ -106,6 +106,7 @@ class SolveRun(UUIDTimestampMixin, Base):
     required_action_calls_used: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     assistance_level: Mapped[str] = mapped_column(String(30), default="AUTONOMOUS")
     assistance_sources_json: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    report_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
     recovery_checkpoint_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
     workspace_revision: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     workspace_negative_cache_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
