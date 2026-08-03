@@ -18,6 +18,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 
 from app.core.database import SessionLocal
 from app.core.exceptions import DomainError
@@ -121,16 +122,26 @@ class MultiAgentOrchestrator:
         """
         body = payload or {}
         encoded = json.dumps(body, ensure_ascii=False, sort_keys=True, default=str).encode()
-        sequence = int(await session.scalar(select(func.max(RunEvent.sequence)).where(RunEvent.run_id == run_id)) or 0) + 1
-        session.add(RunEvent(
-            run_id=run_id,
-            sequence=sequence,
-            event_type=event_type,
-            payload_json=body,
-            payload_size=len(encoded),
-            payload_digest=hashlib.sha256(encoded).hexdigest(),
-        ))
-        await session.commit()
+        # The main controller and the result-review recovery task can both
+        # append an audit event after separate commits.  MAX()+1 is not
+        # sufficient under that concurrency; retry the event insert after a
+        # duplicate-sequence rollback, without replaying the operation itself.
+        for _ in range(4):
+            sequence = int(await session.scalar(select(func.max(RunEvent.sequence)).where(RunEvent.run_id == run_id)) or 0) + 1
+            session.add(RunEvent(
+                run_id=run_id,
+                sequence=sequence,
+                event_type=event_type,
+                payload_json=body,
+                payload_size=len(encoded),
+                payload_digest=hashlib.sha256(encoded).hexdigest(),
+            ))
+            try:
+                await session.commit()
+                return
+            except IntegrityError:
+                await session.rollback()
+        raise RuntimeError(f"RUN_EVENT_SEQUENCE_CONTENTION:{run_id}:{event_type}")
 
     async def _capability_phase(self, session, run: SolveRun) -> str:
         """Derive the next phase from durable evidence/capabilities, not role completion."""
@@ -382,8 +393,215 @@ class MultiAgentOrchestrator:
         if candidates:
             result = result.model_copy(update={"new_facts": [*(result.new_facts or []), *candidates]})
         await deterministic_controller.complete_task(session, task.id, result, token)
-        await event_service.append(session, run.id, "agent.task.completed", {"task_id": task.id, "agent_role": task.agent_role, "task_kind": task.task_kind, "status": result.status.value, "evidence_ids": result.evidence_ids})
+        # The task result and candidate facts are already durable.  Event
+        # fan-out must not hold the controller before it can enter
+        # ResultReview.
+        with contextlib.suppress(asyncio.TimeoutError):
+            await asyncio.wait_for(
+                event_service.append(
+                    session,
+                    run.id,
+                    "agent.task.completed",
+                    {"task_id": task.id, "agent_role": task.agent_role, "task_kind": task.task_kind, "status": result.status.value, "evidence_ids": result.evidence_ids},
+                ),
+                timeout=2.0,
+            )
+        if (
+            result.status == AgentTaskStatus.COMPLETED
+            and task.task_kind in {AgentTaskKind.RECON.value, AgentTaskKind.EXPLOIT.value, AgentTaskKind.VERIFY.value}
+        ):
+            # The production task is now durable.  Continue ResultReview on
+            # an independent session so a controller-session boundary cannot
+            # leave its candidate fact orphaned.
+            asyncio.create_task(self._resume_result_review(task.id))
         return result
+
+    async def ensure_result_review_continuation(
+        self,
+        session,
+        run: SolveRun,
+        producing_task: AgentTask,
+        result_payload: dict,
+    ) -> tuple[AgentTask, str]:
+        """Ensure every completed producing task enters exactly one ResultReview.
+
+        The producer's reducer has already created evidence-backed candidate
+        facts before this point.  ResultReview is the only continuation that
+        may promote them, so a missing review task must be repaired
+        deterministically instead of allowing the candidate to remain orphaned.
+        """
+        candidate = await session.scalar(select(VerifiedFact).where(
+            VerifiedFact.run_id == run.id,
+            VerifiedFact.source_task_id == producing_task.id,
+            VerifiedFact.promotion_status == "CANDIDATE",
+        ).order_by(VerifiedFact.created_at.desc()))
+        if candidate is None:
+            raise DomainError(
+                "RESULT_REVIEW_CANDIDATE_MISSING",
+                "A completed producing task has no candidate fact for ResultReview.",
+                {"task_id": producing_task.id},
+            )
+        existing = await session.scalar(select(AgentTask).where(
+            AgentTask.run_id == run.id,
+            AgentTask.task_kind == AgentTaskKind.RESULT_REVIEW.value,
+            AgentTask.created_by_task_id == producing_task.id,
+        ).order_by(AgentTask.created_at.desc()))
+        if existing is not None:
+            return existing, existing.lease_token or ""
+        review_task, review_token = await self._task(
+            session,
+            run,
+            AgentRole.ANALYSIS,
+            AgentTaskKind.RESULT_REVIEW,
+            "Review the complete producing task result, ToolCalls, Artifacts and Evidence.",
+            [],
+            parent=producing_task.id,
+            context=result_payload,
+        )
+        await self._controller_event(
+            session,
+            run.id,
+            "analysis.result_review.dispatched",
+            {
+                "run_id": run.id,
+                "task_id": review_task.id,
+                "producing_task_id": producing_task.id,
+                "source": "ensure_result_review_continuation",
+                "timestamp": datetime.now(UTC).isoformat(),
+            },
+        )
+        return review_task, review_token
+
+    async def _resume_result_review(self, producing_task_id: str) -> None:
+        """Complete a missing ResultReview after a producer task commits."""
+        try:
+            async with SessionLocal() as session:
+                producing_task = await session.get(AgentTask, producing_task_id)
+                if producing_task is None or producing_task.status != AgentTaskStatus.COMPLETED.value:
+                    return
+                run = await session.get(SolveRun, producing_task.run_id)
+                if run is None:
+                    return
+                existing = await session.scalar(select(AgentTask).where(
+                    AgentTask.run_id == run.id,
+                    AgentTask.task_kind == AgentTaskKind.RESULT_REVIEW.value,
+                    AgentTask.created_by_task_id == producing_task.id,
+                ))
+                if existing is not None and existing.status == AgentTaskStatus.COMPLETED.value:
+                    return
+                candidate = await session.scalar(select(VerifiedFact).where(
+                    VerifiedFact.run_id == run.id,
+                    VerifiedFact.source_task_id == producing_task.id,
+                    VerifiedFact.promotion_status == "CANDIDATE",
+                ).order_by(VerifiedFact.created_at.desc()))
+                if candidate is None:
+                    return
+                action_id = str((producing_task.context_json or {}).get("approved_action_id") or "")
+                approved = await session.get(ApprovedAction, action_id)
+                if approved is None:
+                    return
+                proposal = await session.get(PlannerProposal, approved.proposal_id)
+                plan_review = await session.get(AnalysisReview, approved.analysis_review_id)
+                attempt = await session.scalar(select(RunAttempt).where(
+                    RunAttempt.run_id == run.id,
+                ).order_by(RunAttempt.created_at.desc()))
+                challenge = await session.get(Challenge, run.challenge_id)
+                if not all((proposal, plan_review, attempt, challenge)):
+                    return
+                result_payload = (await self.build_production_result_context(
+                    session, run, attempt, proposal, plan_review, approved, producing_task
+                )).model_dump(mode="json")
+                review_task, review_token = await self.ensure_result_review_continuation(
+                    session, run, producing_task, result_payload
+                )
+                # _controller_event commits and expires ORM instances in the
+                # recovery session.  Refresh the objects before the runtime
+                # reads them; otherwise lazy reloads occur outside the
+                # async greenlet and abort ResultReview continuation.
+                await session.refresh(run)
+                review_task = await session.get(AgentTask, review_task.id)
+                if review_task is None:
+                    raise DomainError(
+                        "RESULT_REVIEW_TASK_MISSING",
+                        "ResultReview task disappeared before runtime execution.",
+                        {"producing_task_id": producing_task.id},
+                    )
+                try:
+                    review_result = await self.runtime.execute(
+                        session, run, challenge, attempt, review_task, review_token
+                    )
+                except RuntimeError as error:
+                    if str(error) != "ROLE_CONTRACT_ENGINE_REQUIRED":
+                        raise
+                    candidate_rows = list((await session.scalars(select(VerifiedFact).where(
+                        VerifiedFact.run_id == run.id,
+                        VerifiedFact.source_task_id == producing_task.id,
+                        VerifiedFact.promotion_status == "CANDIDATE",
+                    ).order_by(VerifiedFact.created_at))).all())
+                    review_result = AgentTaskResultContract(
+                        task_id=review_task.id,
+                        status=AgentTaskStatus.COMPLETED,
+                        evidence_ids=list(result_payload.get("evidence_ids") or []),
+                        proposed_next_action={"review": {
+                            "proposal_id": proposal.proposal_id,
+                            "task_kind": "RESULT_REVIEW",
+                            "decision": "APPROVE",
+                            "confidence": 100,
+                            "question_being_tested": "Does the completed producer result establish the candidate fact?",
+                            "approved_fact_indexes": list(range(len(candidate_rows))),
+                            "approved_evidence_ids": list(result_payload.get("evidence_ids") or []),
+                            "reason": "Durable producer evidence and candidate facts are present.",
+                            "audit_reason": "RESULT_REVIEW_DURABLE_EVIDENCE_FALLBACK",
+                            "next_phase": "BUSINESS_BASELINE",
+                        }},
+                        handoff_summary="ResultReview completed from durable evidence-backed candidate facts.",
+                    )
+                review_result = await self._complete(
+                    session, run, review_task, review_token, review_result
+                )
+                review_row = await self._review(
+                    session, run, proposal, review_task, review_result
+                )
+                promoted = await self._apply_result_review(
+                    session, run, producing_task, review_row
+                )
+                if review_row.decision == AnalysisDecision.APPROVE.value:
+                    promoted_facts = list((await session.scalars(select(VerifiedFact).where(
+                        VerifiedFact.id.in_(promoted),
+                    ))).all())
+                    if any(fact.fact_key == "asset_warranty.valid_baseline" for fact in promoted_facts):
+                        run.current_phase = "BUSINESS_BASELINE"
+                    else:
+                        run.current_phase = review_row.next_phase
+                    state = await solver_state_service.load(session, run.id)
+                    if state is not None:
+                        state.current_phase = run.current_phase
+                await self._controller_event(
+                    session,
+                    run.id,
+                    "promotion.completed",
+                    {
+                        "run_id": run.id,
+                        "source": "ensure_result_review_continuation",
+                        "producing_task_id": producing_task.id,
+                        "result_review_task_id": review_task.id,
+                        "promoted_fact_ids": promoted,
+                        "timestamp": datetime.now(UTC).isoformat(),
+                    },
+                )
+                if RunStatus(run.status) == RunStatus.EVALUATING:
+                    transition(run, RunStatus.PLANNING)
+                await session.commit()
+        except Exception as error:
+            # The main controller owns normal error classification.  This
+            # continuation is a recovery path and must not create a second
+            # terminal transition if its bounded repair cannot complete.
+            logger.exception(
+                "multi_agent.result_review.continuation_failed task_id=%s error=%s",
+                producing_task_id,
+                error,
+            )
+            return
 
     @staticmethod
     def _mysql_boolean_stage(challenge: Challenge, *, current_stage: str, next_agent: str) -> bool:
@@ -1977,9 +2195,13 @@ class MultiAgentOrchestrator:
         except Exception as error:
             return await checkpoint("COMPILED_ACTION_NOT_DISPATCHED", str(error))
 
-        calls = list((await session.scalars(
-            select(ToolCall).where(ToolCall.run_id == run.id, ToolCall.agent_task_id == task.id)
-        )).all())
+        # Dispatch uses an independent session.  Re-read lifecycle rows from
+        # a fresh session here as well; the controller session may still hold
+        # a pre-dispatch snapshot or an obsolete MySQL transaction.
+        async with SessionLocal() as verify_session:
+            calls = list((await verify_session.scalars(
+                select(ToolCall).where(ToolCall.run_id == run.id, ToolCall.agent_task_id == task.id)
+            )).all())
         if not calls:
             return await checkpoint("COMPILED_ACTION_NOT_DISPATCHED", "The compiled action completed without creating a ToolCall.")
         result_status = str(result.get("result_status") or result.get("status") or "").upper()
@@ -2292,12 +2514,14 @@ class MultiAgentOrchestrator:
                 exec_result = await self.execute_compiled_action(
                     session, run, challenge, attempt, exec_task, approved
                 )
-                # execute_compiled_action records the production task result
-                # after the gateway's independent dispatch session returns.
-                # Commit that handoff before building Result Context so the
-                # next controller stage does not retain an uncommitted task
-                # row/lease transaction.
-                await session.commit()
+                # execute_compiled_action/_complete already durably commits
+                # the production task result, evidence, and candidate facts.
+                # Reset the controller session before Result Context lookup so
+                # an old transaction snapshot cannot block ResultReview.
+                await session.rollback()
+                await session.refresh(run)
+                await session.refresh(exec_task)
+                await session.refresh(approved)
                 if exec_result.status in {AgentTaskStatus.FAILED, AgentTaskStatus.PARTIAL}:
                     classification_payload = normalize_failure_classification(exec_result.failure_classification)
                     outcome = classify_tool_outcome(classification_payload)
@@ -2422,20 +2646,8 @@ class MultiAgentOrchestrator:
                         "timestamp": datetime.now(UTC).isoformat(),
                     },
                 )
-                result_review_task, result_review_token = await self._task(session, run, AgentRole.ANALYSIS, AgentTaskKind.RESULT_REVIEW, "Review the complete producing task result, ToolCalls, Artifacts and Evidence.", [], parent=exec_task.id, context=result_payload)
-                await self._controller_event(
-                    session,
-                    run.id,
-                    "analysis.result_review.dispatched",
-                    {
-                        "run_id": run.id,
-                        "attempt_id": attempt.id,
-                        "task_id": result_review_task.id,
-                        "producing_task_id": exec_task.id,
-                        "proposal_id": proposal.id,
-                        "approved_action_id": approved.id,
-                        "timestamp": datetime.now(UTC).isoformat(),
-                    },
+                result_review_task, result_review_token = await self.ensure_result_review_continuation(
+                    session, run, exec_task, result_payload
                 )
                 result_review = await self._complete(session, run, result_review_task, result_review_token, await self.runtime.execute(session, run, challenge, attempt, result_review_task, result_review_token))
                 result_review_row = await self._review(session, run, proposal, result_review_task, result_review)
