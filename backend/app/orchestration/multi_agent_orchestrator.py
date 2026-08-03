@@ -430,6 +430,7 @@ class MultiAgentOrchestrator:
         may promote them, so a missing review task must be repaired
         deterministically instead of allowing the candidate to remain orphaned.
         """
+        run_id = run.id
         candidate = await session.scalar(select(VerifiedFact).where(
             VerifiedFact.run_id == run.id,
             VerifiedFact.source_task_id == producing_task.id,
@@ -458,18 +459,30 @@ class MultiAgentOrchestrator:
             parent=producing_task.id,
             context=result_payload,
         )
+        # Persist the task before the audit-event insert.  Event sequence
+        # contention may rollback its transaction; leaving this task only
+        # flushed would erase the ResultReview task during that rollback.
+        review_task_id = review_task.id
+        await session.commit()
         await self._controller_event(
             session,
-            run.id,
+            run_id,
             "analysis.result_review.dispatched",
             {
-                "run_id": run.id,
-                "task_id": review_task.id,
+                "run_id": run_id,
+                "task_id": review_task_id,
                 "producing_task_id": producing_task.id,
                 "source": "ensure_result_review_continuation",
                 "timestamp": datetime.now(UTC).isoformat(),
             },
         )
+        review_task = await session.get(AgentTask, review_task_id)
+        if review_task is None:
+            raise DomainError(
+                "RESULT_REVIEW_TASK_MISSING",
+                "ResultReview task was not durable after dispatch.",
+                {"task_id": review_task_id},
+            )
         return review_task, review_token
 
     async def _resume_result_review(self, producing_task_id: str) -> None:
@@ -482,6 +495,7 @@ class MultiAgentOrchestrator:
                 run = await session.get(SolveRun, producing_task.run_id)
                 if run is None:
                     return
+                run_id = run.id
                 existing = await session.scalar(select(AgentTask).where(
                     AgentTask.run_id == run.id,
                     AgentTask.task_kind == AgentTaskKind.RESULT_REVIEW.value,
@@ -514,17 +528,18 @@ class MultiAgentOrchestrator:
                 review_task, review_token = await self.ensure_result_review_continuation(
                     session, run, producing_task, result_payload
                 )
+                review_task_id = review_task.id
                 # _controller_event commits and expires ORM instances in the
                 # recovery session.  Refresh the objects before the runtime
                 # reads them; otherwise lazy reloads occur outside the
                 # async greenlet and abort ResultReview continuation.
                 await session.refresh(run)
-                review_task = await session.get(AgentTask, review_task.id)
+                review_task = await session.get(AgentTask, review_task_id)
                 if review_task is None:
                     raise DomainError(
                         "RESULT_REVIEW_TASK_MISSING",
                         "ResultReview task disappeared before runtime execution.",
-                        {"producing_task_id": producing_task.id},
+                        {"producing_task_id": producing_task_id},
                     )
                 try:
                     review_result = await self.runtime.execute(
@@ -534,12 +549,12 @@ class MultiAgentOrchestrator:
                     if str(error) != "ROLE_CONTRACT_ENGINE_REQUIRED":
                         raise
                     candidate_rows = list((await session.scalars(select(VerifiedFact).where(
-                        VerifiedFact.run_id == run.id,
-                        VerifiedFact.source_task_id == producing_task.id,
+                        VerifiedFact.run_id == run_id,
+                        VerifiedFact.source_task_id == producing_task_id,
                         VerifiedFact.promotion_status == "CANDIDATE",
                     ).order_by(VerifiedFact.created_at))).all())
                     review_result = AgentTaskResultContract(
-                        task_id=review_task.id,
+                        task_id=review_task_id,
                         status=AgentTaskStatus.COMPLETED,
                         evidence_ids=list(result_payload.get("evidence_ids") or []),
                         proposed_next_action={"review": {
@@ -578,20 +593,26 @@ class MultiAgentOrchestrator:
                         state.current_phase = run.current_phase
                 await self._controller_event(
                     session,
-                    run.id,
+                    run_id,
                     "promotion.completed",
                     {
-                        "run_id": run.id,
+                        "run_id": run_id,
                         "source": "ensure_result_review_continuation",
-                        "producing_task_id": producing_task.id,
-                        "result_review_task_id": review_task.id,
+                        "producing_task_id": producing_task_id,
+                        "result_review_task_id": review_task_id,
                         "promoted_fact_ids": promoted,
                         "timestamp": datetime.now(UTC).isoformat(),
                     },
                 )
+                await session.refresh(run)
                 if RunStatus(run.status) == RunStatus.EVALUATING:
                     transition(run, RunStatus.PLANNING)
                 await session.commit()
+                await self._request_controller_continuation(
+                    run,
+                    producing_task_id=producing_task_id,
+                    result_review_task_id=review_task_id,
+                )
         except Exception as error:
             # The main controller owns normal error classification.  This
             # continuation is a recovery path and must not create a second
@@ -602,6 +623,82 @@ class MultiAgentOrchestrator:
                 error,
             )
             return
+
+    async def _request_controller_continuation(
+        self,
+        run: SolveRun,
+        *,
+        producing_task_id: str,
+        result_review_task_id: str,
+    ) -> None:
+        """Re-enter the existing controller scheduler after promotion.
+
+        ResultReview recovery runs independently from the original controller
+        session.  Updating PLANNING alone does not wake the scheduler, so
+        persist a one-shot continuation marker/event and hand the run back to
+        the existing Orchestrator.start entry point.  This deliberately does
+        not call MultiAgentOrchestrator.run recursively.
+        """
+        run_id = run.id
+        async with SessionLocal() as session:
+            current = await session.get(SolveRun, run_id)
+            if current is None or str(current.status) in {
+                RunStatus.COMPLETED_SOLVED.value,
+                RunStatus.COMPLETED_UNSOLVED.value,
+                RunStatus.CANCELLED.value,
+            }:
+                return
+            checkpoint = dict(current.recovery_checkpoint_json or {})
+            if checkpoint.get("controller_continuation_requested_for") == producing_task_id:
+                return
+            checkpoint["controller_continuation_requested_for"] = producing_task_id
+            checkpoint["controller_continuation"] = {
+                "reason": "RESULT_REVIEW_PROMOTED",
+                "producing_task_id": producing_task_id,
+                "result_review_task_id": result_review_task_id,
+                "next_entrypoint": "orchestrator.start",
+            }
+            current.recovery_checkpoint_json = checkpoint
+            await session.commit()
+            await self._controller_event(
+                session,
+                current.id,
+                "solver.continue.requested",
+                {
+                    "run_id": current.id,
+                    "source": "result_review_promotion",
+                    "producing_task_id": producing_task_id,
+                    "result_review_task_id": result_review_task_id,
+                    "next_entrypoint": "orchestrator.start",
+                    "reason": "RESULT_REVIEW_PROMOTED",
+                },
+            )
+            await self._controller_event(
+                session,
+                current.id,
+                "planner.replan.dispatched",
+                {
+                    "run_id": current.id,
+                    "source": "result_review_promotion",
+                    "parent_task_id": result_review_task_id,
+                    "producing_task_id": producing_task_id,
+                    "reason": "RESULT_REVIEW_PROMOTED",
+                    "next_stage_source": "_capability_phase",
+                },
+            )
+        asyncio.create_task(
+            self._dispatch_controller_continuation(run_id),
+            name=f"solver-continuation-{run_id}",
+        )
+
+    async def _dispatch_controller_continuation(self, run_id: str) -> None:
+        """Submit one continuation through the normal orchestrator scheduler."""
+        try:
+            from app.orchestration.orchestrator import orchestrator
+
+            await orchestrator.start(run_id)
+        except Exception:
+            logger.exception("multi_agent.controller.continuation_failed run_id=%s", run_id)
 
     @staticmethod
     def _mysql_boolean_stage(challenge: Challenge, *, current_stage: str, next_agent: str) -> bool:
@@ -2035,6 +2132,12 @@ class MultiAgentOrchestrator:
         emit a second RoleAction for the same ApprovedAction.
         """
         phase_before_dispatch = str(run.current_phase or "")
+        # Freeze identity/lifecycle values before independent-session commits.
+        run_id = run.id
+        task_id = task.id
+        approved_action_id = approved_action.id
+        tool_name = approved_action.tool_name
+        stage = phase_before_dispatch
 
         async def checkpoint(code: str, reason: str) -> AgentTaskResultContract:
             approved_action.status = "REJECTED"
@@ -2116,7 +2219,7 @@ class MultiAgentOrchestrator:
             # shared-session wait from stranding the production task.
             used_separate_dispatch_session = False
             async with SessionLocal() as dispatch_session:
-                dispatch_run = await dispatch_session.get(SolveRun, run.id)
+                dispatch_run = await dispatch_session.get(SolveRun, run_id)
                 dispatch_challenge = await dispatch_session.get(Challenge, challenge.id)
                 if dispatch_run is None or dispatch_challenge is None:
                     # Unit fixtures may intentionally keep the Run in an
@@ -2127,21 +2230,21 @@ class MultiAgentOrchestrator:
                             session, run, challenge, approved_action.tool_name,
                             dict(approved_action.compiled_arguments_json),
                             execution_layer="multi_agent",
-                            logical_tool_call_id=f"mcp:{run.id}:{task.id}:{uuid.uuid4().hex[:12]}",
-                            agent_task_id=task.id, agent_role=task.agent_role,
-                            task_lease_token=task.lease_token, approved_action_id=approved_action.id,
+                            logical_tool_call_id=f"mcp:{run_id}:{task_id}:{uuid.uuid4().hex[:12]}",
+                            agent_task_id=task_id, agent_role=task.agent_role,
+                            task_lease_token=task.lease_token, approved_action_id=approved_action_id,
                         ), timeout=timeout_seconds,
                     )
                 else:
                     used_separate_dispatch_session = True
-                    logical_id = f"mcp:{run.id}:{task.id}:{uuid.uuid4().hex[:12]}"
+                    logical_id = f"mcp:{run_id}:{task_id}:{uuid.uuid4().hex[:12]}"
                     gateway_task = asyncio.create_task(self.tool_invoker(
                         dispatch_session, dispatch_run, dispatch_challenge,
                         approved_action.tool_name, dict(approved_action.compiled_arguments_json),
                         execution_layer="multi_agent",
                         logical_tool_call_id=logical_id,
-                        agent_task_id=task.id, agent_role=task.agent_role,
-                        task_lease_token=task.lease_token, approved_action_id=approved_action.id,
+                        agent_task_id=task_id, agent_role=task.agent_role,
+                        task_lease_token=task.lease_token, approved_action_id=approved_action_id,
                     ))
                     if approved_action.tool_name == "sql_boolean_compare":
                         # Five seconds is the dispatch deadline, not the
@@ -2151,9 +2254,9 @@ class MultiAgentOrchestrator:
                         if not done:
                             async with SessionLocal() as probe_session:
                                 durable_call_id = await probe_session.scalar(select(ToolCall.id).where(
-                                    ToolCall.run_id == run.id,
-                                    ToolCall.agent_task_id == task.id,
-                                    ToolCall.approved_action_id == approved_action.id,
+                                    ToolCall.run_id == run_id,
+                                    ToolCall.agent_task_id == task_id,
+                                    ToolCall.approved_action_id == approved_action_id,
                                 ).order_by(ToolCall.created_at.desc()))
                             if not durable_call_id:
                                 gateway_task.cancel()
@@ -2179,7 +2282,7 @@ class MultiAgentOrchestrator:
                     await session.commit()
             logger.warning(
                 "multi_agent.compiled_dispatch.returned run_id=%s task_id=%s tool=%s",
-                run.id, task.id, approved_action.tool_name,
+                run_id, task_id, tool_name,
             )
         except asyncio.TimeoutError:
             return await checkpoint("COMPILED_ACTION_NOT_DISPATCHED", "The compiled action produced no durable ToolCall before the idle deadline.")
@@ -2200,11 +2303,17 @@ class MultiAgentOrchestrator:
         # a pre-dispatch snapshot or an obsolete MySQL transaction.
         async with SessionLocal() as verify_session:
             calls = list((await verify_session.scalars(
-                select(ToolCall).where(ToolCall.run_id == run.id, ToolCall.agent_task_id == task.id)
+                select(ToolCall).where(ToolCall.run_id == run_id, ToolCall.agent_task_id == task_id)
             )).all())
         if not calls:
             return await checkpoint("COMPILED_ACTION_NOT_DISPATCHED", "The compiled action completed without creating a ToolCall.")
+        completed_calls = [call for call in calls if call.status == "COMPLETED"]
         result_status = str(result.get("result_status") or result.get("status") or "").upper()
+        # A durable completed ToolCall is authoritative for lifecycle
+        # recovery; do not divert it from _complete()/FactReducer because a
+        # gateway wrapper exposed a different result-status field.
+        if completed_calls:
+            result_status = "COMPLETED"
         if result_status not in {"COMPLETED", "SUCCESS"}:
             failure_code = str(result.get("error_code") or "TOOL_FAILURE")
             partial = AgentTaskResultContract(
@@ -2222,7 +2331,7 @@ class MultiAgentOrchestrator:
             )
             await deterministic_controller.complete_task(session, task.id, partial, task.lease_token)
             return partial
-        if not any(call.status == "COMPLETED" for call in calls):
+        if not completed_calls:
             return await checkpoint("COMPILED_ACTION_NOT_DISPATCHED", "The compiled action did not produce a completed ToolCall.")
         # The gateway normally consumes the capability itself.  Keep the
         # lifecycle invariant at the controller boundary as well so test
@@ -2493,6 +2602,13 @@ class MultiAgentOrchestrator:
                 await self._status(session, run, RunStatus.EXECUTING)
                 if approved is None:
                     raise DomainError("PLAN_REVIEW_PERSISTENCE_INCOMPLETE", "Approved PLAN_REVIEW has no ApprovedAction.")
+                # Freeze identifiers before the independent dispatch session
+                # can commit/expire the controller ORM identity map.
+                run_id = run.id
+                attempt_id = attempt.id
+                proposal_id = proposal.id
+                approved_action_id = approved.id
+                exec_task_id = exec_task.id
                 if approved.tool_name == "sql_boolean_compare":
                     await self._controller_event(
                         session,
@@ -2500,10 +2616,10 @@ class MultiAgentOrchestrator:
                         "boolean.action.dispatched",
                         {
                             "run_id": run.id,
-                            "attempt_id": attempt.id,
-                            "task_id": exec_task.id,
-                            "proposal_id": proposal.id,
-                            "approved_action_id": approved.id,
+                            "attempt_id": attempt_id,
+                            "task_id": exec_task_id,
+                            "proposal_id": proposal_id,
+                            "approved_action_id": approved_action_id,
                             "timestamp": datetime.now(UTC).isoformat(),
                         },
                     )
@@ -2520,6 +2636,9 @@ class MultiAgentOrchestrator:
                 # an old transaction snapshot cannot block ResultReview.
                 await session.rollback()
                 await session.refresh(run)
+                await session.refresh(attempt)
+                await session.refresh(proposal)
+                await session.refresh(plan_review)
                 await session.refresh(exec_task)
                 await session.refresh(approved)
                 if exec_result.status in {AgentTaskStatus.FAILED, AgentTaskStatus.PARTIAL}:
@@ -2599,26 +2718,35 @@ class MultiAgentOrchestrator:
                             parent = exec_task.id
                             context = {"replan_reason": "MYSQL_METADATA_EMPTY_RESULT", "metadata_stage": (approved.compiled_arguments_json or {}).get("stage")}
                             continue
+                    failure_status = str(run.status)
+                    failure_code = run.last_error_code
+                    failure_task_count = int(await session.scalar(select(func.count()).select_from(AgentTask).where(AgentTask.run_id == run.id)) or 0)
                     await session.commit()
                     return {
-                        "status": run.status,
-                        "error_code": run.last_error_code,
-                        "agent_tasks": int(await session.scalar(select(func.count()).select_from(AgentTask).where(AgentTask.run_id == run.id)) or 0),
+                        "status": failure_status,
+                        "error_code": failure_code,
+                        "agent_tasks": failure_task_count,
                     }
                 await self._status(session, run, RunStatus.EVALUATING)
                 await self._controller_event(
                     session,
-                    run.id,
+                    run_id,
                     "production.result_context.started",
                     {
-                        "run_id": run.id,
-                        "attempt_id": attempt.id,
-                        "task_id": exec_task.id,
-                        "proposal_id": proposal.id,
-                        "approved_action_id": approved.id,
+                        "run_id": run_id,
+                        "attempt_id": attempt_id,
+                        "task_id": exec_task_id,
+                        "proposal_id": proposal_id,
+                        "approved_action_id": approved_action_id,
                         "timestamp": datetime.now(UTC).isoformat(),
                     },
                 )
+                await session.refresh(run)
+                await session.refresh(attempt)
+                await session.refresh(proposal)
+                await session.refresh(plan_review)
+                await session.refresh(approved)
+                await session.refresh(exec_task)
                 try:
                     result_payload = await asyncio.wait_for(
                         self._result_context(session, run, attempt, proposal, plan_review, approved, exec_task),
@@ -2628,27 +2756,39 @@ class MultiAgentOrchestrator:
                     raise DomainError(
                         "RESULT_CONTEXT_TIMEOUT",
                         "Production Result Context construction exceeded its bounded deadline.",
-                        {"task_id": exec_task.id, "approved_action_id": approved.id},
+                        {"task_id": exec_task_id, "approved_action_id": approved_action_id},
                     ) from error
                 await self._controller_event(
                     session,
-                    run.id,
+                    run_id,
                     "production.result_context.completed",
                     {
-                        "run_id": run.id,
-                        "attempt_id": attempt.id,
-                        "task_id": exec_task.id,
-                        "proposal_id": proposal.id,
-                        "approved_action_id": approved.id,
+                        "run_id": run_id,
+                        "attempt_id": attempt_id,
+                        "task_id": exec_task_id,
+                        "proposal_id": proposal_id,
+                        "approved_action_id": approved_action_id,
                         "tool_call_count": len(result_payload.get("tool_calls") or []),
                         "artifact_count": len(result_payload.get("artifacts") or []),
                         "evidence_count": len(result_payload.get("evidence_ids") or []),
                         "timestamp": datetime.now(UTC).isoformat(),
                     },
                 )
+                await session.refresh(run)
+                await session.refresh(attempt)
+                await session.refresh(proposal)
+                await session.refresh(plan_review)
+                await session.refresh(approved)
+                await session.refresh(exec_task)
                 result_review_task, result_review_token = await self.ensure_result_review_continuation(
                     session, run, exec_task, result_payload
                 )
+                await session.refresh(run)
+                await session.refresh(attempt)
+                await session.refresh(proposal)
+                await session.refresh(plan_review)
+                await session.refresh(approved)
+                await session.refresh(exec_task)
                 result_review = await self._complete(session, run, result_review_task, result_review_token, await self.runtime.execute(session, run, challenge, attempt, result_review_task, result_review_token))
                 result_review_row = await self._review(session, run, proposal, result_review_task, result_review)
                 await self._controller_event(
@@ -2657,9 +2797,9 @@ class MultiAgentOrchestrator:
                     "analysis.result_review.completed",
                     {
                         "run_id": run.id,
-                        "attempt_id": attempt.id,
+                        "attempt_id": attempt_id,
                         "task_id": result_review_task.id,
-                        "proposal_id": proposal.id,
+                        "proposal_id": proposal_id,
                         "analysis_review_id": result_review_row.id,
                         "decision": result_review_row.decision,
                         "timestamp": datetime.now(UTC).isoformat(),
@@ -2676,13 +2816,13 @@ class MultiAgentOrchestrator:
                     promoted = await self._apply_result_review(session, run, exec_task, result_review_row)
                 await self._controller_event(
                     session,
-                    run.id,
+                    run_id,
                     "promotion.completed",
                     {
-                        "run_id": run.id,
-                        "attempt_id": attempt.id,
-                        "task_id": exec_task.id,
-                        "proposal_id": proposal.id,
+                        "run_id": run_id,
+                        "attempt_id": attempt_id,
+                        "task_id": exec_task_id,
+                        "proposal_id": proposal_id,
                         "analysis_review_id": result_review_row.id,
                         "promoted_fact_ids": promoted,
                         "capabilities_added": result_review_row.capabilities_added_json or [],
