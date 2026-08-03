@@ -316,6 +316,31 @@ class RunSupervisor:
             if str(run.status) == "WAITING_USER":
                 return await self._outcome(session, run)
             active_lease = await session.scalar(select(RunExecutionLease).where(RunExecutionLease.run_id == run.id))
+            # A completed Planner task without its proposal/review/action
+            # chain is a controller persistence break, not ordinary lack of
+            # tool progress. Never convert it directly into a WP.
+            last_planner = await session.scalar(select(AgentTask).where(
+                AgentTask.run_id == run.id,
+                AgentTask.agent_role == "PLANNER",
+                AgentTask.status == "COMPLETED",
+            ).order_by(AgentTask.updated_at.desc()))
+            if last_planner is not None and active_lease is None:
+                proposal_for_planner = await session.scalar(select(PlannerProposal).where(PlannerProposal.created_by_task_id == last_planner.id))
+                if proposal_for_planner is None:
+                    run.status = RunStatus.WAITING_USER.value
+                    run.current_phase = "WAITING_USER"
+                    run.last_error_code = "PLANNER_RESULT_NOT_DISPATCHED"
+                    run.last_error_message = "Planner completed but no proposal/review/action was dispatched."
+                    run.recovery_checkpoint_json = {
+                        **(run.recovery_checkpoint_json or {}),
+                        "classification": "PLANNER_RESULT_NOT_DISPATCHED",
+                        "last_planner_task_id": last_planner.id,
+                        "reason": "planner completed but no proposal/review/action was dispatched",
+                        "expected_next": "persist planner proposal and dispatch PLAN_REVIEW",
+                        "safe_retry": True,
+                    }
+                    await session.commit()
+                    return await self._outcome(session, run)
             if active_lease is not None and run_id not in orchestrator.active_tasks and active_lease.owner_instance_id != run_attempt_service.owner_instance_id:
                 return RunOutcome(run.id, str(run.status), str(run.current_phase or ""), "RUN_ALREADY_OWNED")
             counters = dict((run.recovery_checkpoint_json or {}).get("supervisor_counters") or {})

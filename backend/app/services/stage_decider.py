@@ -43,22 +43,22 @@ class StageDecider:
         if "asset_warranty.oracle_calibration_matrix" not in verified_fact_keys or "asset_warranty.mysql_dbms" not in verified_fact_keys:
             return StageDecision("ORACLE_CALIBRATION")
         metadata_order = [
-            ("asset_warranty.mysql_version", "version", False),
-            ("asset_warranty.mysql_version_comment", "version_comment", False),
+            # Essential stages are intentionally evaluated first. Optional
+            # version facts must never hold up database/table/column discovery.
             ("asset_warranty.current_database", "database", True),
             ("asset_warranty.mysql_user_tables", "tables", True),
             ("asset_warranty.mysql_candidate_columns", "columns", True),
+            ("asset_warranty.mysql_version", "version", False),
+            ("asset_warranty.mysql_version_comment", "version_comment", False),
         ]
         progress = metadata_progress or (capability_ledger or {}).get("metadata_progress") or {}
         blocked_essential = []
-        optional_blocked = any(
-            str((progress.get(stage) or {}).get("status") or "").upper() == "BLOCKED"
-            for stage in ("version", "version_comment")
-        )
         for fact_key, metadata_stage, essential in metadata_order:
             if fact_key not in verified_fact_keys:
                 status = str((progress.get(metadata_stage) or {}).get("status") or "PENDING").upper()
-                if not essential and optional_blocked:
+                if not essential:
+                    # Optional diagnostics are best-effort and do not affect
+                    # the essential metadata finish gate.
                     continue
                 if status == "BLOCKED":
                     if essential:

@@ -143,8 +143,6 @@ class MultiAgentOrchestrator:
             if "asset_warranty.oracle_calibration_matrix" not in keys or "asset_warranty.mysql_dbms" not in keys:
                 return "ORACLE_CALIBRATION"
             metadata_required = {
-                "asset_warranty.mysql_version",
-                "asset_warranty.mysql_version_comment",
                 "asset_warranty.current_database",
                 "asset_warranty.mysql_user_tables",
                 "asset_warranty.mysql_candidate_columns",
@@ -218,8 +216,6 @@ class MultiAgentOrchestrator:
             "asset_warranty.invalid_baseline",
             "asset_warranty.mysql_boolean_oracle",
             "asset_warranty.mysql_dbms",
-            "asset_warranty.mysql_version",
-            "asset_warranty.mysql_version_comment",
             "asset_warranty.current_database",
             "asset_warranty.mysql_user_tables",
             "asset_warranty.mysql_candidate_columns",
@@ -445,11 +441,10 @@ class MultiAgentOrchestrator:
             VerifiedFact.run_id == run.id,
             VerifiedFact.promotion_status == "VERIFIED",
         ))).all())
-        if "asset_warranty.mysql_version" not in verified:
-            target, stage = "VERSION()", "version"
-        elif "asset_warranty.mysql_version_comment" not in verified:
-            target, stage = "@@version_comment", "version_comment"
-        elif "asset_warranty.current_database" not in verified:
+        # Version strings are useful diagnostics, but they are optional.  The
+        # asset-warranty chain must always prioritize the essential, bounded
+        # current-database metadata stages.
+        if "asset_warranty.current_database" not in verified:
             target, stage = "DATABASE()", "database"
         elif "asset_warranty.mysql_user_tables" not in verified:
             target, stage = "information_schema.tables", "tables"
@@ -474,12 +469,34 @@ class MultiAgentOrchestrator:
             "stage": stage,
         }
 
+    async def _deterministic_mysql_metadata_proposal(
+        self, session, run: SolveRun, challenge: Challenge, task: AgentTask,
+    ) -> PlannerProposalContract:
+        """Build the safe metadata handoff when Planner output is absent/bad."""
+        plan = await self._mysql_metadata_plan(session, run)
+        return PlannerProposalContract(
+            proposal_id=f"p-mysql-metadata-next-{task.id}", run_id=run.id,
+            current_stage="MYSQL_METADATA_DISCOVERY", next_agent=AgentRole.EXPLOIT,
+            objective=f"Discover MySQL metadata using the verified Web Boolean Oracle for {plan['target_expression']}.",
+            input_fact_ids=[str(plan["oracle_fact_id"])],
+            input_evidence_ids=list(plan["evidence_ids"]),
+            required_capabilities=["mysql_dbms_confirmed", "scalar_subquery_oracle_confirmed"],
+            allowed_tools=["mysql_metadata_discovery"],
+            success_condition=f"Complete bounded MySQL metadata discovery for {plan['target_expression']} within the current-database scope.",
+            budget=TaskBudget(max_logical_calls=1, max_internal_requests=8, max_runtime_seconds=300),
+        )
+
     async def _proposal(self, session, run: SolveRun, challenge: Challenge, task: AgentTask, result: AgentTaskResultContract) -> PlannerProposal:
         raw = (result.proposed_next_action or {}).get("proposal") or {}
         try:
             contract = PlannerProposalContract.model_validate(raw)
         except Exception as error:
-            raise DomainError("MODEL_OUTPUT_SCHEMA_INVALID", f"PlannerProposalContract is invalid: {error}", {"task_id": task.id}) from error
+            if self._asset_warranty_mysql(challenge) and str(run.current_phase or "").upper() == "MYSQL_METADATA_DISCOVERY":
+                await self._controller_event(session, run.id, "planner.proposal.invalid", {"task_id": task.id, "reason": "PLANNER_PROPOSAL_INVALID"})
+                contract = await self._deterministic_mysql_metadata_proposal(session, run, challenge, task)
+                await self._controller_event(session, run.id, "planner.proposal.fallback", {"task_id": task.id, "reason": "PLANNER_PROPOSAL_INVALID", "proposal_id": contract.proposal_id})
+            else:
+                raise DomainError("MODEL_OUTPUT_SCHEMA_INVALID", f"PlannerProposalContract is invalid: {error}", {"task_id": task.id}) from error
         metadata = challenge.metadata_json or {}
         if (
             self._asset_warranty_mysql(challenge)
@@ -599,9 +616,17 @@ class MultiAgentOrchestrator:
         evidence = set((await session.scalars(select(EvidenceLedger.id).where(EvidenceLedger.run_id == run.id, EvidenceLedger.id.in_(contract.input_evidence_ids)))).all()) if contract.input_evidence_ids else set()
         if len(facts) != len(set(contract.input_fact_ids)) or len(evidence) != len(set(contract.input_evidence_ids)):
             raise DomainError("PLANNER_REFERENCE_TYPE_INVALID", "Planner references must use VerifiedFact IDs and EvidenceLedger IDs in separate fields.", {"input_fact_ids": contract.input_fact_ids, "input_evidence_ids": contract.input_evidence_ids})
-        row = PlannerProposal(id=str(uuid.uuid4()), run_id=run.id, proposal_id=contract.proposal_id, current_stage=contract.current_stage, decision_question=contract.decision_question, next_agent=contract.next_agent.value, objective=contract.objective, input_fact_ids_json=contract.input_fact_ids, input_evidence_ids_json=contract.input_evidence_ids, required_capabilities_json=contract.required_capabilities, allowed_tools_json=contract.allowed_tools, budget_json=contract.budget.model_dump(), success_condition=contract.success_condition, stop_conditions_json=contract.stop_conditions, fallback=contract.fallback, created_by_task_id=task.id)
+        proposal_id = contract.proposal_id
+        existing = await session.scalar(select(PlannerProposal).where(PlannerProposal.run_id == run.id, PlannerProposal.proposal_id == proposal_id))
+        if existing is not None:
+            sequence = int(await session.scalar(select(func.count()).select_from(PlannerProposal).where(PlannerProposal.run_id == run.id)) or 0) + 1
+            proposal_id = f"{proposal_id}-{task.retry_count or 0}-{sequence}"
+            contract = contract.model_copy(update={"proposal_id": proposal_id})
+            await self._controller_event(session, run.id, "planner.proposal_id.deduplicated", {"task_id": task.id, "original_proposal_id": existing.proposal_id, "proposal_id": proposal_id})
+        row = PlannerProposal(id=str(uuid.uuid4()), run_id=run.id, proposal_id=proposal_id, current_stage=contract.current_stage, decision_question=contract.decision_question, next_agent=contract.next_agent.value, objective=contract.objective, input_fact_ids_json=contract.input_fact_ids, input_evidence_ids_json=contract.input_evidence_ids, required_capabilities_json=contract.required_capabilities, allowed_tools_json=contract.allowed_tools, budget_json=contract.budget.model_dump(), success_condition=contract.success_condition, stop_conditions_json=contract.stop_conditions, fallback=contract.fallback, created_by_task_id=task.id)
         session.add(row)
         await session.flush()
+        await self._controller_event(session, run.id, "planner.proposal.created", {"task_id": task.id, "proposal_id": row.proposal_id, "proposal_row_id": row.id, "current_stage": row.current_stage})
         return row
 
     async def _validate_controller_result_review(self, session, run: SolveRun, proposal: PlannerProposal, task: AgentTask, contract: AnalysisReviewContract) -> None:
@@ -2071,10 +2096,10 @@ class MultiAgentOrchestrator:
                 await self._phase(session, run, await self._capability_phase(session, run))
                 planner_task, planner_token = await self._task(session, run, AgentRole.PLANNER, AgentTaskKind.PLANNING, "Select the next bounded stage from the current memory snapshot.", [], parent=parent, context=context)
                 planner_result = await self._complete(session, run, planner_task, planner_token, await self.runtime.execute(session, run, challenge, attempt, planner_task, planner_token))
-                if planner_result.status == AgentTaskStatus.FAILED:
-                    run.last_error_code = "MODEL_OUTPUT_SCHEMA_INVALID"
+                if planner_result.status != AgentTaskStatus.COMPLETED:
+                    run.last_error_code = "PLANNER_RESULT_INVALID"
                     run.last_error_message = planner_result.handoff_summary
-                    run.recovery_checkpoint_json = {"classification": "MODEL_OUTPUT_SCHEMA_INVALID", "task_id": planner_task.id}
+                    run.recovery_checkpoint_json = {"classification": "PLANNER_RESULT_INVALID", "task_id": planner_task.id, "safe_retry": True}
                     await self._status(session, run, RunStatus.PAUSED_CHECKPOINT)
                     return {"status": run.status, "error_code": run.last_error_code, "agent_tasks": cycle + 1}
                 proposal = await self._proposal(session, run, challenge, planner_task, planner_result)
@@ -2084,6 +2109,10 @@ class MultiAgentOrchestrator:
                 # PLAN_REVIEW is a mandatory gate for every production role.
                 review_context = {"proposal": {"proposal_id": proposal.proposal_id, "current_stage": proposal.current_stage, "decision_question": proposal.decision_question, "next_agent": proposal.next_agent, "objective": proposal.objective, "allowed_tools": proposal.allowed_tools_json, "success_condition": proposal.success_condition, "stop_conditions": proposal.stop_conditions_json, "budget": proposal.budget_json}, "plan_review": True}
                 plan_task, plan_token = await self._task(session, run, AgentRole.ANALYSIS, AgentTaskKind.PLAN_REVIEW, "Audit this proposal before any production tool call.", [], parent=planner_task.id, context=review_context)
+                await self._controller_event(
+                    session, run.id, "analysis.plan_review.dispatched",
+                    {"task_id": plan_task.id, "parent_task_id": planner_task.id, "proposal_id": proposal.id, "task_kind": AgentTaskKind.PLAN_REVIEW.value},
+                )
                 # Keep the Analysis task RUNNING while its contract is
                 # validated and its durable dispatch chain is written.  The
                 # old order completed the task first, so a failed Review
@@ -2491,8 +2520,6 @@ class MultiAgentOrchestrator:
                     VerifiedFact.promotion_status == "VERIFIED",
                 ))).all())
                 metadata_required = {
-                    "asset_warranty.mysql_version",
-                    "asset_warranty.mysql_version_comment",
                     "asset_warranty.current_database",
                     "asset_warranty.mysql_user_tables",
                     "asset_warranty.mysql_candidate_columns",
@@ -2505,7 +2532,6 @@ class MultiAgentOrchestrator:
                     "required": [
                         "baseline_verified",
                         "database_type_verified",
-                        "version_verified",
                         "current_database_verified",
                         "mysql_metadata_discovered",
                     ],
