@@ -350,7 +350,7 @@ class RunSupervisor:
             if active_lease is not None and run_id not in orchestrator.active_tasks and active_lease.owner_instance_id != run_attempt_service.owner_instance_id:
                 return RunOutcome(run.id, str(run.status), str(run.current_phase or ""), "RUN_ALREADY_OWNED")
             counters = dict((run.recovery_checkpoint_json or {}).get("supervisor_counters") or {})
-            if active_lease is None and int(counters.get("no_progress_count") or 0) >= 1:
+            if active_lease is None and int(counters.get("no_progress_count") or 0) >= 1 and (run.recovery_checkpoint_json or {}).get("resume_reason") != "USER_INPUT_RECEIVED":
                 await run_finalizer.finish_unsolved_with_wp(session, run, "NO_PROGRESS_LOOP")
                 return await self._outcome(session, run)
             challenge = await session.get(Challenge, run.challenge_id)

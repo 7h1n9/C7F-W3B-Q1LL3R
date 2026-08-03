@@ -64,7 +64,10 @@ class SolverStateService:
             if contract_status == "NO_FACT"
             else "FAILED"
         )
-        if contract_status == "NO_FACT" and same_fingerprint_no_fact_count >= 2:
+        # Stage attempts, not payload fingerprints, control metadata
+        # progression. Two NO_FACT results at the same stage block that
+        # stage even when the Runner produced different argument digests.
+        if contract_status == "NO_FACT" and int(previous.get("attempts") or 0) + 1 >= 2:
             stage_status = "BLOCKED"
         entry = {
             **previous,

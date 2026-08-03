@@ -10,6 +10,16 @@ from app.core.config import get_settings
 from app.core.exceptions import DomainError
 
 
+def normalize_runner_job_id(response) -> str | None:
+    """Normalize job identifiers across Runner API versions."""
+    if isinstance(response, str):
+        return response.strip() or None
+    if not isinstance(response, dict):
+        return None
+    value = response.get("runner_job_id") or response.get("job_id") or response.get("task_id")
+    return str(value).strip() if value is not None and str(value).strip() else None
+
+
 class RunnerClient:
     def _headers(self) -> dict[str, str]:
         return {"X-Runner-Token": get_settings().runner_api_token}
@@ -126,7 +136,15 @@ class RunnerClient:
                 f"{self.base_url}/api/v1/jobs", headers=self._headers(), json=payload
             )
             response.raise_for_status()
-            return str(response.json()["job_id"])
+            job_id = normalize_runner_job_id(response.json())
+            if not job_id:
+                raise DomainError(
+                    "RUNNER_JOB_ID_MISSING",
+                    "Runner accepted the dispatch without returning a job identifier.",
+                    stage="RUNNER_DISPATCH",
+                    retryable=True,
+                )
+            return job_id
 
     async def wait_job(
         self,

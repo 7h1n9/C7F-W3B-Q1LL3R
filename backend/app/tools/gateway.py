@@ -35,7 +35,7 @@ from app.services.events import event_service
 from app.services.flags import flag_service
 from app.services.infrastructure import clear_failure, record_failure
 from app.services.run_budget_guard import run_budget_guard
-from app.services.runner_client import runner_client
+from app.services.runner_client import normalize_runner_job_id, runner_client
 from app.services.solver_state import solver_state_service
 from app.services.boolean_oracle_quality import score_boolean_oracle
 from app.services.sql_provenance import validate_sql_expression_provenance
@@ -314,7 +314,7 @@ class ToolGateway:
             tool_name=name,
             arguments_json=_redact_arguments(arguments),
             status="REQUESTED",
-            started_at=datetime.now(UTC),
+            started_at=None,
             logical_tool_call_id=logical_tool_call_id,
             parent_tool_call_id=parent_tool_call_id,
             execution_layer=execution_layer,
@@ -367,14 +367,8 @@ class ToolGateway:
         await event_service.append(
             session, run.id, "tool.requested", {"tool_call_id": call.id, "logical_tool_call_id": call.logical_tool_call_id, "tool": name, "execution_layer": call.execution_layer}
         )
-        call.status = "STARTED"
-        logical.status = "STARTED"
-        await effective_logical_tool_call_service.trace(
-            session, logical, execution_layer=execution_layer, event_type="started", external_id=call.id
-        )
-        await session.commit()
         await event_service.append(
-            session, run.id, "tool.started", {"tool_call_id": call.id, "logical_tool_call_id": call.logical_tool_call_id, "tool": name, "execution_layer": call.execution_layer}
+            session, run.id, "tool.dispatch.requested", {"tool_call_id": call.id, "logical_tool_call_id": call.logical_tool_call_id, "tool": name, "execution_layer": call.execution_layer}
         )
         try:
             # ctfctl can create a bounded scripts/*.py file during a turn.
@@ -385,6 +379,28 @@ class ToolGateway:
                 await runner_client.sync_workspace(run.id, Path(run.workspace_path))
             job_id = await runner_client.create_job(
                 run.id, challenge.allowed_hosts, name, arguments
+            )
+            job_id = normalize_runner_job_id(job_id)
+            if not job_id:
+                raise DomainError(
+                    "RUNNER_JOB_ID_MISSING",
+                    "Runner dispatch returned no job identifier.",
+                    stage="RUNNER_DISPATCH",
+                    retryable=True,
+                )
+            call.runner_job_id = job_id
+            call.started_at = datetime.now(UTC)
+            call.status = "STARTED"
+            logical.status = "STARTED"
+            await effective_logical_tool_call_service.trace(
+                session, logical, execution_layer=execution_layer, event_type="started", external_id=call.id
+            )
+            await session.commit()
+            await event_service.append(
+                session, run.id, "tool.runner.accepted", {"tool_call_id": call.id, "logical_tool_call_id": call.logical_tool_call_id, "tool": name, "runner_job_id": job_id, "execution_layer": call.execution_layer}
+            )
+            await event_service.append(
+                session, run.id, "tool.started", {"tool_call_id": call.id, "logical_tool_call_id": call.logical_tool_call_id, "tool": name, "runner_job_id": job_id, "execution_layer": call.execution_layer}
             )
             try:
                 result = await runner_client.wait_job(
@@ -464,10 +480,13 @@ class ToolGateway:
             if code == "RUNNER_UNAVAILABLE":
                 record_failure(run, code=code, message=result["error"], stage="RUNNER")
             await session.commit()
+            await event_service.append(
+                session, run.id, "tool.dispatch.failed", {"tool_call_id": call.id, "logical_tool_call_id": call.logical_tool_call_id, "tool": name, "error_code": code, "summary": result["summary"]}
+            )
         contract_status = _result_contract_status(result)
         call.status, call.runner_job_id, call.finished_at = (
             ("COMPLETED" if contract_status in _TOOL_EXECUTION_COMPLETED_STATUSES else "FAILED"),
-            result.get("job_id"),
+            normalize_runner_job_id(result) or call.runner_job_id,
             datetime.now(UTC),
         )
         logical.status = call.status

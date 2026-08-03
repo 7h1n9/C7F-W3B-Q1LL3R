@@ -16,6 +16,7 @@ from app.models.solver_state import SolverState
 from app.schemas.multi_agent import AgentTaskStatus
 from app.services.events import event_service
 from app.services.solver_self_review import solver_self_review
+from app.services.user_input_resume_guard import check_user_input_resume
 
 
 TERMINAL_RUN_STATUSES = {
@@ -141,6 +142,20 @@ class RunFinalizer:
         }
 
     async def finish_unsolved_with_wp(self, session, run: SolveRun, reason: str) -> dict:
+        resume_guard = await check_user_input_resume(session, run.id)
+        if not resume_guard.get("ok"):
+            run.status = "WAITING_USER"
+            run.current_phase = "WAITING_USER"
+            run.last_error_code = "USER_INPUT_RESUME_NO_PROGRESS"
+            run.last_error_message = "User input consumed but execution pipeline was not resumed."
+            run.recovery_checkpoint_json = {
+                **(run.recovery_checkpoint_json or {}),
+                "reason": "user input consumed but execution pipeline not resumed",
+                "last_input_id": resume_guard.get("last_input_id"),
+                "expected": resume_guard.get("expected"),
+            }
+            await session.commit()
+            return {"generated": False, "error_code": run.last_error_code, "checkpoint": run.recovery_checkpoint_json}
         review = await solver_self_review.review(session, run)
         if review["status"] == "FAIL":
             run.status = "WAITING_USER"

@@ -26,6 +26,7 @@ OPTIONAL_MISSING_RUNTIME_TOOLS = {
     "exiftool_metadata",
     "oracle_probe_matrix",
     "sqlmap_run",
+    "sandbox_exec",
 }
 
 

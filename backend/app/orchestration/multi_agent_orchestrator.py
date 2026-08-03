@@ -69,6 +69,8 @@ from app.services.run_finalizer import run_finalizer
 from app.services.tool_result_fact_reducer import tool_result_fact_reducer
 from app.services.tool_failure_policy import blocked_failure_for_action, record_tool_failure
 from app.services.payload_strategy import payload_strategy_manager
+from app.services.metadata_stage_decider import metadata_stage_decider
+from app.services.tool_catalog_reconciler import tool_catalog_reconciler
 from app.tools.gateway import tool_gateway
 
 logger = logging.getLogger(__name__)
@@ -271,6 +273,23 @@ class MultiAgentOrchestrator:
                 await self._status(session, run, RunStatus.PLANNING)
                 await session.commit()
                 return False
+            if stage in {"database", "tables", "columns"}:
+                progress = dict((state.capability_ledger_json or {}).get("metadata_progress") or {}) if state else {}
+                decision = metadata_stage_decider.decide(progress)
+                if decision.stage is not None:
+                    checkpoint.update({
+                        "metadata_stage_changed": {"from": stage, "to": decision.stage},
+                        "metadata_next_stage": decision.stage,
+                        "metadata_progress": progress,
+                    })
+                    run.last_error_code = "MYSQL_METADATA_STAGE_BLOCKED"
+                    run.last_error_message = f"Metadata stage {stage} blocked; advancing to {decision.stage}."
+                    run.recovery_checkpoint_json = checkpoint
+                    await self._controller_event(session, run.id, "metadata.stage.changed", {"from": stage, "to": decision.stage, "reason": "NO_FACT_LIMIT_REACHED"})
+                    await self._phase(session, run, "MYSQL_METADATA_DISCOVERY")
+                    await self._status(session, run, RunStatus.PLANNING)
+                    await session.commit()
+                    return False
             run.last_error_code = "MYSQL_METADATA_STAGE_EMPTY_RESULT"
             run.last_error_message = "Tool completed but produced no metadata facts."
             run.recovery_checkpoint_json = {
@@ -453,14 +472,10 @@ class MultiAgentOrchestrator:
             VerifiedFact.run_id == run.id,
             VerifiedFact.promotion_status == "VERIFIED",
         ))).all())
-        # Version strings are useful diagnostics, but they are optional.  The
-        # asset-warranty chain must always prioritize the essential, bounded
-        # current-database metadata stages.
-        if "asset_warranty.current_database" not in verified:
-            target, stage = "DATABASE()", "database"
-        elif "asset_warranty.mysql_user_tables" not in verified:
-            target, stage = "information_schema.tables", "tables"
-        elif "asset_warranty.mysql_candidate_columns" not in verified:
+        state = await solver_state_service.load(session, run.id)
+        progress = dict((state.capability_ledger_json or {}).get("metadata_progress") or {}) if state else {}
+        decision = metadata_stage_decider.decide(progress, verified)
+        if decision.stage == "columns":
             table_fact = await session.scalar(select(VerifiedFact).where(
                 VerifiedFact.run_id == run.id,
                 VerifiedFact.fact_key == "asset_warranty.mysql_user_tables",
@@ -470,9 +485,15 @@ class MultiAgentOrchestrator:
             candidate_table = next((str(item.get("name")) for item in tables if isinstance(item, dict) and item.get("name")), "")
             if not candidate_table:
                 raise DomainError("MYSQL_USER_TABLES_REQUIRED", "Column discovery requires at least one verified current-database user table.")
-            target, stage = "information_schema.columns", "columns"
+        else:
+            candidate_table = ""
+        if decision.stage is not None:
+            target, stage = decision.target_expression, decision.stage
         else:
             target, stage = "information_schema.columns", "columns"
+        # Version strings are useful diagnostics, but they are optional.  The
+        # asset-warranty chain must always prioritize the essential, bounded
+        # current-database metadata stages.
         return {
             "oracle_fact_id": oracle_fact.id,
             "evidence_ids": evidence_ids,
@@ -1800,6 +1821,26 @@ class MultiAgentOrchestrator:
                 handoff_summary=reason[:4000],
             )
             await deterministic_controller.complete_task(session, task.id, result, task.lease_token)
+            return result
+
+        catalog = await tool_catalog_reconciler.reconcile(
+            session, run, challenge, attempt, task, approved_action
+        ) if attempt is not None else None
+        if catalog is not None and catalog.status == "UNSTABLE":
+            result = AgentTaskResultContract(
+                task_id=task.id,
+                status=AgentTaskStatus.FAILED,
+                failure_classification={
+                    "fingerprint": "tool_catalog_unstable",
+                    "classification": catalog.reason or "TOOL_CATALOG_UNSTABLE",
+                    "retryable": False,
+                    "reason": "Runtime tool catalog drift exceeded the per-run reconciliation limit.",
+                    "next_allowed_condition": "repair the runtime catalog and resume after user guidance",
+                },
+                handoff_summary="Runtime tool catalog remained unstable after two refresh/recompile attempts.",
+            )
+            await deterministic_controller.complete_task(session, task.id, result, task.lease_token)
+            await session.commit()
             return result
 
         if approved_action.compile_status != "COMPILED" or not approved_action.compiled_arguments_json:

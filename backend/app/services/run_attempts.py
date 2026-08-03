@@ -71,15 +71,14 @@ class RunAttemptService:
         if leases:
             await session.commit()
 
-    async def recover_stale_execution(self, session: AsyncSession, run: SolveRun, *, stale_after_seconds: int = 600) -> bool:
+    async def recover_stale_execution(self, session: AsyncSession, run: SolveRun, *, stale_after_seconds: int = 300) -> bool:
         """Recover abandoned execution rows without interrupting fresh work."""
         now = utc_now()
         cutoff = now - timedelta(seconds=stale_after_seconds)
         stale_calls = list((await session.scalars(select(ToolCall).where(
             ToolCall.run_id == run.id,
             ToolCall.status.in_(["REQUESTED", "STARTED"]),
-            ToolCall.started_at.is_not(None),
-            ToolCall.started_at < cutoff,
+            ToolCall.created_at < cutoff,
         ))).all())
         running_tasks = list((await session.scalars(select(AgentTask).where(
             AgentTask.run_id == run.id,
@@ -92,9 +91,31 @@ class RunAttemptService:
             RunExecutionLease.expires_at < now,
         ))).all())
         changed = bool(stale_calls or running_tasks or expired_leases)
+        checkpoint = dict(run.recovery_checkpoint_json or {})
+        watchdog = dict(checkpoint.get("tool_dispatch_watchdog") or {})
         for call in stale_calls:
+            attempts = int(watchdog.get(call.id) or 0) + 1
+            watchdog[call.id] = attempts
             call.status = "FAILED"
             call.finished_at = now
+            await event_service.append(session, run.id, "tool.dispatch.failed", {
+                "tool_call_id": call.id,
+                "tool": call.tool_name,
+                "error_code": "TOOL_DISPATCH_TIMEOUT",
+                "attempt": attempts,
+            })
+        if stale_calls:
+            checkpoint["tool_dispatch_watchdog"] = watchdog
+            run.recovery_checkpoint_json = checkpoint
+            if any(int(watchdog.get(call.id) or 0) >= 2 for call in stale_calls):
+                run.status = RunStatus.WAITING_USER.value
+                run.current_phase = "WAITING_USER"
+                run.last_error_code = "TOOL_DISPATCH_TIMEOUT"
+                run.last_error_message = "Runner dispatch remained without a job identifier after one retry."
+                checkpoint["tool_dispatch_watchdog_status"] = "WAITING_USER"
+            else:
+                run.last_error_code = "TOOL_DISPATCH_TIMEOUT"
+                run.last_error_message = "A Runner dispatch timed out before receiving a job identifier; retry is allowed once."
         for task in running_tasks:
             task.status = AgentTaskStatus.NEED_REPLAN.value
             task.lease_expires_at = None
