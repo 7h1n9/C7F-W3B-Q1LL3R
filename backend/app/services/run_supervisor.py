@@ -280,6 +280,12 @@ class RunSupervisor:
             "resume_reason": "USER_INPUT_RECEIVED",
             "blocked_stage": blocked[-1] if blocked else None,
             "suggested_strategy": "try next unblocked metadata stage or alternative bounded extraction",
+            "planner_context": {
+                "user_inputs": list((run.hints_json or {}).get("user_inputs") or [])[-20:],
+                "resume_reason": "USER_INPUT_RECEIVED",
+                "blocked_stage": blocked[-1] if blocked else None,
+                "metadata_progress": progress,
+            },
         })
         run.recovery_checkpoint_json = checkpoint
         await session.commit()
@@ -387,6 +393,10 @@ class RunSupervisor:
                 return await self._outcome(session, run)
             await self._set_stage(session, run, decision.stage)
             next_message = consumed["text"] or (user_message if user_message and _ == 0 else None)
+            checkpoint = dict(run.recovery_checkpoint_json or {})
+            checkpoint["planner_context_consumed"] = True
+            run.recovery_checkpoint_json = checkpoint
+            await session.commit()
             await orchestrator.start(run_id, next_message)
             user_message = None
             await session.rollback()

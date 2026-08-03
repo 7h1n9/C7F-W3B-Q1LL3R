@@ -37,6 +37,7 @@ from app.services.infrastructure import clear_failure, record_failure
 from app.services.run_budget_guard import run_budget_guard
 from app.services.runner_client import runner_client
 from app.services.solver_state import solver_state_service
+from app.services.boolean_oracle_quality import score_boolean_oracle
 from app.services.sql_provenance import validate_sql_expression_provenance
 from app.services.tool_argument_adapter import adapt_arguments
 from app.services.tool_invocation_coordinator import tool_invocation_coordinator
@@ -750,6 +751,16 @@ class ToolGateway:
         if status not in _TOOL_SUCCESS_STATUSES | {"NO_FACT", "CONTRACT_ERROR", "FAILED", "TIMEOUT", "CANCELLED"}:
             status = "FAILED"
         structured = result.get("structured_result") if isinstance(result.get("structured_result"), dict) else result
+        if name == "sql_boolean_compare":
+            quality = score_boolean_oracle(structured)
+            if quality["confidence"] < 0.8 and (structured.get("true_results") or structured.get("false_results") or structured.get("true_profile") or structured.get("false_profile")):
+                status = "LOW_SIGNAL"
+                result["confidence"] = quality["confidence"]
+                result["signal_features"] = quality["signal_features"]
+                result["noise_features"] = quality["noise_features"]
+                result["recommended_strategy"] = quality["recommended_strategy"]
+                result["error_code"] = "LOW_SIGNAL"
+                result["result_status"] = "LOW_SIGNAL"
         facts = dict(structured.get("extracted_facts") or result.get("extracted_facts") or result.get("facts") or {})
         for key in ("status_code", "final_url", "redirect_history", "content_type", "selected_headers", "cookie_names", "body_length", "html_title", "html_comments", "forms", "form_actions", "parameter_names", "links", "script_urls", "json_keys", "suspected_credentials", "suspected_flags", "path", "start_line", "end_line", "content_sha256", "matching_paths", "match_snippets", "line_numbers", "generated_files", "stdout_excerpt", "stderr_excerpt", "network_targets", "runtime_ms", "injectable", "parameter", "technique", "dbms", "databases", "tables", "columns", "dumped_rows", "flag_candidates", "raw_output_path", "sqlmap_extraction_completed"):
             if key in structured and key not in facts:

@@ -7,6 +7,7 @@ from sqlalchemy import select
 
 from app.models.multi_agent import ApprovedAction
 from app.models.solver_state import SolverState
+from app.services.payload_strategy import payload_strategy_manager
 
 
 def tool_failure_fingerprint(tool_name: str, error_code: str, stage: str,
@@ -41,6 +42,17 @@ async def record_tool_failure(session, run, approved: ApprovedAction, error_code
         "compiled_arguments_digest": approved.compiled_arguments_digest,
         "count": int(entry.get("count") or 0) + 1,
     })
+    strategy_entry = payload_strategy_manager.record(
+        checkpoint,
+        tool_name=approved.tool_name,
+        stage=stage,
+        arguments=args,
+        error_code=error_code,
+        confidence=None,
+        result="FAILURE",
+    )
+    entry["payload_family"] = strategy_entry["payload_family"]
+    entry["payload_status"] = strategy_entry["status"]
     counts[fingerprint] = entry
     checkpoint["tool_failure_counts"] = counts
     run.recovery_checkpoint_json = checkpoint

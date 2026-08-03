@@ -68,6 +68,7 @@ from app.services.solver_state import solver_state_service
 from app.services.run_finalizer import run_finalizer
 from app.services.tool_result_fact_reducer import tool_result_fact_reducer
 from app.services.tool_failure_policy import blocked_failure_for_action, record_tool_failure
+from app.services.payload_strategy import payload_strategy_manager
 from app.tools.gateway import tool_gateway
 
 logger = logging.getLogger(__name__)
@@ -259,6 +260,17 @@ class MultiAgentOrchestrator:
                 "database": "DATABASE()", "tables": "information_schema.tables",
                 "columns": "information_schema.columns",
             }[stage]
+            # Optional diagnostic stages are closed locally and must not stop
+            # the essential current-database chain.
+            if stage in {"version", "version_comment"}:
+                checkpoint.update({"metadata_stage_blocked": stage, "metadata_progression": "continue_essential_stage"})
+                run.last_error_code = "MYSQL_METADATA_OPTIONAL_STAGE_BLOCKED"
+                run.last_error_message = "Optional metadata stage was blocked; continuing with essential metadata."
+                run.recovery_checkpoint_json = checkpoint
+                await self._phase(session, run, "MYSQL_METADATA_DISCOVERY")
+                await self._status(session, run, RunStatus.PLANNING)
+                await session.commit()
+                return False
             run.last_error_code = "MYSQL_METADATA_STAGE_EMPTY_RESULT"
             run.last_error_message = "Tool completed but produced no metadata facts."
             run.recovery_checkpoint_json = {
@@ -2226,6 +2238,18 @@ class MultiAgentOrchestrator:
                         or failure_classification == "RESULT_CONTRACT"
                     )
                     failure_entry = await record_tool_failure(session, run, approved, failure_classification or "TOOL_FAILURE")
+                    if outcome == ToolOutcome.LOW_SIGNAL:
+                        run.recovery_checkpoint_json = {
+                            **(run.recovery_checkpoint_json or {}),
+                            "last_boolean_quality": classification_payload,
+                            "choose_new_payload_family": True,
+                            "replan_reason": "BOOLEAN_LOW_SIGNAL",
+                        }
+                        parent = exec_task.id
+                        context = {"replan_reason": "BOOLEAN_LOW_SIGNAL", "choose_new_payload_family": True, "payload_strategy_history": (run.recovery_checkpoint_json or {}).get("payload_strategy_history") or []}
+                        await self._status(session, run, RunStatus.PLANNING)
+                        await session.commit()
+                        continue
                     if metadata_contract_error:
                         run.last_error_code = failure_classification or "MYSQL_METADATA_CONTRACT_ERROR"
                         run.last_error_message = "The Runner returned a metadata contract error; repair the Runner before retrying."
@@ -2244,18 +2268,34 @@ class MultiAgentOrchestrator:
                         await session.commit()
                         return {"status": run.status, "error_code": run.last_error_code, "runner_contract_error": True}
                     if failure_entry["count"] >= 2 and not metadata_empty:
-                        run.last_error_code = failure_classification or "TOOL_FAILURE_REPEATED"
-                        run.last_error_message = "The same tool and arguments failed twice; further identical execution is blocked."
+                        # Block only this exact payload/family. Continue the
+                        # same Run while another bounded family is available.
+                        parent = exec_task.id
+                        context = {
+                            "replan_reason": "PAYLOAD_STRATEGY_BLOCKED",
+                            "blocked_payload": failure_entry,
+                            "payload_strategy_history": (run.recovery_checkpoint_json or {}).get("payload_strategy_history") or [],
+                            "choose_new_payload_family": True,
+                        }
                         run.recovery_checkpoint_json = {
                             **(run.recovery_checkpoint_json or {}),
-                            "current_phase": run.current_phase,
-                            "repeated_failure": failure_entry,
-                            "question": "The same tool and arguments failed twice. Fix the tool/target or choose another strategy.",
-                            "options": ["retry_after_fix", "finish_unsolved_wp", "try_alternative_strategy"],
+                            "choose_new_payload_family": True,
+                            "blocked_payload": failure_entry,
                         }
+                        if payload_strategy_manager.has_unexhausted_family(
+                            run.recovery_checkpoint_json or {},
+                            tool_name=approved.tool_name,
+                            stage=str((approved.compiled_arguments_json or {}).get("stage") or run.current_phase or ""),
+                        ):
+                            await self._status(session, run, RunStatus.PLANNING)
+                            await session.commit()
+                            continue
+                        run.last_error_code = failure_classification or "PAYLOAD_STRATEGIES_EXHAUSTED"
+                        run.last_error_message = "All payload families for the current bounded experiment are exhausted."
+                        run.recovery_checkpoint_json = {**(run.recovery_checkpoint_json or {}), "current_phase": run.current_phase, "repeated_failure": failure_entry, "payload_strategies_exhausted": True, "context": context}
                         await self._status(session, run, RunStatus.WAITING_USER)
                         await session.commit()
-                        return {"status": run.status, "error_code": run.last_error_code, "repeated_failure": True}
+                        return {"status": run.status, "error_code": run.last_error_code, "payload_strategies_exhausted": True}
                     if approved.tool_name == "mysql_metadata_discovery" and metadata_empty:
                         paused = await self._handle_mysql_metadata_empty_result(session, run, challenge, approved, exec_task)
                         if not paused:
@@ -2439,7 +2479,9 @@ class MultiAgentOrchestrator:
                                 arguments = json.loads(arguments)
                         if isinstance(arguments, dict) and arguments.get("test_field"):
                             tested_fields.add(str(arguments["test_field"]))
-                    if self._asset_warranty_mysql(challenge) and declared_fields and declared_fields <= tested_fields:
+                    if self._asset_warranty_mysql(challenge) and declared_fields and declared_fields <= tested_fields and not payload_strategy_manager.has_unexhausted_family(
+                        run.recovery_checkpoint_json or {}, tool_name="sql_boolean_compare", stage="BOOLEAN_ORACLE"
+                    ):
                         run.last_error_code = "MYSQL_PREDICATE_NOT_CONFIRMED"
                         run.last_error_message = "All declared business fields produced no stable TRUE/FALSE Boolean Oracle differential."
                         run.recovery_checkpoint_json = {

@@ -17,6 +17,7 @@ from sqlalchemy import select
 from app.models.challenge import Challenge
 from app.models.multi_agent import AgentTask
 from app.models.run import Artifact, Observation, SolveRun, ToolCall
+from app.services.boolean_oracle_quality import score_boolean_oracle
 
 
 class ToolResultFactReducer:
@@ -170,8 +171,9 @@ class ToolResultFactReducer:
             true_signature = extracted.get("true_signature") or structured.get("true_signature") or (true_rows[0].get("signature") if true_rows and isinstance(true_rows[0], dict) else None)
             false_signature = extracted.get("false_signature") or structured.get("false_signature") or (false_rows[0].get("signature") if false_rows and isinstance(false_rows[0], dict) else None)
             differential = structured.get("true_false_differential", extracted.get("differential"))
+            quality = score_boolean_oracle({**structured, "true_signature": true_signature, "false_signature": false_signature, "true_false_differential": differential})
             confirmed = bool(structured.get("boolean_oracle_confirmed") is True or differential is True or (true_signature is not None and false_signature is not None))
-            if confirmed:
+            if confirmed and quality["confidence"] >= 0.8:
                 args = call.arguments_json or {}
                 repeat_stability = {
                     "true": structured.get("stable_true"),
@@ -202,8 +204,9 @@ class ToolResultFactReducer:
                         "response_differential": differential,
                         "request_contract": args.get("request") or {},
                         "oracle": args.get("oracle") or {},
+                        **quality,
                     },
-                    "confidence": 95,
+                    "confidence": round(quality["confidence"] * 100),
                 })
         if call.tool_name == "mysql_metadata_discovery":
             tables = extracted.get("tables") or structured.get("tables") or []

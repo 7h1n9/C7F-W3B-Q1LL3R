@@ -15,6 +15,7 @@ from app.models.run import RunAttempt, RunExecutionLease, RunUserInput, SolveRun
 from app.models.solver_state import SolverState
 from app.schemas.multi_agent import AgentTaskStatus
 from app.services.events import event_service
+from app.services.solver_self_review import solver_self_review
 
 
 TERMINAL_RUN_STATUSES = {
@@ -95,6 +96,7 @@ class RunFinalizer:
             if item.get("tool_name")
         })
         next_steps = ["Inspect the failed stage output and Runner capability.", "Resume after correcting the input or extraction strategy."]
+        strategy_history = list(checkpoint.get("payload_strategy_history") or (ledger.get("payload_strategy_history") or []))
         return {
             "generated": True,
             "challenge": {"id": run.challenge_id, "name": challenge.name if challenge else ""},
@@ -133,9 +135,21 @@ class RunFinalizer:
             "checkpoint_details": checkpoint,
             "next_manual_steps": next_steps,
             "next_steps": next_steps,
+            "attempted_payloads": strategy_history,
+            "remaining_possible_paths": ["untried payload family", "repair Runner contract", "resume after user guidance"],
+            "failure_reasons": failure_history or [reason],
         }
 
     async def finish_unsolved_with_wp(self, session, run: SolveRun, reason: str) -> dict:
+        review = await solver_self_review.review(session, run)
+        if review["status"] == "FAIL":
+            run.status = "WAITING_USER"
+            run.current_phase = "WAITING_USER"
+            run.last_error_code = "SOLVER_SELF_REVIEW_FAILED"
+            run.last_error_message = "; ".join(review["reasons"])
+            run.recovery_checkpoint_json = {**(run.recovery_checkpoint_json or {}), "self_review": review, "question": "The solver still has an executable strategy; provide guidance or allow continuation."}
+            await session.commit()
+            return {"generated": False, "self_review": review}
         wp = await self.build_wp(session, run, reason)
         run.status = "COMPLETED_UNSOLVED"
         run.current_phase = "REPORTING"
@@ -169,6 +183,9 @@ class RunFinalizer:
                     "failed_tools",
                     "user_inputs",
                     "next_steps",
+                    "attempted_payloads",
+                    "failure_reasons",
+                    "remaining_possible_paths",
                 }
                 if not existing_wp or required_wp_fields - set(existing_wp):
                     rebuilt_wp = await self.build_wp(session, run, str(run.last_error_code or "COMPLETED_UNSOLVED"))

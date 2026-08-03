@@ -12,6 +12,7 @@ from typing import Any
 class ToolOutcome(str, Enum):
     SUCCESS = "SUCCESS"
     NO_FACT = "NO_FACT"
+    LOW_SIGNAL = "LOW_SIGNAL"
     RETRYABLE_ERROR = "RETRYABLE_ERROR"
     CONTRACT_ERROR = "CONTRACT_ERROR"
     TERMINAL_FAILURE = "TERMINAL_FAILURE"
@@ -43,9 +44,14 @@ def classify_tool_outcome(result: Any) -> ToolOutcome:
         return ToolOutcome.CONTRACT_ERROR
     if status == "NO_FACT" or error_code in {"MYSQL_METADATA_EMPTY_RESULT", "MYSQL_METADATA_STAGE_EMPTY_RESULT"}:
         return ToolOutcome.NO_FACT
+    confidence = _value(result, "confidence", None)
+    if status == "LOW_SIGNAL" or (isinstance(confidence, (int, float)) and float(confidence) < 0.8 and _value(result, "signal_features", None) is not None):
+        return ToolOutcome.LOW_SIGNAL
     if status in {"TIMEOUT", "CANCELLED"} or _value(result, "retryable", False) or any(token in error for token in ("timeout", "timed out", "network", "connection")) or error_code in {"RUNNER_UNAVAILABLE", "RUNNER_JOB_FAILED", "TOOL_RESULT_DELIVERY_FAILED"}:
         return ToolOutcome.RETRYABLE_ERROR
-    return ToolOutcome.TERMINAL_FAILURE
+    # Unknown execution failures are environmental/infrastructure failures
+    # until the Runner supplies a more specific contract classification.
+    return ToolOutcome.INFRA_ERROR
 
 
 class ToolOutcomeClassifier:
