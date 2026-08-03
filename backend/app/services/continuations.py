@@ -63,6 +63,30 @@ class ContinuationService:
                 raise
         return item
 
+    async def request_committed(
+        self,
+        run_id: str,
+        *,
+        kind: str,
+        dedupe_key: str,
+        payload: dict | None = None,
+        attempt_id: str | None = None,
+    ) -> dict:
+        """Create and commit a continuation outside the caller transaction."""
+        from app.core.database import SessionLocal
+
+        async with SessionLocal() as session:
+            item = await self.request(
+                session,
+                run_id,
+                kind=kind,
+                dedupe_key=dedupe_key,
+                payload=payload,
+                attempt_id=attempt_id,
+            )
+            await session.commit()
+            return {"id": item.id, "run_id": item.run_id, "status": item.status}
+
     async def recover_stale(self, session, *, stale_after_seconds: int = 300) -> int:
         cutoff = utc_now() - timedelta(seconds=stale_after_seconds)
         rows = list((await session.scalars(select(RunContinuation).where(

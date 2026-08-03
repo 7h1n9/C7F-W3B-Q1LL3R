@@ -414,8 +414,10 @@ class MultiAgentOrchestrator:
             # Persist the ResultReview wakeup before returning. The Supervisor
             # will claim it after the surrounding transaction commits, so a
             # process restart cannot orphan the candidate fact.
-            await continuation_service.request(
-                session,
+            # This is deliberately a separate transaction. The controller
+            # resets its orchestration session after production dispatch; the
+            # ResultReview wakeup must survive that rollback.
+            await continuation_service.request_committed(
                 run.id,
                 kind="RESULT_REVIEW_PENDING",
                 dedupe_key=f"RESULT_REVIEW_PENDING:{task.id}",
