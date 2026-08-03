@@ -99,9 +99,12 @@ async def lifespan(_: FastAPI):
                             if current and await run_supervisor.has_unfinished_user_input(recovery_session, current):
                                 await run_supervisor.enqueue(current.id, reason="USER_INPUT_CONSUMED")
                     else:
-                        await run_supervisor.run_background(paused_run.id)
+                        await run_supervisor.enqueue(paused_run.id, reason="CHECKPOINT_RECOVERY")
 
     await run_supervisor.start_worker()
+    # Requeue persisted work after a process restart before accepting new
+    # in-memory wakeups.
+    await run_supervisor.recover_pending_continuations()
     cleanup_task = asyncio.create_task(cleanup_loop())
     supervisor_task = asyncio.create_task(supervisor_loop())
     try:

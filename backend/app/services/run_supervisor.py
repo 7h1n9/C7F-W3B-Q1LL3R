@@ -20,6 +20,8 @@ from app.services.supervisor_progress import supervisor_progress_evaluator
 from app.services.user_input_consumer import consume_user_inputs
 from app.services.writeup_builder import writeup_builder
 from app.services.events import event_service
+from app.services.continuations import continuation_service
+from app.core.database import SessionLocal
 
 
 USER_VISIBLE_TERMINAL = {"WAITING_USER", "COMPLETED_SOLVED", "COMPLETED_UNSOLVED", "CANCELLED"}
@@ -43,7 +45,7 @@ class RunOutcome:
 class RunSupervisor:
     def __init__(self) -> None:
         self.run_supervisor_lock: dict[str, asyncio.Lock] = {}
-        self._wake_queue: asyncio.Queue[tuple[str, str]] | None = None
+        self._wake_queue: asyncio.Queue[tuple[str, str, str | None]] | None = None
         self._worker_task: asyncio.Task | None = None
         self._queued_runs: set[str] = set()
 
@@ -67,9 +69,68 @@ class RunSupervisor:
         await self.start_worker()
         if run_id in self._queued_runs:
             return
+        continuation_id: str | None = None
+        try:
+            async with SessionLocal() as session:
+                kind = "USER_INPUT" if reason in {"USER_INPUT_RECEIVED", "USER_INPUT_CONSUMED"} else "CHECKPOINT_RECOVERY"
+                current = await session.get(SolveRun, run_id)
+                revision = int(current.context_revision or 0) if current is not None else 0
+                phase = str(current.current_phase or "") if current is not None else ""
+                item = await continuation_service.request(
+                    session,
+                    run_id,
+                    kind=kind,
+                    dedupe_key=f"{kind}:{run_id}:{revision}:{phase}",
+                    payload={"reason": reason, "context_revision": revision, "phase": phase},
+                )
+                await session.commit()
+                continuation_id = item.id
+        except Exception:
+            # Compatibility during migration rollout and for isolated tests.
+            logger.exception("Continuation persistence unavailable run_id=%s reason=%s", run_id, reason)
         self._queued_runs.add(run_id)
         assert self._wake_queue is not None
-        await self._wake_queue.put((run_id, reason))
+        await self._wake_queue.put((run_id, reason, continuation_id))
+
+    async def enqueue_continuation(self, continuation_id: str, run_id: str) -> None:
+        await self.start_worker()
+        if run_id in self._queued_runs:
+            return
+        self._queued_runs.add(run_id)
+        assert self._wake_queue is not None
+        await self._wake_queue.put((run_id, "PERSISTED_CONTINUATION", continuation_id))
+
+    async def recover_pending_continuations(self) -> int:
+        async with SessionLocal() as session:
+            await continuation_service.recover_stale(session)
+            rows = await continuation_service.pending(session)
+        for item in rows:
+            await self.enqueue_continuation(item.id, item.run_id)
+        return len(rows)
+
+    async def _execute_continuation(self, continuation_id: str) -> None:
+        async with SessionLocal() as session:
+            item = await continuation_service.claim(session, continuation_id)
+            if item is None:
+                return
+            try:
+                if item.kind == "RESULT_REVIEW_PENDING":
+                    from app.orchestration.multi_agent_orchestrator import multi_agent_orchestrator
+
+                    await multi_agent_orchestrator._resume_result_review(
+                        str((item.payload_json or {}).get("producing_task_id") or "")
+                    )
+                elif item.kind == "USER_INPUT":
+                    await self.continue_after_user_input(session, item.run_id)
+                else:
+                    from app.orchestration.orchestrator import orchestrator
+
+                    await orchestrator.start(item.run_id, (item.payload_json or {}).get("user_message"))
+                await continuation_service.complete(session, continuation_id)
+            except Exception as error:
+                logger.exception("Durable continuation failed id=%s run_id=%s", continuation_id, item.run_id)
+                await session.rollback()
+                await continuation_service.fail(session, continuation_id, error)
 
     def _release_run_lock(self, run_id: str, lock: asyncio.Lock) -> None:
         lock.release()
@@ -79,10 +140,12 @@ class RunSupervisor:
     async def _worker_loop(self) -> None:
         assert self._wake_queue is not None
         while True:
-            run_id, reason = await self._wake_queue.get()
+            run_id, reason, continuation_id = await self._wake_queue.get()
             self._queued_runs.discard(run_id)
             try:
-                if reason in {"USER_INPUT_RECEIVED", "USER_INPUT_CONSUMED"}:
+                if continuation_id is not None:
+                    await self._execute_continuation(continuation_id)
+                elif reason in {"USER_INPUT_RECEIVED", "USER_INPUT_CONSUMED"}:
                     await self.run_after_user_input_background(run_id)
                 else:
                     await self.run_background(run_id)

@@ -73,6 +73,7 @@ from app.services.payload_strategy import payload_strategy_manager
 from app.services.metadata_stage_decider import metadata_stage_decider
 from app.services.tool_catalog_reconciler import tool_catalog_reconciler
 from app.services.experiment_strategy_manager import experiment_strategy_manager
+from app.services.continuations import continuation_service
 from app.tools.gateway import tool_gateway
 
 logger = logging.getLogger(__name__)
@@ -410,10 +411,16 @@ class MultiAgentOrchestrator:
             result.status == AgentTaskStatus.COMPLETED
             and task.task_kind in {AgentTaskKind.RECON.value, AgentTaskKind.EXPLOIT.value, AgentTaskKind.VERIFY.value}
         ):
-            # The production task is now durable.  Continue ResultReview on
-            # an independent session so a controller-session boundary cannot
-            # leave its candidate fact orphaned.
-            asyncio.create_task(self._resume_result_review(task.id))
+            # Persist the ResultReview wakeup before returning. The Supervisor
+            # will claim it after the surrounding transaction commits, so a
+            # process restart cannot orphan the candidate fact.
+            await continuation_service.request(
+                session,
+                run.id,
+                kind="RESULT_REVIEW_PENDING",
+                dedupe_key=f"RESULT_REVIEW_PENDING:{task.id}",
+                payload={"producing_task_id": task.id},
+            )
         return result
 
     async def ensure_result_review_continuation(
@@ -614,15 +621,16 @@ class MultiAgentOrchestrator:
                     result_review_task_id=review_task_id,
                 )
         except Exception as error:
-            # The main controller owns normal error classification.  This
-            # continuation is a recovery path and must not create a second
-            # terminal transition if its bounded repair cannot complete.
+            # The durable Continuation owner must observe the failure and mark
+            # the continuation FAILED. The main controller still owns normal
+            # error classification; this path only reports the lifecycle
+            # failure instead of silently losing the wakeup.
             logger.exception(
                 "multi_agent.result_review.continuation_failed task_id=%s error=%s",
                 producing_task_id,
                 error,
             )
-            return
+            raise
 
     async def _request_controller_continuation(
         self,
@@ -640,6 +648,7 @@ class MultiAgentOrchestrator:
         not call MultiAgentOrchestrator.run recursively.
         """
         run_id = run.id
+        continuation_id: str | None = None
         async with SessionLocal() as session:
             current = await session.get(SolveRun, run_id)
             if current is None or str(current.status) in {
@@ -659,6 +668,18 @@ class MultiAgentOrchestrator:
                 "next_entrypoint": "orchestrator.start",
             }
             current.recovery_checkpoint_json = checkpoint
+            continuation = await continuation_service.request(
+                session,
+                run_id,
+                kind="RESULT_REVIEW_PROMOTION",
+                dedupe_key=f"RESULT_REVIEW_PROMOTION:{producing_task_id}",
+                payload={
+                    "source": "result_review_promotion",
+                    "producing_task_id": producing_task_id,
+                    "result_review_task_id": result_review_task_id,
+                },
+            )
+            continuation_id = continuation.id
             await session.commit()
             await self._controller_event(
                 session,
@@ -686,19 +707,10 @@ class MultiAgentOrchestrator:
                     "next_stage_source": "_capability_phase",
                 },
             )
-        asyncio.create_task(
-            self._dispatch_controller_continuation(run_id),
-            name=f"solver-continuation-{run_id}",
-        )
+        if continuation_id is not None:
+            from app.services.run_supervisor import run_supervisor
 
-    async def _dispatch_controller_continuation(self, run_id: str) -> None:
-        """Submit one continuation through the normal orchestrator scheduler."""
-        try:
-            from app.orchestration.orchestrator import orchestrator
-
-            await orchestrator.start(run_id)
-        except Exception:
-            logger.exception("multi_agent.controller.continuation_failed run_id=%s", run_id)
+            await run_supervisor.enqueue_continuation(continuation_id, run_id)
 
     @staticmethod
     def _mysql_boolean_stage(challenge: Challenge, *, current_stage: str, next_agent: str) -> bool:

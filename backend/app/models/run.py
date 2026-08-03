@@ -185,6 +185,27 @@ class RunAttempt(UUIDTimestampMixin, Base):
     )
 
 
+class RunContinuation(UUIDTimestampMixin, Base):
+    """Durable request to re-enter the run controller after a boundary."""
+
+    __tablename__ = "run_continuations"
+    __table_args__ = (UniqueConstraint("run_id", "dedupe_key", name="uq_run_continuation_dedupe"),)
+
+    run_id: Mapped[str] = mapped_column(ForeignKey("solve_runs.id"), nullable=False, index=True)
+    attempt_id: Mapped[str | None] = mapped_column(ForeignKey("run_attempts.id"), index=True)
+    kind: Mapped[str] = mapped_column(String(40), nullable=False, index=True)
+    dedupe_key: Mapped[str] = mapped_column(String(255), nullable=False)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="PENDING", index=True)
+    payload_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    owner_instance_id: Mapped[str | None] = mapped_column(String(120))
+    claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    available_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC), nullable=False)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    last_error_code: Mapped[str | None] = mapped_column(String(100))
+    last_error_message: Mapped[str | None] = mapped_column(Text)
+
+
 class AttemptToolManifest(UUIDTimestampMixin, Base):
     """Effective tool catalog captured for one Attempt.
 
