@@ -164,32 +164,10 @@ class RunnerClient:
             payload = dict(result.get("result") or {})
             return {**payload, "job_id": result.get("job_id"), "status": payload.get("status") or result["status"], "job_status": result["status"], "error": result.get("error")}
 
-        async with httpx.AsyncClient(timeout=None, trust_env=True) as client:
-            try:
-                async with client.stream(
-                    "GET", f"{self.base_url}/api/v1/jobs/{job_id}/events", headers=self._headers()
-                ) as response:
-                    self._raise_response(response, stage="RUNNER_EVENTS")
-                    async for line in response.aiter_lines():
-                        if time.monotonic() >= deadline:
-                            break
-                        if not line.startswith("data:"):
-                            continue
-                        try:
-                            status_payload = json.loads(line[5:].strip())
-                        except json.JSONDecodeError:
-                            continue
-                        if status_payload.get("status") in {"COMPLETED", "FAILED", "CANCELLED"}:
-                            current = await client.get(f"{self.base_url}/api/v1/jobs/{job_id}", headers=self._headers())
-                            self._raise_response(current, stage="RUNNER_EVENTS")
-                            done = terminal(current.json())
-                            if done:
-                                return done
-            except (httpx.HTTPError, DomainError):
-                # A Runner version may not expose SSE. Polling remains bounded
-                # by the same dynamic deadline and preserves the raw result.
-                pass
-
+        async with httpx.AsyncClient(timeout=15, trust_env=True) as client:
+            # Poll the authoritative job record first.  The SSE endpoint may
+            # keep its connection open after the job is terminal, which used
+            # to prevent this method from ever reaching result collection.
             while time.monotonic() < deadline:
                 try:
                     response = await client.get(f"{self.base_url}/api/v1/jobs/{job_id}", headers=self._headers())

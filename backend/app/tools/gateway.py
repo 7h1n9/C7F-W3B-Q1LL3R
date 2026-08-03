@@ -94,6 +94,38 @@ def _redact_arguments(value):
 
 
 class ToolGateway:
+    async def _result_collection_failed(self, session, run, call, logical, name: str, error: Exception) -> dict:
+        """Close a completed Runner job when local result persistence fails."""
+        await session.rollback()
+        stored_call = await session.get(ToolCall, call.id)
+        stored_logical = await session.get(type(logical), logical.id)
+        stored_run = await session.get(SolveRun, run.id)
+        now = datetime.now(UTC)
+        if stored_call is not None:
+            stored_call.status = "FAILED"
+            stored_call.finished_at = now
+        if stored_logical is not None:
+            stored_logical.status = "FAILED"
+            stored_logical.finished_at = now
+        if stored_run is not None:
+            stored_run.last_error_code = "RESULT_COLLECTION_FAILED"
+            stored_run.last_error_message = str(error)[:4000]
+        await session.commit()
+        await event_service.append(session, run.id, "tool.result.collect.failed", {
+            "tool_call_id": call.id,
+            "logical_tool_call_id": logical.logical_tool_call_id if hasattr(logical, "logical_tool_call_id") else logical.id,
+            "tool": name,
+            "error_code": "RESULT_COLLECTION_FAILED",
+            "summary": str(error)[:1000],
+        })
+        await event_service.append(session, run.id, "tool.failed", {
+            "tool_call_id": call.id,
+            "logical_tool_call_id": logical.logical_tool_call_id if hasattr(logical, "logical_tool_call_id") else logical.id,
+            "tool": name,
+            "error_code": "RESULT_COLLECTION_FAILED",
+        })
+        return {"status": "FAILED", "result_status": "FAILED", "error_code": "RESULT_COLLECTION_FAILED", "summary": "Runner completed but local result collection failed.", "error": str(error)}
+
     async def _validate_sql_sources(self, session: AsyncSession, run: SolveRun, arguments: dict) -> None:
         """Resolve provenance IDs to this Run's durable records."""
         evidence_ids = {str(item) for item in arguments.get("supporting_evidence_ids") or []}
@@ -411,6 +443,18 @@ class ToolGateway:
                 if "tool_timeout_seconds" not in str(error):
                     raise
                 result = await runner_client.wait_job(job_id)
+            job_status = str(result.get("job_status") or result.get("status") or "").upper()
+            if job_status == "COMPLETED" or _result_contract_status(result) in _TOOL_SUCCESS_STATUSES:
+                await event_service.append(
+                    session, run.id, "tool.runner.completed", {"tool_call_id": call.id, "logical_tool_call_id": call.logical_tool_call_id, "tool": name, "runner_job_id": job_id, "job_status": job_status or "COMPLETED"}
+                )
+                await event_service.append(
+                    session, run.id, "tool.result.collected", {"tool_call_id": call.id, "logical_tool_call_id": call.logical_tool_call_id, "tool": name, "runner_job_id": job_id, "result_status": _result_contract_status(result), "artifact_path": result.get("artifact_path")}
+                )
+            elif result.get("error_code"):
+                await event_service.append(
+                    session, run.id, "tool.result.collect.failed", {"tool_call_id": call.id, "logical_tool_call_id": call.logical_tool_call_id, "tool": name, "runner_job_id": job_id, "error_code": result.get("error_code"), "summary": result.get("summary")}
+                )
             contract_status = _result_contract_status(result)
             # Compatibility path for a pre-contract Runner: an empty
             # COMPLETED metadata response is a durable NO_FACT outcome, not a
@@ -426,8 +470,13 @@ class ToolGateway:
                     "tool_execution_completed": True,
                     "retryable": True,
                 }
-            with contextlib.suppress(Exception):
-                await workspace_sync_service.sync_from_runner(run.id, Path(run.workspace_path))
+            # HTTP/SQL jobs already return an explicit artifact_path.  A full
+            # workspace manifest sync here can enumerate unrelated files and
+            # delay result persistence after the Runner is already complete.
+            # Workspace reconciliation remains necessary for file/script tools.
+            if name in {"file_read", "python_run", "script_run", "sandbox_exec"}:
+                with contextlib.suppress(Exception):
+                    await workspace_sync_service.sync_from_runner(run.id, Path(run.workspace_path))
             if _result_contract_status(result) not in _TOOL_SUCCESS_STATUSES and not result.get("error_code"):
                 error_text = str(result.get("error") or result.get("summary") or "").lower()
                 if "not found" in error_text or "does not exist" in error_text:
@@ -539,24 +588,36 @@ class ToolGateway:
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
             size, checksum = target.stat().st_size, hashlib.sha256(target.read_bytes()).hexdigest()
-        if artifact is None and name != "file_read":
-            artifact = Artifact(
-                run_id=run.id,
-                tool_call_id=call.id,
-                artifact_type="tool_output",
-                file_path=relative.replace("\\", "/"),
-                size=size,
-                sha256=checksum,
-                summary=str(result.get("summary", ""))[:1000],
-            )
-            session.add(artifact)
-            await session.flush()
-            artifact_event_payload = {
-                "artifact_id": artifact.id,
-                "path": artifact.file_path,
-                "size": artifact.size,
-                "sha256": artifact.sha256,
-            }
+        try:
+            if artifact is None and name != "file_read":
+                artifact = Artifact(
+                    run_id=run.id,
+                    tool_call_id=call.id,
+                    artifact_type="tool_output",
+                    file_path=relative.replace("\\", "/"),
+                    size=size,
+                    sha256=checksum,
+                    summary=str(result.get("summary", ""))[:1000],
+                )
+                session.add(artifact)
+                await session.flush()
+                artifact_event_payload = {
+                    "artifact_id": artifact.id,
+                    "path": artifact.file_path,
+                    "size": artifact.size,
+                    "sha256": artifact.sha256,
+                }
+            # Commit the ToolCall and Artifact before optional reducers or
+            # evidence processing can fail.
+            call.status = "COMPLETED" if contract_status in _TOOL_EXECUTION_COMPLETED_STATUSES else "FAILED"
+            call.finished_at = datetime.now(UTC)
+            logical.status = call.status
+            logical.finished_at = call.finished_at
+            await session.commit()
+            if artifact_event_payload:
+                await event_service.append(session, run.id, "tool.artifact.created", {**artifact_event_payload, "tool_call_id": call.id, "tool": name})
+        except Exception as error:
+            return await self._result_collection_failed(session, run, call, logical, name, error)
         if name == "script_run" and artifact is not None:
             provenance = arguments.get("assumption_provenance") or []
             level = assistance_level(provenance)
@@ -603,7 +664,31 @@ class ToolGateway:
             failed_code = str(result.get("error_code") or result.get("summary") or "SCRIPT_EXECUTION_FAILED")
             lifecycle = "BLOCKED_DEPLOYMENT" if failed_code in {"TARGET_NETWORK_ENFORCEMENT_UNAVAILABLE", "SCRIPT_TARGET_NETWORK_UNAVAILABLE"} else "PARTIAL" if result.get("status") == "PARTIAL" else "FAILED"
             await self._set_script_record_status(session, run, script_record, lifecycle, execution_error=None if lifecycle == "PARTIAL" else failed_code)
-        unified = self._unified_result(result, artifact, permitted_tools)
+        unified = self._unified_result(name, result, artifact, permitted_tools)
+        # Persist the first durable observation immediately after the Runner
+        # result and Artifact have been committed.  Metadata/review reducers
+        # are downstream consumers and must not be able to leave a completed
+        # ToolCall without an Observation.
+        try:
+            facts = self._facts(name, result, relative.replace("\\", "/"))
+            facts["tool_model_view"] = unified.model_view.model_dump()
+            observation = Observation(
+                run_id=run.id,
+                tool_call_id=call.id,
+                artifact_id=artifact.id if artifact else None,
+                observation_type="tool_result",
+                summary=str(result.get("summary", "Tool execution completed"))[:1000],
+                facts_json=facts,
+            )
+            session.add(observation)
+            await session.commit()
+            logical.result_observation_id = observation.id
+            await session.commit()
+        except Exception as error:
+            return await self._result_collection_failed(session, run, call, logical, name, error)
+        await event_service.append(
+            session, run.id, "observation.created", {"observation_id": observation.id, "tool_call_id": call.id, "tool": name}
+        )
         if name == "mysql_metadata_discovery":
             metadata_fingerprint = hashlib.sha256(json.dumps({
                 "tool": name,
@@ -631,19 +716,6 @@ class ToolGateway:
                 elif unified.status not in _TOOL_SUCCESS_STATUSES:
                     approved.status = "REJECTED"
                 await session.flush()
-        facts = self._facts(name, result, relative.replace("\\", "/"))
-        facts["tool_model_view"] = unified.model_view.model_dump()
-        observation = Observation(
-            run_id=run.id,
-            tool_call_id=call.id,
-            artifact_id=artifact.id if artifact else None,
-            observation_type="tool_result",
-            summary=str(result.get("summary", "Tool execution completed"))[:1000],
-            facts_json=facts,
-        )
-        session.add(observation)
-        await session.commit()
-        logical.result_observation_id = observation.id
         try:
             await effective_logical_tool_call_service.trace(
                 session,
@@ -670,7 +742,7 @@ class ToolGateway:
             }
             record_failure(run, code="BACKEND_PERSISTENCE_FAILED", message=str(error), stage="TRACE_WRITE")
             await session.commit()
-            unified = self._unified_result(result, artifact, permitted_tools)
+            unified = self._unified_result(name, result, artifact, permitted_tools)
         if artifact_event_payload:
             await event_service.append(session, run.id, "artifact.created", artifact_event_payload)
         candidates = []
@@ -764,7 +836,7 @@ class ToolGateway:
         return value
 
     def _unified_result(
-        self, result: dict, artifact: Artifact | None, permitted_tools: set[str]
+        self, name: str, result: dict, artifact: Artifact | None, permitted_tools: set[str]
     ) -> ToolExecutionResult:
         status = _result_contract_status(result)
         if status not in _TOOL_SUCCESS_STATUSES | {"NO_FACT", "CONTRACT_ERROR", "FAILED", "TIMEOUT", "CANCELLED"}:
@@ -832,11 +904,14 @@ class ToolGateway:
             "artifact_path": artifact_path,
         }
         structured = result.get("structured_result", result)
+        if not isinstance(structured, dict):
+            structured = result
         if name == "http_request":
+            headers = structured.get("headers") if isinstance(structured.get("headers"), dict) else {}
             return {
                 **base,
                 "status_code": structured.get("status_code"),
-                "content_type": structured.get("headers", {}).get("content-type"),
+                "content_type": headers.get("content-type"),
                 "body_length": len(str(structured.get("body", ""))),
                 "redirect_count": structured.get("redirect_count", 0),
                 "final_url": structured.get("final_url"),

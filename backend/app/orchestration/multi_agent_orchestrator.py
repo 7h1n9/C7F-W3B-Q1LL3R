@@ -71,6 +71,7 @@ from app.services.tool_failure_policy import blocked_failure_for_action, record_
 from app.services.payload_strategy import payload_strategy_manager
 from app.services.metadata_stage_decider import metadata_stage_decider
 from app.services.tool_catalog_reconciler import tool_catalog_reconciler
+from app.services.experiment_strategy_manager import experiment_strategy_manager
 from app.tools.gateway import tool_gateway
 
 logger = logging.getLogger(__name__)
@@ -1135,6 +1136,26 @@ class MultiAgentOrchestrator:
                     "options": ["retry_after_fix", "finish_unsolved_wp", "try_alternative_strategy"],
                 },
             )
+        stage = str(proposal.current_stage or run.current_phase or "").upper()
+        hypothesis = str(review.question_being_tested or proposal.objective or proposal.success_condition or "")
+        independent_variable = str(review.independent_variable or compiled.arguments.get("test_field") or compiled.arguments.get("stage") or "")
+        reserved, experiment = await experiment_strategy_manager.reserve(
+            session,
+            run,
+            tool_name=tool_name,
+            stage=stage,
+            arguments=compiled.arguments,
+            independent_variable=independent_variable,
+            hypothesis=hypothesis,
+            expected_signal=review.expected_true_signal_json or review.expected_false_signal_json,
+        )
+        if not reserved:
+            await self._controller_event(session, run.id, "experiment.duplicate_rejected", {"experiment_id": experiment.get("experiment_id"), "tool_name": tool_name, "stage": stage, "code": "EXPERIMENT_ALREADY_EXECUTED"})
+            raise DomainError(
+                "EXPERIMENT_ALREADY_EXECUTED",
+                "The same experiment fingerprint has already been reserved or executed.",
+                {"experiment_id": experiment.get("experiment_id"), "tool": tool_name, "stage": stage},
+            )
         state = await solver_state_service.load(session, run.id)
         experiment_fingerprint = fingerprint_compiled_action(tool_name, compiled.arguments_digest, proposal.success_condition)
         prior = (state.action_fingerprints_json if state else {}).get(experiment_fingerprint)
@@ -1150,6 +1171,7 @@ class MultiAgentOrchestrator:
         # immutable compiled payload below, never this semantic review object.
         item.argument_constraints_json = {"compiled_arguments_digest": compiled.arguments_digest}
         item.argument_constraints_json = {**item.argument_constraints_json, "experiment_fingerprint": experiment_fingerprint, "success_condition": proposal.success_condition}
+        item.argument_constraints_json = {**item.argument_constraints_json, "experiment_id": experiment["experiment_id"], "experiment_record": experiment}
         return item
 
     async def _memory(self, session, run: SolveRun, *, stage: str, task: AgentTask, working: dict) -> None:
@@ -1985,6 +2007,16 @@ class MultiAgentOrchestrator:
         # invokers and alternate gateways cannot leave a completed action
         # ACTIVE.
         approved_action.status = "CONSUMED"
+        experiment_id = str((approved_action.argument_constraints_json or {}).get("experiment_id") or "")
+        if experiment_id:
+            await experiment_strategy_manager.record_result(
+                session,
+                run,
+                experiment_id,
+                observed_signal={"result_status": result_status, "tool_call_ids": [call.id for call in calls]},
+                result="COMPLETED",
+                next_allowed_actions=["invalid_baseline"] if str(approved_action.tool_name) == "http_request" and str(run.current_phase) == "BUSINESS_BASELINE" else [],
+            )
         completed = AgentTaskResultContract(
             task_id=task.id,
             status=AgentTaskStatus.COMPLETED,
