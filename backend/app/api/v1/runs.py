@@ -53,6 +53,7 @@ from app.models.run import (
     Observation,
     RunAttempt,
     RunCompactionCheckpoint,
+    RunContinuation,
     RunEvent,
     RunExecutionLease,
     RunUserInput,
@@ -411,6 +412,9 @@ async def _delete_run_records(session: AsyncSession, run_id: str) -> None:
         RunUserInput,
         AttemptToolManifest,
         RunExecutionLease,
+        # Durable continuation rows reference the Run and must be removed
+        # before the parent SolveRun row.
+        RunContinuation,
         # LogicalToolCall.result_observation_id points back to observations.
         # It must be removed before the referenced observations.
         Observation,

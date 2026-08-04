@@ -363,7 +363,28 @@ class RoleAgentRuntime:
                 await self._finish_turn(session, run, task, repair_turn, {"response_excerpt": str(second)}, {}, parse_error="FINALIZER_SCHEMA_INVALID")
                 return self._failure(task.id, "FINALIZER_SCHEMA_INVALID", "Finalizer remained invalid after one schema repair.", status=AgentTaskStatus.PARTIAL), {"parse_error_code": "FINALIZER_SCHEMA_INVALID", "repair_error": str(second)[:1000]}
 
-    async def execute(self, session, run: SolveRun, challenge: Challenge, attempt: RunAttempt, task: AgentTask, lease_token: str) -> AgentTaskResultContract:
+    async def execute(
+        self,
+        session,
+        run_id: str,
+        challenge_id: str,
+        attempt_id: str,
+        task_id: str,
+        lease_token: str,
+    ) -> AgentTaskResultContract:
+        # Runtime execution starts at a transaction boundary.  Do not accept
+        # ORM instances from the orchestrator: commits may expire them and a
+        # later attribute access would try to lazy-load outside greenlet_spawn.
+        run = await session.get(SolveRun, run_id)
+        challenge = await session.get(Challenge, challenge_id)
+        attempt = await session.get(RunAttempt, attempt_id)
+        task = await session.get(AgentTask, task_id)
+        if not all((run, challenge, attempt, task)):
+            raise DomainError(
+                "ROLE_RUNTIME_CONTEXT_MISSING",
+                "Role runtime context could not be reloaded from durable IDs.",
+                {"run_id": run_id, "challenge_id": challenge_id, "attempt_id": attempt_id, "task_id": task_id},
+            )
         policy = await self._policy(session, task)
         memory = await deterministic_controller.memory.read_for_role(session, run.id, task.agent_role)
         prompt = self._prompt(task, policy, memory, challenge)

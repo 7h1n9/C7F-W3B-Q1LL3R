@@ -505,6 +505,7 @@ class MultiAgentOrchestrator:
                 if run is None:
                     return
                 run_id = run.id
+                challenge_id = run.challenge_id
                 existing = await session.scalar(select(AgentTask).where(
                     AgentTask.run_id == run.id,
                     AgentTask.task_kind == AgentTaskKind.RESULT_REVIEW.value,
@@ -531,6 +532,7 @@ class MultiAgentOrchestrator:
                 challenge = await session.get(Challenge, run.challenge_id)
                 if not all((proposal, plan_review, attempt, challenge)):
                     return
+                attempt_id = attempt.id
                 result_payload = (await self.build_production_result_context(
                     session, run, attempt, proposal, plan_review, approved, producing_task
                 )).model_dump(mode="json")
@@ -552,7 +554,12 @@ class MultiAgentOrchestrator:
                     )
                 try:
                     review_result = await self.runtime.execute(
-                        session, run, challenge, attempt, review_task, review_token
+                        session,
+                        run_id,
+                        challenge_id,
+                        attempt_id,
+                        review_task_id,
+                        review_token,
                     )
                 except RuntimeError as error:
                     if str(error) != "ROLE_CONTRACT_ENGINE_REQUIRED":
@@ -2525,7 +2532,7 @@ class MultiAgentOrchestrator:
             for cycle in range(max_cycles):
                 await self._phase(session, run, await self._capability_phase(session, run))
                 planner_task, planner_token = await self._task(session, run, AgentRole.PLANNER, AgentTaskKind.PLANNING, "Select the next bounded stage from the current memory snapshot.", [], parent=parent, context=context)
-                planner_result = await self._complete(session, run, planner_task, planner_token, await self.runtime.execute(session, run, challenge, attempt, planner_task, planner_token))
+                planner_result = await self._complete(session, run, planner_task, planner_token, await self.runtime.execute(session, run.id, challenge.id, attempt.id, planner_task.id, planner_token))
                 if planner_result.status != AgentTaskStatus.COMPLETED:
                     run.last_error_code = "PLANNER_RESULT_INVALID"
                     run.last_error_message = planner_result.handoff_summary
@@ -2547,7 +2554,7 @@ class MultiAgentOrchestrator:
                 # validated and its durable dispatch chain is written.  The
                 # old order completed the task first, so a failed Review
                 # insert stranded the Run in PLANNING forever.
-                plan_result = await self.runtime.execute(session, run, challenge, attempt, plan_task, plan_token)
+                plan_result = await self.runtime.execute(session, run.id, challenge.id, attempt.id, plan_task.id, plan_token)
                 try:
                     plan_review, approved, production_task, production_token = await asyncio.wait_for(
                         self._persist_plan_review(session, run, challenge, proposal, plan_task, plan_token, plan_result),
@@ -2803,7 +2810,7 @@ class MultiAgentOrchestrator:
                 await session.refresh(plan_review)
                 await session.refresh(approved)
                 await session.refresh(exec_task)
-                result_review = await self._complete(session, run, result_review_task, result_review_token, await self.runtime.execute(session, run, challenge, attempt, result_review_task, result_review_token))
+                result_review = await self._complete(session, run, result_review_task, result_review_token, await self.runtime.execute(session, run.id, challenge.id, attempt.id, result_review_task.id, result_review_token))
                 result_review_row = await self._review(session, run, proposal, result_review_task, result_review)
                 await self._controller_event(
                     session,
@@ -2825,7 +2832,7 @@ class MultiAgentOrchestrator:
                     if error.code != "RESULT_REVIEW_PROMOTION_EMPTY":
                         raise
                     repair_task, repair_token = await self._task(session, run, AgentRole.ANALYSIS, AgentTaskKind.RESULT_REVIEW, "Repair the approved result review by selecting candidate facts or explicitly accepting a capability.", [], parent=result_review_task.id, context={**result_payload, "repair_attempt": True})
-                    repair_result = await self._complete(session, run, repair_task, repair_token, await self.runtime.execute(session, run, challenge, attempt, repair_task, repair_token))
+                    repair_result = await self._complete(session, run, repair_task, repair_token, await self.runtime.execute(session, run.id, challenge.id, attempt.id, repair_task.id, repair_token))
                     result_review_row = await self._review(session, run, proposal, repair_task, repair_result)
                     promoted = await self._apply_result_review(session, run, exec_task, result_review_row)
                 await self._controller_event(
