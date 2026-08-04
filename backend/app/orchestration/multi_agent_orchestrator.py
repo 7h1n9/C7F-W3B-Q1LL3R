@@ -1523,7 +1523,24 @@ class MultiAgentOrchestrator:
         evidence = list(evidence_result.all())
         state = await solver_state_service.load(session, run.id)
         candidate_result = await session.scalars(select(FlagCandidate).where(FlagCandidate.run_id == run.id, FlagCandidate.verified.is_(False)))
-        working = {**working, "capability_ledger": (state.capability_ledger_json if state else {}), "unverified_candidates": [item.id for item in candidate_result.all()]}
+        raw_security_context = dict(state.security_context_json or {}) if state else {}
+        security_context = {
+            "hypotheses": list(raw_security_context.get("hypotheses") or []),
+            "validation_results": list(raw_security_context.get("validation_results") or []),
+            "exploit_results": list(raw_security_context.get("exploit_results") or []),
+            "impact_assessments": list(raw_security_context.get("impact_assessments") or []),
+            "findings": list(raw_security_context.get("findings") or []),
+            # InformationEvidence is retained for Planner visibility, while
+            # the required security reasoning collections remain stable.
+            "information_evidence": list(raw_security_context.get("information_evidence") or []),
+        }
+        working = {
+            **working,
+            "capability_ledger": (state.capability_ledger_json if state else {}),
+            "security_context": security_context,
+            "security_reasoning_rules": security_finding_service.planner_guidance(security_context),
+            "unverified_candidates": [item.id for item in candidate_result.all()],
+        }
         await deterministic_controller.memory.write_snapshot(session, run.id, stage=stage, working_memory=working, verified_fact_ids=facts, hypothesis_ids=hypotheses, evidence_ids=sorted(set(evidence)), created_by_task_id=task.id)
 
     async def _fail_plan_review_persistence(

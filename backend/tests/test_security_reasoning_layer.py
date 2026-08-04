@@ -108,6 +108,37 @@ def test_business_baseline_does_not_map_to_vulnerability_semantics():
     assert security_finding_service.map_verified_fact(fact) is None
 
 
+def test_information_evidence_does_not_allow_planner_completion():
+    guidance = security_finding_service.planner_guidance({
+        "information_evidence": [
+            {"fact_key": "DATABASE()", "value": "asset_warranty"},
+            {"fact_key": "VERSION()", "value": "8.4"},
+            {"fact_key": "information_schema.tables", "value": ["assets"]},
+        ],
+    })
+
+    assert guidance["next_action"] == "HYPOTHESIS_VALIDATION"
+    assert guidance["completion_allowed"] is False
+
+
+def test_successful_sql_validation_requires_exploit_and_impact():
+    guidance = security_finding_service.planner_guidance({
+        "validation_results": [{"type": "SQL_INJECTION_VALIDATION", "status": "SUCCESS"}],
+    })
+
+    assert guidance["next_action"] == "EXPLOIT_IMPACT_CONFIRMATION"
+    assert guidance["completion_allowed"] is False
+
+
+def test_created_security_finding_allows_planner_reporting():
+    guidance = security_finding_service.planner_guidance({
+        "findings": [{"status": "CREATED", "vulnerability_type": "SQL_INJECTION"}],
+    })
+
+    assert guidance["next_action"] == "REPORTING"
+    assert guidance["completion_allowed"] is True
+
+
 def test_sql_injection_complete_chain_creates_finding():
     hypothesis = VulnerabilityHypothesis(
         type="SQL_INJECTION",

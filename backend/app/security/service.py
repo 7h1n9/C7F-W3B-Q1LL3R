@@ -29,6 +29,45 @@ INFORMATION_FACT_MARKERS = (
 class SecurityFindingService:
     """Translate legacy facts without promoting information into findings."""
 
+    @staticmethod
+    def planner_guidance(context: Mapping[str, Any] | None) -> dict[str, Any]:
+        """Return deterministic Planner guidance from the current security blackboard."""
+        security = context or {}
+        findings = list(security.get("findings") or [])
+        validations = list(security.get("validation_results") or [])
+        hypotheses = list(security.get("hypotheses") or [])
+        information = list(security.get("information_evidence") or [])
+        has_created_finding = any(str(item.get("status") or "").upper() == "CREATED" for item in findings if isinstance(item, Mapping))
+        has_successful_validation = any(str(item.get("status") or "").upper() == "SUCCESS" for item in validations if isinstance(item, Mapping))
+
+        if has_created_finding:
+            return {
+                "priority": "SECURITY_CONTEXT",
+                "next_action": "REPORTING",
+                "completion_allowed": True,
+                "rule": "SecurityFinding CREATED is required before reporting.",
+            }
+        if has_successful_validation:
+            return {
+                "priority": "SECURITY_CONTEXT",
+                "next_action": "EXPLOIT_IMPACT_CONFIRMATION",
+                "completion_allowed": False,
+                "rule": "ValidationResult SUCCESS proves validation only; continue with ExploitResult and ImpactAssessment.",
+            }
+        if hypotheses or validations or information:
+            return {
+                "priority": "SECURITY_CONTEXT",
+                "next_action": "HYPOTHESIS_VALIDATION",
+                "completion_allowed": False,
+                "rule": "InformationEvidence and open/inconclusive validation state do not prove a vulnerability.",
+            }
+        return {
+            "priority": "SECURITY_CONTEXT",
+            "next_action": "DISCOVER_OR_FORM_HYPOTHESIS",
+            "completion_allowed": False,
+            "rule": "Security reasoning must be established before reporting.",
+        }
+
     def map_verified_fact(self, fact: Any) -> InformationEvidence | ValidationResult | None:
         fact_key = str(self._value(fact, "fact_key") or "")
         fact_type = str(self._value(fact, "fact_type") or "").lower()
