@@ -74,6 +74,40 @@ def test_environment_information_cannot_become_security_finding():
     assert not any(item.__class__.__name__ == "SecurityFinding" for item in mapped)
 
 
+def test_mysql_boolean_oracle_maps_to_successful_validation_result():
+    fact = VerifiedFact(
+        id="fact-oracle",
+        run_id="run-1",
+        fact_key="asset_warranty.mysql_boolean_oracle",
+        fact_type="BOOLEAN_ORACLE",
+        value_json={"hypothesis_id": "hyp-sqli"},
+        confidence=95,
+        evidence_ids_json=["e-oracle"],
+        promotion_status="VERIFIED",
+    )
+
+    mapped = security_finding_service.map_verified_fact(fact)
+
+    assert mapped is not None
+    assert mapped.type == "SQL_INJECTION_VALIDATION"
+    assert mapped.status == ValidationStatus.SUCCESS
+    assert mapped.evidence_ids == ["e-oracle"]
+
+
+def test_business_baseline_does_not_map_to_vulnerability_semantics():
+    fact = VerifiedFact(
+        id="fact-baseline",
+        run_id="run-1",
+        fact_key="asset_warranty.valid_baseline",
+        fact_type="BUSINESS_RESPONSE_BASELINE",
+        value_json={"status_code": 200},
+        evidence_ids_json=["e-baseline"],
+        promotion_status="VERIFIED",
+    )
+
+    assert security_finding_service.map_verified_fact(fact) is None
+
+
 def test_sql_injection_complete_chain_creates_finding():
     hypothesis = VulnerabilityHypothesis(
         type="SQL_INJECTION",

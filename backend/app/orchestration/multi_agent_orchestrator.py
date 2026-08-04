@@ -46,6 +46,8 @@ from app.models.run import (
 )
 from app.orchestration.role_agent_runtime import RoleAgentRuntime
 from app.orchestration.state_machine import RunStatus, transition
+from app.security.schemas import InformationEvidence, ValidationResult
+from app.security.service import security_finding_service
 from app.schemas.multi_agent import (
     AgentRole,
     AgentTaskContract,
@@ -1972,8 +1974,11 @@ class MultiAgentOrchestrator:
                         ))
                         if existing is None:
                             fact.fact_key = "asset_warranty.mysql_boolean_oracle"
+                    was_candidate = fact.promotion_status == "CANDIDATE"
                     fact.promotion_status = "VERIFIED"
                     approved_ids.append(fact.id)
+                    if was_candidate:
+                        await self._record_security_mapping(session, run, fact)
                     await self._record_verified_fact_capabilities(session, run, fact)
         if (
             proposal is not None
@@ -2509,6 +2514,37 @@ class MultiAgentOrchestrator:
                     "mysql_metadata_discovered",
                     evidence={"fact_keys": sorted(required), "source": "controller_metadata_promotion"},
                 )
+
+    async def _record_security_mapping(self, session, run: SolveRun, fact: VerifiedFact) -> None:
+        """Materialize the security meaning of a newly verified legacy fact."""
+        mapped = security_finding_service.map_verified_fact(fact)
+        if mapped is None:
+            return
+
+        state = await solver_state_service.load(session, run.id)
+        if state is None:
+            return
+        context = {
+            "hypotheses": [],
+            "validation_results": [],
+            "exploit_results": [],
+            "impact_assessments": [],
+            "findings": [],
+            "information_evidence": [],
+            **(state.security_context_json or {}),
+        }
+        collection = "information_evidence" if isinstance(mapped, InformationEvidence) else "validation_results" if isinstance(mapped, ValidationResult) else None
+        if collection is None:
+            return
+        payload = mapped.model_dump(mode="json")
+        if collection == "information_evidence":
+            if any(str(item.get("fact_id")) == fact.id for item in context[collection] if isinstance(item, dict)):
+                return
+        elif any(str(item.get("evidence_ids", [])) == str(payload.get("evidence_ids", [])) for item in context[collection] if isinstance(item, dict)):
+            return
+        context[collection] = [*context[collection], payload]
+        state.security_context_json = context
+        await session.flush()
 
     async def run(self, session, run: SolveRun, challenge: Challenge, attempt: RunAttempt, lease: RunExecutionLease, *, engine: object | None = None) -> dict:
         await deterministic_controller.seed_policies(session)
