@@ -1,0 +1,157 @@
+import pytest
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy.pool import StaticPool
+
+from app.models import Base
+from app.models.challenge import Challenge
+from app.models.multi_agent import VerifiedFact
+from app.models.run import SolveRun
+from app.models.solver_state import SolverState
+from app.security.schemas import (
+    ExploitResult,
+    ExploitStatus,
+    ImpactAssessment,
+    ValidationControls,
+    ValidationResult,
+    ValidationStatus,
+    VulnerabilityHypothesis,
+)
+from app.security.service import security_finding_service
+from app.services.solver_state import solver_state_service
+
+
+@pytest.fixture
+async def session_factory():
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:", poolclass=StaticPool)
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    yield factory
+    await engine.dispose()
+
+
+async def _run(session) -> SolveRun:
+    challenge = Challenge(
+        name="security reasoning",
+        target_url="http://target.local",
+        allowed_hosts=["target.local"],
+        challenge_type="WEB_TARGET",
+    )
+    session.add(challenge)
+    await session.flush()
+    run = SolveRun(challenge_id=challenge.id, workspace_path=".")
+    session.add(run)
+    await session.flush()
+    return run
+
+
+def test_environment_information_cannot_become_security_finding():
+    facts = [
+        VerifiedFact(
+            id="fact-version",
+            run_id="run-1",
+            fact_key="mysql_version",
+            fact_type="MYSQL_METADATA",
+            value_json="8.4",
+            evidence_ids_json=["e-version"],
+            promotion_status="VERIFIED",
+        ),
+        VerifiedFact(
+            id="fact-db",
+            run_id="run-1",
+            fact_key="DATABASE()",
+            fact_type="MYSQL_METADATA",
+            value_json="asset_warranty",
+            evidence_ids_json=["e-db"],
+            promotion_status="VERIFIED",
+        ),
+    ]
+
+    mapped = [security_finding_service.map_verified_fact(fact) for fact in facts]
+
+    assert all(item is not None for item in mapped)
+    assert all(item.__class__.__name__ == "InformationEvidence" for item in mapped)
+    assert not any(item.__class__.__name__ == "SecurityFinding" for item in mapped)
+
+
+def test_sql_injection_complete_chain_creates_finding():
+    hypothesis = VulnerabilityHypothesis(
+        type="SQL_INJECTION",
+        confidence=0.9,
+        source_evidence_ids=["e-attack-surface"],
+        validation_requirements=["baseline", "positive_control", "negative_control"],
+    )
+    validation = ValidationResult(
+        hypothesis_id=hypothesis.id,
+        status=ValidationStatus.SUCCESS,
+        evidence_ids=["e-baseline", "e-positive", "e-negative"],
+        confidence=0.85,
+        controls=ValidationControls(baseline=True, positive_control=True, negative_control=True),
+    )
+    exploit = ExploitResult(
+        validation_id=validation.id,
+        status=ExploitStatus.SUCCESS,
+        evidence_ids=["e-business-data"],
+        scope={"type": "UNAUTHORIZED_BUSINESS_DATA_READ", "data_fields": ["asset_id", "owner_name"]},
+    )
+    impact = ImpactAssessment(
+        exploit_id=exploit.id,
+        impact_type="UNAUTHORIZED_DATA_READ",
+        severity="HIGH",
+        evidence_ids=["e-business-data"],
+        business_impact="Unauthenticated users can read business asset records.",
+    )
+
+    finding = security_finding_service.create_finding(hypothesis, validation, exploit, impact)
+
+    assert finding is not None
+    assert finding.status == "CREATED"
+    assert finding.vulnerability_type == "SQL_INJECTION"
+    assert finding.impact_id == impact.id
+
+
+def test_exception_without_controls_is_inconclusive_and_cannot_create_finding():
+    hypothesis = VulnerabilityHypothesis(type="SQL_INJECTION", confidence=0.8)
+    validation = ValidationResult(
+        hypothesis_id=hypothesis.id,
+        status=ValidationStatus.INCONCLUSIVE,
+        evidence_ids=["e-exception"],
+    )
+    exploit = ExploitResult(
+        validation_id=validation.id,
+        status=ExploitStatus.SUCCESS,
+        evidence_ids=["e-exception"],
+    )
+    impact = ImpactAssessment(
+        exploit_id=exploit.id,
+        impact_type="UNAUTHORIZED_DATA_READ",
+        severity="HIGH",
+        evidence_ids=["e-exception"],
+        business_impact="Unproven impact.",
+    )
+
+    assert validation.status == ValidationStatus.INCONCLUSIVE
+    assert security_finding_service.create_finding(hypothesis, validation, exploit, impact) is None
+
+
+@pytest.mark.asyncio
+async def test_security_blackboard_is_compatible_with_existing_solver_state(session_factory):
+    async with session_factory() as session:
+        run = await _run(session)
+        state = SolverState(
+            run_id=run.id,
+            confirmed_facts_json=[{"fact": "kept"}],
+            capability_ledger_json={"legacy_capability": True},
+        )
+        session.add(state)
+        await session.flush()
+
+        await solver_state_service.append_security_object(
+            session, run.id, "hypotheses", {"id": "h-1", "type": "SQL_INJECTION"}
+        )
+        await session.commit()
+        loaded = await solver_state_service.load(session, run.id)
+
+        assert loaded.security_context_json["hypotheses"] == [{"id": "h-1", "type": "SQL_INJECTION"}]
+        assert loaded.confirmed_facts_json == [{"fact": "kept"}]
+        assert loaded.capability_ledger_json == {"legacy_capability": True}

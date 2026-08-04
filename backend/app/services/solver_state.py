@@ -10,6 +10,19 @@ from app.models.solver_state import SolverState
 from app.services.attack_chain import build_attack_chain, reduce_capability
 
 
+SECURITY_CONTEXT_KEYS = (
+    "hypotheses",
+    "validation_results",
+    "exploit_results",
+    "impact_assessments",
+    "findings",
+)
+
+
+def _empty_security_context() -> dict[str, list]:
+    return {key: [] for key in SECURITY_CONTEXT_KEYS}
+
+
 def _phase_for(challenge_type: str) -> str:
     return "BASELINE" if challenge_type == "TRAFFIC_ANALYSIS" else "INTAKE"
 
@@ -97,6 +110,8 @@ class SolverStateService:
     ) -> SolverState:
         state = await self.load(session, run.id)
         if state:
+            if not state.security_context_json:
+                state.security_context_json = _empty_security_context()
             if "metadata_progress" not in (state.capability_ledger_json or {}):
                 state.capability_ledger_json = {
                     **(state.capability_ledger_json or {}),
@@ -137,6 +152,7 @@ class SolverStateService:
                     for stage in ("version", "version_comment", "database", "tables", "columns")
                 },
             },
+            security_context_json=_empty_security_context(),
             attack_chain_plan_json=build_attack_chain(challenge_name, challenge_description),
             experiment_dimensions_json=[],
         )
@@ -144,6 +160,29 @@ class SolverStateService:
         await session.commit()
         await session.refresh(state)
         return state
+
+    async def append_security_object(
+        self,
+        session: AsyncSession,
+        run_id: str,
+        collection: str,
+        value: dict,
+    ) -> dict | None:
+        """Append a security object to the compatible SolverState blackboard."""
+        if collection not in SECURITY_CONTEXT_KEYS:
+            raise ValueError(f"Unsupported security context collection: {collection}")
+        state = await self.load(session, run_id)
+        if state is None:
+            return None
+        context = {**_empty_security_context(), **(state.security_context_json or {})}
+        context[collection] = [*context[collection], dict(value)]
+        state.security_context_json = context
+        await session.flush()
+        return dict(value)
+
+    async def security_context(self, session: AsyncSession, run_id: str) -> dict[str, list]:
+        state = await self.load(session, run_id)
+        return {**_empty_security_context(), **(state.security_context_json or {})} if state else _empty_security_context()
 
     async def sync_from_run(self, session: AsyncSession, run: SolveRun) -> SolverState | None:
         verified = await session.scalar(select(FlagCandidate.id).where(FlagCandidate.run_id == run.id, FlagCandidate.verified, FlagCandidate.review_state == "VALID"))

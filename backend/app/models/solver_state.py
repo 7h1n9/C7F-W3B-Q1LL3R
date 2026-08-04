@@ -20,6 +20,7 @@ class SolverState(UUIDTimestampMixin, Base):
     skill_recommendations_json: Mapped[list[dict]] = mapped_column(JSON, nullable=False, default=list)
     run_plan_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
     capability_ledger_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    security_context_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
     read_files_json: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
     read_ranges_json: Mapped[list[dict]] = mapped_column(JSON, nullable=False, default=list)
     content_hashes_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
