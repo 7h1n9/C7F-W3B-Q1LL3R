@@ -1522,7 +1522,7 @@ class MultiAgentOrchestrator:
                 {"experiment_id": experiment.get("experiment_id"), "tool": tool_name, "stage": stage},
             )
         state = await solver_state_service.load(session, run.id)
-        experiment_fingerprint = fingerprint_compiled_action(tool_name, compiled.arguments_digest, proposal.success_condition)
+        experiment_fingerprint = fingerprint_compiled_action(tool_name, compiled.arguments_digest, proposal.success_condition, stage)
         prior = (state.action_fingerprints_json if state else {}).get(experiment_fingerprint)
         if isinstance(prior, dict) and str(prior.get("status") or "").upper() in {"COMPLETED", "CONFIRMED"}:
             raise DomainError("EXPERIMENT_ALREADY_CONFIRMED", "The same compiled experiment was already completed and approved.", {"fingerprint": experiment_fingerprint, "tool": tool_name})

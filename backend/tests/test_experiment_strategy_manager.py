@@ -55,9 +55,49 @@ async def test_same_request_cannot_evade_guard_by_changing_hypothesis(session_fa
         assert second is False
 
 
+@pytest.mark.asyncio
+async def test_valid_then_invalid_baseline_can_both_be_reserved(session_factory):
+    async with session_factory() as session:
+        challenge = Challenge(name="asset", target_url="http://asset.local", allowed_hosts=["asset.local"], challenge_type="WEB_TARGET")
+        session.add(challenge)
+        await session.flush()
+        run = SolveRun(challenge_id=challenge.id, workspace_path=".", role_snapshot_json={}, status="PLANNING")
+        session.add(run)
+        await session.flush()
+        await solver_state_service.initialize(session, run, "WEB_TARGET", [], "asset", "asset")
+        valid = {"method": "POST", "url": "/api/warranty/check", "json": {"asset_no": "PC-2026-013", "department": "OPS"}}
+        invalid = {"method": "POST", "url": "/api/warranty/check", "json": {"asset_no": "PC-INVALID-000", "department": "OPS"}}
+        first, _ = await experiment_strategy_manager.reserve(session, run, tool_name="http_request", stage="BUSINESS_BASELINE", arguments=valid, independent_variable="asset_no", hypothesis="valid baseline")
+        second, _ = await experiment_strategy_manager.reserve(session, run, tool_name="http_request", stage="BUSINESS_BASELINE", arguments=invalid, independent_variable="asset_no", hypothesis="invalid baseline")
+        assert first is True
+        assert second is True
+
+
 def test_changed_stage_or_hypothesis_creates_new_experiment():
     args = {"method": "POST", "url": "/api/warranty/check", "json": {"asset_no": "PC-2026-013", "department": "OPS"}}
     baseline = experiment_strategy_manager.record(tool_name="http_request", stage="BUSINESS_BASELINE", arguments=args, independent_variable="", hypothesis="valid baseline")
     invalid = experiment_strategy_manager.record(tool_name="http_request", stage="BUSINESS_BASELINE", arguments={**args, "json": {"asset_no": "PC-2026-013", "department": "FIN"}}, independent_variable="department", hypothesis="invalid baseline")
     oracle = experiment_strategy_manager.record(tool_name="sql_boolean_compare", stage="BOOLEAN_ORACLE", arguments={"test_field": "department"}, independent_variable="department", hypothesis="department controls predicate")
     assert len({baseline["experiment_id"], invalid["experiment_id"], oracle["experiment_id"]}) == 3
+
+
+def test_valid_and_invalid_baselines_have_distinct_request_identity():
+    valid = experiment_strategy_manager.record(
+        tool_name="http_request",
+        stage="BUSINESS_BASELINE",
+        arguments={"method": "POST", "url": "/api/warranty/check", "json": {"asset_no": "PC-2026-013", "department": "OPS"}},
+        independent_variable="asset_no",
+        hypothesis="valid baseline",
+    )
+    invalid = experiment_strategy_manager.record(
+        tool_name="http_request",
+        stage="BUSINESS_BASELINE",
+        arguments={"method": "POST", "url": "/api/warranty/check", "json": {"asset_no": "PC-INVALID-000", "department": "OPS"}},
+        independent_variable="asset_no",
+        hypothesis="invalid baseline",
+    )
+    assert valid["request_identity"]["method"] == "POST"
+    assert valid["request_identity"]["endpoint"] == "/api/warranty/check"
+    assert valid["request_identity"]["stage"] == "BUSINESS_BASELINE"
+    assert valid["request_fingerprint"] != invalid["request_fingerprint"]
+    assert valid["experiment_id"] != invalid["experiment_id"]
