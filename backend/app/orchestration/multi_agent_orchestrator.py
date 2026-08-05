@@ -39,6 +39,7 @@ from app.models.run import (
     Hypothesis,
     Observation,
     RunAttempt,
+    RunContinuation,
     RunEvent,
     RunExecutionLease,
     SolveRun,
@@ -86,6 +87,41 @@ class MultiAgentOrchestrator:
     def __init__(self, tool_invoker=None, runtime: RoleAgentRuntime | None = None) -> None:
         self.tool_invoker = tool_invoker or tool_gateway.invoke
         self.runtime = runtime or RoleAgentRuntime(tool_invoker=self.tool_invoker)
+
+    async def can_dispatch_planner(self, session, run: SolveRun) -> tuple[bool, str]:
+        """Gate Planner creation behind ResultReview and promotion.
+
+        A producer task may already have durable evidence and a CANDIDATE
+        fact while its ResultReview is being resumed by the Supervisor.  The
+        main controller must not start a second planning cycle in that window.
+        """
+        pending_reviews = list((await session.scalars(select(AgentTask).where(
+            AgentTask.run_id == run.id,
+            AgentTask.task_kind == AgentTaskKind.RESULT_REVIEW.value,
+            AgentTask.status.in_((
+                AgentTaskStatus.PENDING.value,
+                AgentTaskStatus.RUNNING.value,
+                AgentTaskStatus.NEED_REPLAN.value,
+                AgentTaskStatus.PARTIAL.value,
+                AgentTaskStatus.INTERRUPTED.value,
+            )),
+        ))).all())
+        candidate_count = int(await session.scalar(select(func.count()).select_from(VerifiedFact).where(
+            VerifiedFact.run_id == run.id,
+            VerifiedFact.promotion_status == "CANDIDATE",
+        )) or 0)
+        active_continuations = list((await session.scalars(select(RunContinuation).where(
+            RunContinuation.run_id == run.id,
+            RunContinuation.status.in_(("PENDING", "RUNNING")),
+            RunContinuation.kind.in_(("RESULT_REVIEW_PENDING", "RESULT_REVIEW_PROMOTION")),
+        ))).all())
+        if pending_reviews:
+            return False, "RESULT_REVIEW_PENDING"
+        if candidate_count and active_continuations:
+            return False, "CANDIDATE_PROMOTION_PENDING"
+        if any(item.kind == "RESULT_REVIEW_PROMOTION" for item in active_continuations):
+            return False, "RESULT_REVIEW_CONTINUATION_ACTIVE"
+        return True, "READY"
 
     async def _status(self, session, run: SolveRun, target: RunStatus) -> None:
         if RunStatus(run.status) == target:
@@ -580,6 +616,25 @@ class MultiAgentOrchestrator:
                         "RESULT_REVIEW_TASK_MISSING",
                         "ResultReview task disappeared before runtime execution.",
                         {"producing_task_id": producing_task_id},
+                    )
+                if review_task.status != AgentTaskStatus.RUNNING.value:
+                    if review_task.status not in {
+                        AgentTaskStatus.PENDING.value,
+                        AgentTaskStatus.NEED_REPLAN.value,
+                        AgentTaskStatus.PARTIAL.value,
+                        AgentTaskStatus.INTERRUPTED.value,
+                    }:
+                        return
+                    review_task.status = AgentTaskStatus.PENDING.value
+                    review_task.lease_owner = None
+                    review_task.lease_token = None
+                    review_task.lease_expires_at = None
+                    await session.flush()
+                    review_token = await deterministic_controller.claim_task(
+                        session,
+                        review_task.id,
+                        "result-review-continuation",
+                        lease_seconds=300,
                     )
                 try:
                     review_result = await self.runtime.execute(
@@ -2610,6 +2665,34 @@ class MultiAgentOrchestrator:
             parent: str | None = None
             context: dict = {}
             for cycle in range(max_cycles):
+                planner_allowed, planner_barrier_reason = await self.can_dispatch_planner(session, run)
+                if not planner_allowed:
+                    review_continuation_id = await session.scalar(select(RunContinuation.id).where(
+                        RunContinuation.run_id == run.id,
+                        RunContinuation.kind == "RESULT_REVIEW_PENDING",
+                        RunContinuation.status.in_(("PENDING", "RUNNING")),
+                    ).order_by(RunContinuation.created_at.desc()))
+                    await self._controller_event(
+                        session,
+                        run.id,
+                        "planner.dispatch.blocked",
+                        {
+                            "run_id": run.id,
+                            "reason": planner_barrier_reason,
+                            "cycle": cycle,
+                            "required": "RESULT_REVIEW_COMPLETED_AND_FACT_PROMOTED",
+                        },
+                    )
+                    if review_continuation_id is not None:
+                        from app.services.run_supervisor import run_supervisor
+
+                        await run_supervisor.enqueue_continuation(str(review_continuation_id), run.id)
+                    return {
+                        "status": run.status,
+                        "current_phase": run.current_phase,
+                        "planner_blocked": True,
+                        "reason": planner_barrier_reason,
+                    }
                 required_phase = await self._capability_phase(session, run)
                 await self._phase(session, run, required_phase)
                 security_context = (run.recovery_checkpoint_json or {}).get("security_decision")
