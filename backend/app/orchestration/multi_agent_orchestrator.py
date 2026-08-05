@@ -46,6 +46,7 @@ from app.models.run import (
 )
 from app.orchestration.role_agent_runtime import RoleAgentRuntime
 from app.orchestration.state_machine import RunStatus, transition
+from app.security.decision import security_decision_engine
 from app.security.schemas import InformationEvidence, ValidationResult
 from app.security.service import security_finding_service
 from app.schemas.multi_agent import (
@@ -171,6 +172,9 @@ class MultiAgentOrchestrator:
                 return "FLAG_VERIFICATION"
             return "BOUNDED_EXTRACTION"
         state = await solver_state_service.load(session, run.id)
+        security_decision = security_decision_engine.decide(state.security_context_json if state else {})
+        if security_decision is not None:
+            return security_decision.required_phase
         ledger = state.capability_ledger_json if state else {}
         candidate = await self._candidate_gate(session, run)
         if candidate:

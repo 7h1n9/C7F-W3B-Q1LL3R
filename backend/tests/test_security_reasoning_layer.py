@@ -16,6 +16,7 @@ from app.security.schemas import (
     ValidationStatus,
     VulnerabilityHypothesis,
 )
+from app.security.decision import security_decision_engine
 from app.security.service import security_finding_service
 from app.services.solver_state import solver_state_service
 
@@ -137,6 +138,39 @@ def test_created_security_finding_allows_planner_reporting():
 
     assert guidance["next_action"] == "REPORTING"
     assert guidance["completion_allowed"] is True
+
+
+def test_information_evidence_cannot_enter_completion_phase():
+    decision = security_decision_engine.decide({
+        "information_evidence": [
+            {"fact_key": "DATABASE()"},
+            {"fact_key": "VERSION()"},
+        ],
+    })
+
+    assert decision is not None
+    assert decision.required_phase == "HYPOTHESIS"
+    assert decision.reporting_allowed is False
+
+
+def test_successful_sql_validation_requires_exploitation_phase():
+    decision = security_decision_engine.decide({
+        "validation_results": [{"type": "SQL_INJECTION_VALIDATION", "status": "SUCCESS"}],
+    })
+
+    assert decision is not None
+    assert decision.required_phase == "EXPLOITATION"
+    assert decision.reporting_allowed is False
+
+
+def test_created_security_finding_enters_reporting_phase():
+    decision = security_decision_engine.decide({
+        "findings": [{"status": "CREATED", "vulnerability_type": "SQL_INJECTION"}],
+    })
+
+    assert decision is not None
+    assert decision.required_phase == "REPORTING"
+    assert decision.reporting_allowed is True
 
 
 def test_sql_injection_complete_chain_creates_finding():
