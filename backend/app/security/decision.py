@@ -43,11 +43,23 @@ class SecurityDecisionEngine:
                 reporting_allowed=False,
                 reason="ExploitResult succeeded; impact must be assessed.",
             )
-        if self._has_status(validations, "SUCCESS"):
+        if self._has_status(validations, "SUCCESS") or self._has_status(validations, "VALIDATED"):
             return SecurityDecision(
                 required_phase="EXPLOITATION",
                 reporting_allowed=False,
                 reason="ValidationResult succeeded; exploitation must confirm security impact.",
+            )
+        if self._has_status(validations, "FAILED"):
+            return SecurityDecision(
+                required_phase="VALIDATION",
+                reporting_allowed=False,
+                reason="Validation failed; a different validation strategy is required.",
+            )
+        if self._has_status(validations, "INCONCLUSIVE"):
+            return SecurityDecision(
+                required_phase="VALIDATION",
+                reporting_allowed=False,
+                reason="Validation is inconclusive; continue controlled validation.",
             )
         if hypotheses:
             return SecurityDecision(

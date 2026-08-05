@@ -11,10 +11,62 @@ from app.security.schemas import (
     InformationEvidence,
     SecurityFinding,
     ValidationControls,
+    ValidationEvidence,
+    ValidationEvidenceStatus,
     ValidationResult,
     ValidationStatus,
     VulnerabilityHypothesis,
 )
+
+
+class ValidationEvidenceService:
+    """Normalize tool-specific validation signals into one result model."""
+
+    def from_result(self, vulnerability_type: str, payload: Mapping[str, Any] | None) -> ValidationEvidence:
+        data = dict(payload or {})
+        kind = str(vulnerability_type or "UNKNOWN").upper().replace(" ", "_")
+        if kind in {"SQL", "SQL_INJECTION", "SQL_INJECTION_VALIDATION"}:
+            stable_true = data.get("stable_true") is True
+            stable_false = data.get("stable_false") is True
+            differential = data.get("boolean_differential", data.get("response_differential", data.get("true_false_differential"))) is True
+            confirmed = data.get("boolean_oracle_confirmed") is True
+            status = ValidationEvidenceStatus.VALIDATED if stable_true and stable_false and differential and confirmed else ValidationEvidenceStatus.INCONCLUSIVE if not (stable_true and stable_false) else ValidationEvidenceStatus.FAILED
+            confidence = 0.95 if status == ValidationEvidenceStatus.VALIDATED else 0.55 if status == ValidationEvidenceStatus.INCONCLUSIVE else 0.35
+            return ValidationEvidence(
+                vulnerability_type="SQL_INJECTION",
+                target=str(data.get("target") or data.get("endpoint") or (data.get("request") or {}).get("url") or ""),
+                parameter=str(data.get("parameter") or data.get("test_field") or ""),
+                request=data.get("request") or data.get("request_contract") or {},
+                response={"true_signature": data.get("true_signature"), "false_signature": data.get("false_signature"), "differential": differential},
+                control_group={"stable_true": stable_true, "stable_false": stable_false, "baseline": data.get("baseline")},
+                confidence=confidence,
+                status=status,
+            )
+
+        if kind == "XSS":
+            reflected = data.get("payload_reflection", data.get("payload_reflected")) is True
+            status = ValidationEvidenceStatus.VALIDATED if reflected else ValidationEvidenceStatus.FAILED if data.get("payload_reflection") is False else ValidationEvidenceStatus.INCONCLUSIVE
+            return ValidationEvidence(vulnerability_type="XSS", target=str(data.get("target") or ""), parameter=str(data.get("parameter") or ""), request=data.get("request") or {}, response=data.get("response") or {"reflected": reflected}, control_group=data.get("control_group") or {}, confidence=0.9 if reflected else 0.3, status=status)
+
+        if kind == "SSRF":
+            internal = data.get("internal_response_evidence", data.get("internal_response")) is True
+            status = ValidationEvidenceStatus.VALIDATED if internal else ValidationEvidenceStatus.FAILED if data.get("internal_response_evidence") is False else ValidationEvidenceStatus.INCONCLUSIVE
+            return ValidationEvidence(vulnerability_type="SSRF", target=str(data.get("target") or ""), parameter=str(data.get("parameter") or ""), request=data.get("request") or {}, response=data.get("response") or {"internal": internal}, control_group=data.get("control_group") or {}, confidence=0.9 if internal else 0.3, status=status)
+
+        if kind in {"FILE_UPLOAD", "FILEUPLOAD"}:
+            accepted = data.get("upload_accepted") is True and (data.get("retrievable") is True or data.get("server_executed") is True)
+            status = ValidationEvidenceStatus.VALIDATED if accepted else ValidationEvidenceStatus.FAILED if data.get("upload_accepted") is False else ValidationEvidenceStatus.INCONCLUSIVE
+            return ValidationEvidence(vulnerability_type="FILE_UPLOAD", target=str(data.get("target") or ""), parameter=str(data.get("parameter") or ""), request=data.get("request") or {}, response=data.get("response") or {}, control_group=data.get("control_group") or {}, confidence=0.9 if accepted else 0.3, status=status)
+
+        if kind in {"COMMAND_INJECTION", "COMMANDINJECTION"}:
+            executed = data.get("command_executed") is True or data.get("output_differential") is True
+            status = ValidationEvidenceStatus.VALIDATED if executed else ValidationEvidenceStatus.FAILED if data.get("command_executed") is False else ValidationEvidenceStatus.INCONCLUSIVE
+            return ValidationEvidence(vulnerability_type="COMMAND_INJECTION", target=str(data.get("target") or ""), parameter=str(data.get("parameter") or ""), request=data.get("request") or {}, response=data.get("response") or {}, control_group=data.get("control_group") or {}, confidence=0.9 if executed else 0.3, status=status)
+
+        return ValidationEvidence(vulnerability_type=kind, target=str(data.get("target") or ""), parameter=str(data.get("parameter") or ""), request=data.get("request") or {}, response=data.get("response") or {}, control_group=data.get("control_group") or {}, confidence=0.0, status=ValidationEvidenceStatus.INCONCLUSIVE)
+
+
+validation_evidence_service = ValidationEvidenceService()
 
 
 INFORMATION_FACT_MARKERS = (
@@ -38,7 +90,8 @@ class SecurityFindingService:
         hypotheses = list(security.get("hypotheses") or [])
         information = list(security.get("information_evidence") or [])
         has_created_finding = any(str(item.get("status") or "").upper() == "CREATED" for item in findings if isinstance(item, Mapping))
-        has_successful_validation = any(str(item.get("status") or "").upper() == "SUCCESS" for item in validations if isinstance(item, Mapping))
+        has_successful_validation = any(str(item.get("status") or "").upper() in {"SUCCESS", "VALIDATED"} for item in validations if isinstance(item, Mapping))
+        has_failed_validation = any(str(item.get("status") or "").upper() == "FAILED" for item in validations if isinstance(item, Mapping))
 
         if has_created_finding:
             return {
@@ -53,6 +106,13 @@ class SecurityFindingService:
                 "next_action": "EXPLOIT_IMPACT_CONFIRMATION",
                 "completion_allowed": False,
                 "rule": "ValidationResult SUCCESS proves validation only; continue with ExploitResult and ImpactAssessment.",
+            }
+        if has_failed_validation:
+            return {
+                "priority": "SECURITY_CONTEXT",
+                "next_action": "CHANGE_VALIDATION_STRATEGY",
+                "completion_allowed": False,
+                "rule": "A failed validation requires a changed validation strategy.",
             }
         if hypotheses or validations or information:
             return {

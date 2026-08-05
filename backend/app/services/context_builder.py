@@ -240,6 +240,7 @@ class ContextBuilder:
                 "rejected_paths": (snapshot_data.get("rejected_paths") if snapshot_data else None) or (state.rejected_paths_json if state else []),
                 "active_hypotheses": (snapshot_data.get("active_hypotheses") if snapshot_data else None) or (state.active_hypotheses_json if state else []),
                 "previous_action_fingerprints": dict(list((state.action_fingerprints_json if state else {}).items())[-5:]),
+                "failed_strategies": list(state.attack_strategy_history_json or []) if state else [],
                 "active_skill_ids": sorted(active_skill_ids),
                 "no_progress_count": state.no_progress_count if state else 0,
                 "last_result_classification": state.last_result_classification if state else None,

@@ -21,6 +21,7 @@ class SolverState(UUIDTimestampMixin, Base):
     run_plan_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
     capability_ledger_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
     security_context_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    attack_strategy_history_json: Mapped[list[dict]] = mapped_column(JSON, nullable=False, default=list)
     read_files_json: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
     read_ranges_json: Mapped[list[dict]] = mapped_column(JSON, nullable=False, default=list)
     content_hashes_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)

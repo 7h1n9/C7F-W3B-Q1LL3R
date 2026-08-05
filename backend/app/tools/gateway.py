@@ -853,6 +853,28 @@ class ToolGateway:
                 result["error_code"] = "LOW_SIGNAL"
                 result["result_status"] = "LOW_SIGNAL"
         facts = dict(structured.get("extracted_facts") or result.get("extracted_facts") or result.get("facts") or {})
+        if name == "sql_boolean_compare":
+            # Boolean Oracle fields are semantic evidence, not generic HTTP
+            # metadata. Persist them in Observation.facts_json so the
+            # reducer remains independent from the artifact filesystem.
+            for key in (
+                "true_signature", "false_signature", "control_signature",
+                "true_false_differential", "boolean_oracle_confirmed",
+                "stable_true", "stable_false", "request_contract",
+                "control_fields", "oracle", "test_field", "subrequest_count",
+            ):
+                if key in structured:
+                    facts[key] = structured[key]
+            true_rows = structured.get("true_results") or []
+            false_rows = structured.get("false_results") or []
+            if "true_signature" not in facts and true_rows and isinstance(true_rows[0], dict):
+                facts["true_signature"] = true_rows[0].get("signature") or {}
+            if "false_signature" not in facts and false_rows and isinstance(false_rows[0], dict):
+                facts["false_signature"] = false_rows[0].get("signature") or {}
+            facts["response_differential"] = structured.get("response_differential", structured.get("true_false_differential"))
+            baseline = structured.get("baseline")
+            if isinstance(baseline, dict) and isinstance(baseline.get("signature"), dict):
+                facts["baseline_signature"] = baseline["signature"]
         for key in ("status_code", "final_url", "redirect_history", "content_type", "selected_headers", "cookie_names", "body_length", "html_title", "html_comments", "forms", "form_actions", "parameter_names", "links", "script_urls", "json_keys", "suspected_credentials", "suspected_flags", "path", "start_line", "end_line", "content_sha256", "matching_paths", "match_snippets", "line_numbers", "generated_files", "stdout_excerpt", "stderr_excerpt", "network_targets", "runtime_ms", "injectable", "parameter", "technique", "dbms", "databases", "tables", "columns", "dumped_rows", "flag_candidates", "raw_output_path", "sqlmap_extraction_completed"):
             if key in structured and key not in facts:
                 facts[key] = structured[key]
@@ -926,6 +948,30 @@ class ToolGateway:
                 "match_snippets": structured.get("match_snippets", []),
                 "line_numbers": structured.get("line_numbers", []),
             }
+        if name == "sql_boolean_compare":
+            true_rows = structured.get("true_results") or []
+            false_rows = structured.get("false_results") or []
+            facts = {
+                **base,
+                "true_results": structured.get("true_results") or [],
+                "false_results": structured.get("false_results") or [],
+                "true_signature": (true_rows[0].get("signature") if true_rows and isinstance(true_rows[0], dict) else None),
+                "false_signature": (false_rows[0].get("signature") if false_rows and isinstance(false_rows[0], dict) else None),
+                "stable_true": structured.get("stable_true"),
+                "stable_false": structured.get("stable_false"),
+                "true_false_differential": structured.get("true_false_differential"),
+                "response_differential": structured.get("response_differential", structured.get("true_false_differential")),
+                "boolean_oracle_confirmed": structured.get("boolean_oracle_confirmed"),
+                "request_contract": structured.get("request") or {},
+                "control_fields": structured.get("control_fields") or {},
+                "oracle": structured.get("oracle") or {},
+                "test_field": structured.get("test_field"),
+                "subrequest_count": structured.get("subrequest_count"),
+            }
+            baseline = structured.get("baseline")
+            if isinstance(baseline, dict) and isinstance(baseline.get("signature"), dict):
+                facts["baseline_signature"] = baseline["signature"]
+            return facts
         return {
             **base,
             "exit_code": structured.get("exit_code"),

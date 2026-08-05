@@ -58,6 +58,18 @@ async def record_tool_failure(session, run, approved: ApprovedAction, error_code
     run.recovery_checkpoint_json = checkpoint
     state = await session.scalar(select(SolverState).where(SolverState.run_id == run.id))
     if state is not None:
+        attack_history = list(state.attack_strategy_history_json or [])
+        attack_entry = payload_strategy_manager.attack_strategy_entry(
+            attack_history,
+            vulnerability_type="SQL_INJECTION" if approved.tool_name == "sql_boolean_compare" else approved.tool_name,
+            target=str(args.get("target_expression") or args.get("test_field") or ""),
+            tool_name=approved.tool_name,
+            payload_family_name=str(strategy_entry["payload_family"]),
+            arguments=args,
+            result="FAILURE",
+            failure_reason=error_code,
+        )
+        state.attack_strategy_history_json = [*attack_history, attack_entry][-200:]
         ledger = dict(state.capability_ledger_json or {})
         ledger_counts = dict(ledger.get("tool_failure_counts") or {})
         ledger_counts[fingerprint] = entry

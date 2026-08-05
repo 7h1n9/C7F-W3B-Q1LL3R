@@ -48,7 +48,7 @@ from app.models.run import (
 from app.orchestration.role_agent_runtime import RoleAgentRuntime
 from app.orchestration.state_machine import RunStatus, transition
 from app.security.decision import security_decision_engine
-from app.security.schemas import InformationEvidence, ValidationResult
+from app.security.schemas import InformationEvidence, ValidationEvidence, ValidationResult
 from app.security.service import security_finding_service
 from app.schemas.multi_agent import (
     AgentRole,
@@ -72,6 +72,7 @@ from app.services.multi_agent import deterministic_controller
 from app.services.solver_state import solver_state_service
 from app.services.run_finalizer import run_finalizer
 from app.services.tool_result_fact_reducer import tool_result_fact_reducer
+from app.services.boolean_oracle_diagnosis import boolean_oracle_diagnosis_service
 from app.services.tool_failure_policy import blocked_failure_for_action, record_tool_failure
 from app.services.payload_strategy import payload_strategy_manager
 from app.services.metadata_stage_decider import metadata_stage_decider
@@ -458,6 +459,30 @@ class MultiAgentOrchestrator:
         candidates = await tool_result_fact_reducer.reduce(session, run, await session.get(Challenge, run.challenge_id), task, result.evidence_ids)
         if candidates:
             result = result.model_copy(update={"new_facts": [*(result.new_facts or []), *candidates]})
+        if task.task_kind in {AgentTaskKind.EXPLOIT.value, AgentTaskKind.RECON.value}:
+            boolean_call = await session.scalar(select(ToolCall).where(
+                ToolCall.run_id == run.id,
+                ToolCall.agent_task_id == task.id,
+                ToolCall.tool_name == "sql_boolean_compare",
+                ToolCall.status == "COMPLETED",
+            ).order_by(ToolCall.created_at.desc()))
+            if boolean_call is not None:
+                observation = await session.scalar(select(Observation).where(
+                    Observation.run_id == run.id,
+                    Observation.tool_call_id == boolean_call.id,
+                ).order_by(Observation.created_at.desc()))
+                diagnosis_payload = dict(observation.facts_json or {}) if observation else {}
+                arguments = boolean_call.arguments_json or {}
+                diagnosis_payload.update({
+                    "request_contract": arguments.get("request") or diagnosis_payload.get("request_contract") or {},
+                    "test_field": arguments.get("test_field") or diagnosis_payload.get("test_field"),
+                    "baseline_value": arguments.get("baseline_value"),
+                    "true_condition": arguments.get("true_condition"),
+                    "false_condition": arguments.get("false_condition"),
+                    "oracle": arguments.get("oracle") or diagnosis_payload.get("oracle") or {},
+                    "control_fields": arguments.get("control_fields") or diagnosis_payload.get("control_fields") or {},
+                })
+                await boolean_oracle_diagnosis_service.record(session, run.id, diagnosis_payload)
         await deterministic_controller.complete_task(session, task.id, result, token)
         # The task result and candidate facts are already durable.  Event
         # fan-out must not hold the controller before it can enter
@@ -1615,10 +1640,12 @@ class MultiAgentOrchestrator:
             # InformationEvidence is retained for Planner visibility, while
             # the required security reasoning collections remain stable.
             "information_evidence": list(raw_security_context.get("information_evidence") or []),
+            "boolean_diagnosis": dict(raw_security_context.get("boolean_diagnosis") or {}),
         }
         working = {
             **working,
             "capability_ledger": (state.capability_ledger_json if state else {}),
+            "failed_strategies": payload_strategy_manager.failed_strategies(list(state.attack_strategy_history_json or [])) if state else [],
             "security_context": security_context,
             "security_reasoning_rules": security_finding_service.planner_guidance(security_context),
             "unverified_candidates": [item.id for item in candidate_result.all()],
@@ -2616,7 +2643,9 @@ class MultiAgentOrchestrator:
 
     async def _record_security_mapping(self, session, run: SolveRun, fact: VerifiedFact) -> None:
         """Materialize the security meaning of a newly verified legacy fact."""
-        mapped = security_finding_service.map_verified_fact(fact)
+        fact_value = fact.value_json if isinstance(fact.value_json, dict) else {}
+        unified = fact_value.get("validation_result") if isinstance(fact_value, dict) else None
+        mapped = ValidationEvidence.model_validate(unified) if isinstance(unified, dict) else security_finding_service.map_verified_fact(fact)
         if mapped is None:
             return
 
@@ -2632,7 +2661,7 @@ class MultiAgentOrchestrator:
             "information_evidence": [],
             **(state.security_context_json or {}),
         }
-        collection = "information_evidence" if isinstance(mapped, InformationEvidence) else "validation_results" if isinstance(mapped, ValidationResult) else None
+        collection = "information_evidence" if isinstance(mapped, InformationEvidence) else "validation_results" if isinstance(mapped, (ValidationResult, ValidationEvidence)) else None
         if collection is None:
             return
         payload = mapped.model_dump(mode="json")
@@ -2987,9 +3016,41 @@ class MultiAgentOrchestrator:
                 await session.refresh(plan_review)
                 await session.refresh(approved)
                 await session.refresh(exec_task)
-                result_review_task, result_review_token = await self.ensure_result_review_continuation(
-                    session, run, exec_task, result_payload
-                )
+                try:
+                    result_review_task, result_review_token = await self.ensure_result_review_continuation(
+                        session, run, exec_task, result_payload
+                    )
+                except DomainError as error:
+                    # A completed Boolean tool call with no strict candidate
+                    # is an inconclusive experiment, not a ResultReview
+                    # promotion failure.  Preserve the safety gate and let
+                    # the Planner choose the bounded calibration path.
+                    if error.code != "RESULT_REVIEW_CANDIDATE_MISSING" or approved.tool_name != "sql_boolean_compare":
+                        raise
+                    run.current_phase = "ORACLE_CALIBRATION"
+                    state = await solver_state_service.load(session, run.id)
+                    if state is not None:
+                        state.current_phase = "ORACLE_CALIBRATION"
+                    await self._controller_event(
+                        session,
+                        run.id,
+                        "analysis.result_review.skipped",
+                        {
+                            "run_id": run.id,
+                            "task_id": exec_task.id,
+                            "reason": "BOOLEAN_ORACLE_INCONCLUSIVE",
+                            "required": [
+                                "true_false_differential",
+                                "stable_true",
+                                "stable_false",
+                                "request_contract",
+                                "control_baseline",
+                            ],
+                        },
+                    )
+                    await self._status(session, run, RunStatus.PLANNING)
+                    context = {"replan_reason": "BOOLEAN_ORACLE_INCONCLUSIVE"}
+                    continue
                 await session.refresh(run)
                 await session.refresh(attempt)
                 await session.refresh(proposal)

@@ -7,8 +7,9 @@ import json
 
 
 PAYLOAD_FAMILIES = (
-    "boolean_compare", "scalar_subquery", "substring", "hex", "length",
-    "exists", "count", "like", "wrapper_variant", "comment_variant",
+    "and_boolean", "or_boolean", "comment_variation", "whitespace_variation",
+    "encoding_variation", "substring", "ascii", "hex", "like", "scalar_subquery",
+    "length", "exists", "count", "wrapper_variant",
 )
 
 
@@ -17,6 +18,16 @@ def payload_family(tool_name: str, arguments: dict) -> str:
     if explicit in PAYLOAD_FAMILIES:
         return explicit
     expression = str(arguments.get("target_expression") or arguments.get("true_condition") or "").lower()
+    if tool_name == "sql_boolean_compare":
+        if "or" in expression and " and " not in expression:
+            return "or_boolean"
+        if "%27" in expression or "char(" in expression or "0x" in expression:
+            return "encoding_variation"
+        if "--" in expression or "/*" in expression or "#" in expression:
+            return "comment_variation"
+        if "  " in expression or "\t" in expression or "\n" in expression:
+            return "whitespace_variation"
+        return "and_boolean"
     for family, markers in {
         "scalar_subquery": ("select", "("), "substring": ("substring", "substr"),
         "hex": ("hex(",), "length": ("length(",), "exists": ("exists",),
@@ -53,6 +64,51 @@ class PayloadStrategyManager:
     def has_unexhausted_family(self, checkpoint: dict, *, tool_name: str, stage: str) -> bool:
         blocked = {item.get("payload_family") for item in checkpoint.get("payload_strategy_history") or [] if item.get("tool_name") == tool_name and item.get("stage") == stage and item.get("status") == "BLOCKED"}
         return len(blocked) < len(PAYLOAD_FAMILIES)
+
+    def attack_strategy_entry(
+        self,
+        history: list[dict],
+        *,
+        vulnerability_type: str,
+        target: str,
+        tool_name: str,
+        payload_family_name: str,
+        arguments: dict,
+        result: str,
+        failure_reason: str,
+    ) -> dict:
+        digest = arguments_digest(arguments)
+        matches = [item for item in history if (
+            item.get("vulnerability_type") == vulnerability_type
+            and item.get("target") == target
+            and item.get("payload_fingerprint") == digest
+        )]
+        attempts = len(matches) + 1
+        return {
+            "vulnerability_type": vulnerability_type,
+            "target": target,
+            "tool_name": tool_name,
+            "payload_family": payload_family_name,
+            "payload_fingerprint": digest,
+            "result": result,
+            "failure_reason": failure_reason,
+            "attempts": attempts,
+            "status": "BLOCKED" if result == "FAILURE" and attempts >= 2 else "AVAILABLE",
+        }
+
+    def is_attack_strategy_blocked(self, history: list[dict], *, vulnerability_type: str, target: str, arguments: dict) -> bool:
+        digest = arguments_digest(arguments)
+        return any(
+            item.get("vulnerability_type") == vulnerability_type
+            and item.get("target") == target
+            and item.get("payload_fingerprint") == digest
+            and item.get("result") == "FAILURE"
+            and int(item.get("attempts") or 0) >= 2
+            for item in history
+        )
+
+    def failed_strategies(self, history: list[dict]) -> list[dict]:
+        return [item for item in history if item.get("result") == "FAILURE"]
 
 
 payload_strategy_manager = PayloadStrategyManager()

@@ -10,7 +10,7 @@ from sqlalchemy import func, select
 
 from app.models.challenge import Challenge
 from app.models.multi_agent import AgentTask, PlannerProposal, VerifiedFact
-from app.models.run import FlagCandidate, RunAttempt, RunEvent, RunExecutionLease, RunUserInput, SolveRun, ToolCall
+from app.models.run import FlagCandidate, RunAttempt, RunContinuation, RunEvent, RunExecutionLease, RunUserInput, SolveRun, ToolCall
 from app.models.solver_state import SolverState
 from app.orchestration.state_machine import RunStatus, transition
 from app.services.run_finalizer import run_finalizer
@@ -109,28 +109,53 @@ class RunSupervisor:
         return len(rows)
 
     async def _execute_continuation(self, continuation_id: str) -> None:
+        # Claim with a short-lived session, then cross the runtime boundary
+        # using only scalar IDs.  Keeping the claimed ORM row/session alive
+        # while entering orchestrator.start() allows an expired relationship
+        # to trigger an implicit async lazy load (MissingGreenlet).
+        continuation = None
         async with SessionLocal() as session:
             item = await continuation_service.claim(session, continuation_id)
             if item is None:
                 return
-            try:
-                if item.kind == "RESULT_REVIEW_PENDING":
-                    from app.orchestration.multi_agent_orchestrator import multi_agent_orchestrator
+            payload = dict(item.payload_json or {})
+            continuation = {
+                "id": str(item.id),
+                "kind": str(item.kind),
+                "run_id": str(item.run_id),
+                "producing_task_id": str(payload.get("producing_task_id") or ""),
+                "user_message": payload.get("user_message"),
+            }
+        # Promotion continuations are only a durable wake-up signal. They
+        # must not remain RUNNING while the next controller cycle evaluates
+        # the Planner barrier, otherwise the continuation blocks the Planner
+        # that it is responsible for waking.
+        completed_before_runtime = continuation["kind"] == "RESULT_REVIEW_PROMOTION"
+        if completed_before_runtime:
+            async with SessionLocal() as session:
+                await continuation_service.complete(session, continuation["id"])
+        try:
+            if continuation["kind"] == "RESULT_REVIEW_PENDING":
+                from app.orchestration.multi_agent_orchestrator import multi_agent_orchestrator
 
-                    await multi_agent_orchestrator._resume_result_review(
-                        str((item.payload_json or {}).get("producing_task_id") or "")
-                    )
-                elif item.kind == "USER_INPUT":
-                    await self.continue_after_user_input(session, item.run_id)
-                else:
-                    from app.orchestration.orchestrator import orchestrator
+                await multi_agent_orchestrator._resume_result_review(
+                    continuation["producing_task_id"]
+                )
+            elif continuation["kind"] == "USER_INPUT":
+                async with SessionLocal() as session:
+                    await self.continue_after_user_input(session, continuation["run_id"])
+            else:
+                from app.orchestration.orchestrator import orchestrator
 
-                    await orchestrator.start(item.run_id, (item.payload_json or {}).get("user_message"))
-                await continuation_service.complete(session, continuation_id)
-            except Exception as error:
-                logger.exception("Durable continuation failed id=%s run_id=%s", continuation_id, item.run_id)
-                await session.rollback()
-                await continuation_service.fail(session, continuation_id, error)
+                await orchestrator.start(continuation["run_id"], continuation["user_message"])
+            if not completed_before_runtime:
+                async with SessionLocal() as session:
+                    await continuation_service.complete(session, continuation["id"])
+        except Exception as error:
+            logger.exception("Durable continuation failed id=%s run_id=%s", continuation["id"], continuation["run_id"])
+            if not completed_before_runtime:
+                async with SessionLocal() as session:
+                    await continuation_service.fail(session, continuation["id"], error)
 
     def _release_run_lock(self, run_id: str, lock: asyncio.Lock) -> None:
         lock.release()
@@ -378,6 +403,22 @@ class RunSupervisor:
             await session.refresh(run)
             if str(run.status) in {"COMPLETED_SOLVED", "COMPLETED_UNSOLVED", "CANCELLED"}:
                 return await self._outcome(session, run)
+            active_continuation = await session.scalar(select(RunContinuation).where(
+                RunContinuation.run_id == run.id,
+                RunContinuation.status.in_(
+                    ("PENDING", "RUNNING")
+                ),
+            ).order_by(RunContinuation.created_at.desc()))
+            if active_continuation is not None:
+                # A persisted continuation owns the next runtime boundary.
+                # Do not enter orchestrator.start from the periodic recovery
+                # driver while that ID-scoped continuation is still active.
+                return RunOutcome(
+                    run.id,
+                    str(run.status),
+                    str(run.current_phase or ""),
+                    "CONTINUATION_ACTIVE",
+                )
             consumed = await consume_user_inputs(session, run, wake_supervisor=False)
             if consumed["items"] and str(run.status) in {"WAITING_USER", "PAUSED_CHECKPOINT", "PAUSED_RECOVERY"}:
                 await self._resolve_waiting_input(session, run)

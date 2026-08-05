@@ -29,6 +29,12 @@ class ValidationStatus(StrEnum):
     INCONCLUSIVE = "INCONCLUSIVE"
 
 
+class ValidationEvidenceStatus(StrEnum):
+    INCONCLUSIVE = "INCONCLUSIVE"
+    VALIDATED = "VALIDATED"
+    FAILED = "FAILED"
+
+
 class ExploitStatus(StrEnum):
     SUCCESS = "SUCCESS"
     FAILED = "FAILED"
@@ -79,6 +85,19 @@ class ValidationResult(SecurityModel):
     confidence: float = Field(default=0.0, ge=0.0, le=1.0)
     controls: ValidationControls = Field(default_factory=ValidationControls)
     reproduction: Reproduction = Field(default_factory=Reproduction)
+
+
+class ValidationEvidence(SecurityModel):
+    """Uniform cross-vulnerability validation result."""
+
+    vulnerability_type: str
+    target: str = ""
+    parameter: str = ""
+    request: Any = Field(default_factory=dict)
+    response: Any = Field(default_factory=dict)
+    control_group: Any = Field(default_factory=dict)
+    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    status: ValidationEvidenceStatus
 
 
 class ExploitScope(SecurityModel):

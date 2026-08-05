@@ -515,6 +515,7 @@ async def get_solver_state(run_id: str, session: AsyncSession = Depends(get_sess
         "rejected_paths_json": state.rejected_paths_json,
         "active_hypotheses_json": state.active_hypotheses_json,
         "action_fingerprints_json": state.action_fingerprints_json,
+        "attack_strategy_history_json": state.attack_strategy_history_json or [],
         "active_skill_ids_json": state.active_skill_ids_json,
         "skill_recommendations_json": state.skill_recommendations_json or [],
         "run_plan_json": state.run_plan_json or {},

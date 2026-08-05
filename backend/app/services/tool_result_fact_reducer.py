@@ -18,6 +18,7 @@ from app.models.challenge import Challenge
 from app.models.multi_agent import AgentTask
 from app.models.run import Artifact, Observation, SolveRun, ToolCall
 from app.services.boolean_oracle_quality import score_boolean_oracle
+from app.security.service import validation_evidence_service
 
 
 class ToolResultFactReducer:
@@ -128,7 +129,13 @@ class ToolResultFactReducer:
         # in ToolModelView or directly in facts_json, so merge those sources.
         view = facts.get("tool_model_view") if isinstance(facts.get("tool_model_view"), dict) else {}
         view_extracted = view.get("extracted_facts") if isinstance(view.get("extracted_facts"), dict) else {}
-        direct_keys = ("version", "version_comment", "current_database", "tables", "columns", "dbms", "stage")
+        direct_keys = (
+            "version", "version_comment", "current_database", "tables", "columns", "dbms", "stage",
+            "true_results", "false_results", "true_signature", "false_signature",
+            "control_signature", "baseline_signature", "true_false_differential", "response_differential",
+            "boolean_oracle_confirmed", "stable_true", "stable_false", "request_contract",
+            "control_fields", "oracle", "test_field", "subrequest_count",
+        )
         direct = {key: facts[key] for key in direct_keys if key in facts}
         structured = {**view_extracted, **direct, **structured}
         extracted = structured.get("extracted_facts") if isinstance(structured.get("extracted_facts"), dict) else {}
@@ -170,14 +177,33 @@ class ToolResultFactReducer:
             # forms so the durable fact is independent of the output layout.
             true_signature = extracted.get("true_signature") or structured.get("true_signature") or (true_rows[0].get("signature") if true_rows and isinstance(true_rows[0], dict) else None)
             false_signature = extracted.get("false_signature") or structured.get("false_signature") or (false_rows[0].get("signature") if false_rows and isinstance(false_rows[0], dict) else None)
-            differential = structured.get("true_false_differential", extracted.get("differential"))
+            differential = structured.get("response_differential", structured.get("true_false_differential", extracted.get("differential")))
             quality = score_boolean_oracle({**structured, "true_signature": true_signature, "false_signature": false_signature, "true_false_differential": differential})
-            confirmed = bool(structured.get("boolean_oracle_confirmed") is True or differential is True or (true_signature is not None and false_signature is not None))
+            args = call.arguments_json or {}
+            request_contract = args.get("request") or structured.get("request_contract") or {}
+            oracle_contract = args.get("oracle") or structured.get("oracle") or {}
+            control_fields = args.get("control_fields") or structured.get("control_fields") or {}
+            stable_true = structured.get("stable_true") is True
+            stable_false = structured.get("stable_false") is True
+            # A completed tool call is not proof. All dimensions below must
+            # be present before a Candidate BOOLEAN_ORACLE fact is emitted.
+            confirmed = bool(
+                structured.get("boolean_oracle_confirmed") is True
+                and differential is True
+                and stable_true
+                and stable_false
+                and isinstance(true_signature, dict)
+                and isinstance(false_signature, dict)
+                and isinstance(request_contract, dict) and bool(request_contract)
+                and isinstance(oracle_contract, dict) and bool(oracle_contract)
+                and bool(args.get("test_field") or structured.get("test_field"))
+                and "baseline_value" in args
+                and isinstance(control_fields, dict)
+            )
             if confirmed and quality["confidence"] >= 0.8:
-                args = call.arguments_json or {}
                 repeat_stability = {
-                    "true": structured.get("stable_true"),
-                    "false": structured.get("stable_false"),
+                    "true": stable_true,
+                    "false": stable_false,
                 }
                 metadata = challenge.metadata_json or {}
                 asset_mysql = (
@@ -188,6 +214,17 @@ class ToolResultFactReducer:
                     "asset_warranty.mysql_boolean_oracle"
                     if asset_mysql
                     else f"asset_warranty.{args.get('test_field', 'field')}_boolean_oracle"
+                )
+                validation_evidence = validation_evidence_service.from_result(
+                    "SQL_INJECTION",
+                    {
+                        **structured,
+                        **args,
+                        "request": args.get("request") or structured.get("request_contract") or {},
+                        "true_signature": true_signature,
+                        "false_signature": false_signature,
+                        "response_differential": differential,
+                    },
                 )
                 result.append({
                     "fact_key": fact_key,
@@ -202,9 +239,10 @@ class ToolResultFactReducer:
                         "repeat_stability": repeat_stability,
                         "repeat_count": structured.get("repeat_count") or structured.get("subrequest_count") or max(len(true_rows), len(false_rows)),
                         "response_differential": differential,
-                        "request_contract": args.get("request") or {},
-                        "oracle": args.get("oracle") or {},
+                        "request_contract": request_contract,
+                        "oracle": oracle_contract,
                         **quality,
+                        "validation_result": validation_evidence.model_dump(mode="json"),
                     },
                     "confidence": round(quality["confidence"] * 100),
                 })

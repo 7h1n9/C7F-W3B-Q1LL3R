@@ -9,6 +9,7 @@ class SolverStateRead(BaseModel):
     rejected_paths_json: list[dict]
     active_hypotheses_json: list[dict]
     action_fingerprints_json: dict
+    attack_strategy_history_json: list[dict] = []
     active_skill_ids_json: list[str]
     skill_recommendations_json: list[dict]
     run_plan_json: dict = {}
