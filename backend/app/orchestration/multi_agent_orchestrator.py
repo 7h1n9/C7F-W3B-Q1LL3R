@@ -172,8 +172,31 @@ class MultiAgentOrchestrator:
                 return "FLAG_VERIFICATION"
             return "BOUNDED_EXTRACTION"
         state = await solver_state_service.load(session, run.id)
-        security_decision = security_decision_engine.decide(state.security_context_json if state else {})
+        security_decision = security_decision_engine.evaluate(state.security_context_json if state else {})
         if security_decision is not None:
+            previous_phase = str(run.current_phase or "")
+            decision_checkpoint = {
+                "required_phase": security_decision.required_phase,
+                "reason": security_decision.reason,
+                "confidence": security_decision.confidence,
+            }
+            checkpoint = dict(run.recovery_checkpoint_json or {})
+            last_decision = checkpoint.get("security_decision") or {}
+            if {key: last_decision.get(key) for key in decision_checkpoint} != decision_checkpoint:
+                checkpoint["security_decision"] = {**decision_checkpoint, "planner_replan_emitted": False}
+                run.recovery_checkpoint_json = checkpoint
+                await self._controller_event(
+                    session,
+                    run.id,
+                    "security.decision.created",
+                    {
+                        "run_id": run.id,
+                        "previous_phase": previous_phase,
+                        "required_phase": security_decision.required_phase,
+                        "reason": security_decision.reason,
+                        "confidence": security_decision.confidence,
+                    },
+                )
             return security_decision.required_phase
         ledger = state.capability_ledger_json if state else {}
         candidate = await self._candidate_gate(session, run)
@@ -2587,8 +2610,29 @@ class MultiAgentOrchestrator:
             parent: str | None = None
             context: dict = {}
             for cycle in range(max_cycles):
-                await self._phase(session, run, await self._capability_phase(session, run))
-                planner_task, planner_token = await self._task(session, run, AgentRole.PLANNER, AgentTaskKind.PLANNING, "Select the next bounded stage from the current memory snapshot.", [], parent=parent, context=context)
+                required_phase = await self._capability_phase(session, run)
+                await self._phase(session, run, required_phase)
+                security_context = (run.recovery_checkpoint_json or {}).get("security_decision")
+                if security_context and not security_context.get("planner_replan_emitted"):
+                    checkpoint = dict(run.recovery_checkpoint_json or {})
+                    checkpoint["security_decision"] = {**security_context, "planner_replan_emitted": True}
+                    run.recovery_checkpoint_json = checkpoint
+                    await self._controller_event(
+                        session,
+                        run.id,
+                        "planner.replan.dispatched",
+                        {
+                            "run_id": run.id,
+                            "source": "security_decision",
+                            "required_phase": security_context.get("required_phase"),
+                            "reason": security_context.get("reason"),
+                        },
+                    )
+                planner_context = {
+                    **context,
+                    **({"security_decision": security_context} if security_context else {}),
+                }
+                planner_task, planner_token = await self._task(session, run, AgentRole.PLANNER, AgentTaskKind.PLANNING, "Select the next bounded stage from the current memory snapshot.", [], parent=parent, context=planner_context)
                 planner_result = await self._complete(session, run, planner_task, planner_token, await self.runtime.execute(session, run.id, challenge.id, attempt.id, planner_task.id, planner_token))
                 if planner_result.status != AgentTaskStatus.COMPLETED:
                     run.last_error_code = "PLANNER_RESULT_INVALID"
@@ -2676,7 +2720,9 @@ class MultiAgentOrchestrator:
                 exec_task, exec_token = production_task, production_token
                 if exec_task is None or exec_token is None:
                     raise DomainError("PLAN_REVIEW_PERSISTENCE_INCOMPLETE", "Approved PLAN_REVIEW has no production task lease.")
-                await self._phase(session, run, "FLAG_VERIFICATION" if role == AgentRole.VERIFY else proposal.current_stage)
+                active_security_phase = ((run.recovery_checkpoint_json or {}).get("security_decision") or {}).get("required_phase")
+                execution_phase = "FLAG_VERIFICATION" if role == AgentRole.VERIFY else active_security_phase or proposal.current_stage
+                await self._phase(session, run, execution_phase)
                 await self._status(session, run, RunStatus.EXECUTING)
                 if approved is None:
                     raise DomainError("PLAN_REVIEW_PERSISTENCE_INCOMPLETE", "Approved PLAN_REVIEW has no ApprovedAction.")
@@ -2936,7 +2982,9 @@ class MultiAgentOrchestrator:
                             status="ACCEPTED",
                         ))
                         await session.flush()
-                next_phase = result_review_row.next_phase if result_review_row.decision == AnalysisDecision.APPROVE.value else "HYPOTHESIS"
+                legacy_next_phase = result_review_row.next_phase if result_review_row.decision == AnalysisDecision.APPROVE.value else "HYPOTHESIS"
+                active_security_phase = ((run.recovery_checkpoint_json or {}).get("security_decision") or {}).get("required_phase")
+                next_phase = active_security_phase or legacy_next_phase
                 run.current_phase = next_phase
                 state_after_review = await solver_state_service.load(session, run.id)
                 if state_after_review is not None:

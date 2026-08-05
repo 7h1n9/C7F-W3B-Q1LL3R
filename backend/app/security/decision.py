@@ -10,6 +10,7 @@ class SecurityDecision:
     required_phase: str
     reporting_allowed: bool
     reason: str
+    confidence: float = 1.0
 
 
 class SecurityDecisionEngine:
@@ -61,6 +62,10 @@ class SecurityDecisionEngine:
                 reason="InformationEvidence is environmental information, not vulnerability completion.",
             )
         return None
+
+    def evaluate(self, security_context: Mapping[str, Any] | None) -> SecurityDecision | None:
+        """Compatibility name for controller-facing decision evaluation."""
+        return self.decide(security_context)
 
     @staticmethod
     def _items(context: Mapping[str, Any], key: str) -> list[Mapping[str, Any]]:

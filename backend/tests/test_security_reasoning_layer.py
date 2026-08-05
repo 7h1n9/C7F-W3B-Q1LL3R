@@ -173,6 +173,16 @@ def test_created_security_finding_enters_reporting_phase():
     assert decision.reporting_allowed is True
 
 
+def test_controller_facing_evaluate_alias_returns_security_decision():
+    decision = security_decision_engine.evaluate({
+        "validation_results": [{"status": "SUCCESS"}],
+    })
+
+    assert decision is not None
+    assert decision.required_phase == "EXPLOITATION"
+    assert decision.confidence == 1.0
+
+
 def test_sql_injection_complete_chain_creates_finding():
     hypothesis = VulnerabilityHypothesis(
         type="SQL_INJECTION",
