@@ -9,7 +9,7 @@ import json
 PAYLOAD_FAMILIES = (
     "and_boolean", "or_boolean", "comment_variation", "whitespace_variation",
     "encoding_variation", "substring", "ascii", "hex", "like", "scalar_subquery",
-    "length", "exists", "count", "wrapper_variant",
+    "length", "exists", "count", "wrapper_variant", "error_based", "union", "time_based",
 )
 
 
@@ -19,6 +19,12 @@ def payload_family(tool_name: str, arguments: dict) -> str:
         return explicit
     expression = str(arguments.get("target_expression") or arguments.get("true_condition") or "").lower()
     if tool_name == "sql_boolean_compare":
+        if "union" in expression:
+            return "union"
+        if "sleep(" in expression or "benchmark(" in expression:
+            return "time_based"
+        if any(marker in expression for marker in ("extractvalue", "updatexml", "floor(")):
+            return "error_based"
         if "or" in expression and " and " not in expression:
             return "or_boolean"
         if "%27" in expression or "char(" in expression or "0x" in expression:
@@ -108,7 +114,11 @@ class PayloadStrategyManager:
         )
 
     def failed_strategies(self, history: list[dict]) -> list[dict]:
-        return [item for item in history if item.get("result") == "FAILURE"]
+        return [
+            item for item in history
+            if str(item.get("result") or item.get("status") or "").upper()
+            in {"FAILURE", "FAILED", "INCONCLUSIVE"}
+        ]
 
 
 payload_strategy_manager = PayloadStrategyManager()

@@ -867,6 +867,68 @@ class MultiAgentOrchestrator:
         )
 
     @staticmethod
+    def _experiment_strategy_metadata(
+        tool_name: str,
+        stage: str,
+        arguments: dict,
+        review: AnalysisReview,
+    ) -> dict:
+        """Attach controller-owned attack semantics to an ApprovedAction.
+
+        These fields are metadata for experiment identity only. They are not
+        forwarded to the Runner or Gateway and therefore do not alter the
+        production execution contract.
+        """
+        if tool_name == "sql_boolean_compare":
+            conditions = " ".join(
+                str(arguments.get(name) or "").lower()
+                for name in ("true_condition", "false_condition")
+            )
+            if "sleep(" in conditions or "benchmark(" in conditions:
+                family, variant, signal = "TIME_BASED", "DELAY", "TIMING_DIFFERENTIAL"
+            elif "union" in conditions:
+                family, variant, signal = "UNION", "SELECT", "CONTENT_DIFFERENTIAL"
+            elif any(item in conditions for item in ("extractvalue", "updatexml", "floor(")):
+                family, variant, signal = "ERROR_BASED", "ERROR", "ERROR_DIFFERENTIAL"
+            elif " or " in f" {conditions} ":
+                family, variant, signal = "BOOLEAN", "OR", "RESPONSE_DIFFERENTIAL"
+            else:
+                family, variant, signal = "BOOLEAN", "AND", "RESPONSE_DIFFERENTIAL"
+            request = arguments.get("request") if isinstance(arguments.get("request"), dict) else {}
+            return {
+                "vulnerability_type": "SQL_INJECTION",
+                "target": {
+                    "endpoint": request.get("url") or request.get("endpoint") or "",
+                    "parameter": arguments.get("test_field") or review.independent_variable or "",
+                },
+                "strategy_family": family,
+                "strategy_variant": variant,
+                "signal_type": signal,
+                "encoding": str(arguments.get("encoding") or "PLAIN"),
+            }
+        if tool_name == "http_request" and str(stage).upper() == "BUSINESS_BASELINE":
+            request = arguments.get("request") if isinstance(arguments.get("request"), dict) else arguments
+            return {
+                "vulnerability_type": "BUSINESS_BASELINE",
+                "target": {
+                    "endpoint": request.get("url") or request.get("endpoint") or "",
+                    "parameter": review.independent_variable or "",
+                },
+                "strategy_family": "BASELINE",
+                "strategy_variant": str(stage).upper(),
+                "signal_type": "BUSINESS_RESPONSE",
+                "encoding": "PLAIN",
+            }
+        return {
+            "vulnerability_type": "GENERAL",
+            "target": {"endpoint": "", "parameter": review.independent_variable or ""},
+            "strategy_family": str(stage or "GENERAL").upper(),
+            "strategy_variant": str(tool_name or "GENERAL").upper(),
+            "signal_type": "OBSERVATION",
+            "encoding": "PLAIN",
+        }
+
+    @staticmethod
     def _mysql_metadata_stage(challenge: Challenge, *, current_stage: str, next_agent: str) -> bool:
         metadata = challenge.metadata_json or {}
         return (
@@ -1611,6 +1673,12 @@ class MultiAgentOrchestrator:
         stage = str(proposal.current_stage or run.current_phase or "").upper()
         hypothesis = str(review.question_being_tested or proposal.objective or proposal.success_condition or "")
         independent_variable = str(review.independent_variable or compiled.arguments.get("test_field") or compiled.arguments.get("stage") or "")
+        strategy_metadata = self._experiment_strategy_metadata(
+            tool_name,
+            stage,
+            compiled.arguments,
+            review,
+        )
         reserved, experiment = await experiment_strategy_manager.reserve(
             session,
             run,
@@ -1620,6 +1688,7 @@ class MultiAgentOrchestrator:
             independent_variable=independent_variable,
             hypothesis=hypothesis,
             expected_signal=review.expected_true_signal_json or review.expected_false_signal_json,
+            strategy_metadata=strategy_metadata,
         )
         if not reserved:
             await self._controller_event(session, run.id, "experiment.duplicate_rejected", {"experiment_id": experiment.get("experiment_id"), "tool_name": tool_name, "stage": stage, "code": "EXPERIMENT_ALREADY_EXECUTED"})
@@ -1643,7 +1712,12 @@ class MultiAgentOrchestrator:
         # immutable compiled payload below, never this semantic review object.
         item.argument_constraints_json = {"compiled_arguments_digest": compiled.arguments_digest}
         item.argument_constraints_json = {**item.argument_constraints_json, "experiment_fingerprint": experiment_fingerprint, "success_condition": proposal.success_condition}
-        item.argument_constraints_json = {**item.argument_constraints_json, "experiment_id": experiment["experiment_id"], "experiment_record": experiment}
+        item.argument_constraints_json = {
+            **item.argument_constraints_json,
+            "experiment_id": experiment["experiment_id"],
+            "experiment_record": experiment,
+            "strategy_metadata": strategy_metadata,
+        }
         return item
 
     async def _memory(self, session, run: SolveRun, *, stage: str, task: AgentTask, working: dict) -> None:
@@ -1672,7 +1746,10 @@ class MultiAgentOrchestrator:
         working = {
             **working,
             "capability_ledger": (state.capability_ledger_json if state else {}),
+            "attack_strategy_history": list(state.attack_strategy_history_json or []) if state else [],
             "failed_strategies": payload_strategy_manager.failed_strategies(list(state.attack_strategy_history_json or [])) if state else [],
+            "strategy_feedback": dict(state.last_experiment_json or {}) if state else {},
+            "strategy_migration": dict((state.last_experiment_json or {}).get("strategy_migration") or {}) if state else {},
             "security_context": security_context,
             "security_reasoning_rules": security_finding_service.planner_guidance(security_context),
             "unverified_candidates": [item.id for item in candidate_result.all()],
@@ -2527,6 +2604,7 @@ class MultiAgentOrchestrator:
                 observed_signal={"result_status": result_status, "tool_call_ids": [call.id for call in calls]},
                 result="COMPLETED",
                 next_allowed_actions=["invalid_baseline"] if str(approved_action.tool_name) == "http_request" and str(run.current_phase) == "BUSINESS_BASELINE" else [],
+                diagnosis=(result.get("structured_result") if isinstance(result.get("structured_result"), dict) else result) if str(approved_action.tool_name) == "sql_boolean_compare" else None,
             )
         completed = AgentTaskResultContract(
             task_id=task.id,
