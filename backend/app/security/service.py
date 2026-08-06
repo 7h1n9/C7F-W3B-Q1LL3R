@@ -90,7 +90,10 @@ class SecurityFindingService:
         hypotheses = list(security.get("hypotheses") or [])
         information = list(security.get("information_evidence") or [])
         has_created_finding = any(str(item.get("status") or "").upper() == "CREATED" for item in findings if isinstance(item, Mapping))
-        has_successful_validation = any(str(item.get("status") or "").upper() in {"SUCCESS", "VALIDATED"} for item in validations if isinstance(item, Mapping))
+        # Read legacy SUCCESS payloads for backward compatibility, but all
+        # newly produced and persisted values use the canonical VALIDATED
+        # status.
+        has_successful_validation = any(str(item.get("status") or "").upper() in {"VALIDATED", "SUCCESS"} for item in validations if isinstance(item, Mapping))
         has_failed_validation = any(str(item.get("status") or "").upper() == "FAILED" for item in validations if isinstance(item, Mapping))
 
         if has_created_finding:
@@ -105,7 +108,7 @@ class SecurityFindingService:
                 "priority": "SECURITY_CONTEXT",
                 "next_action": "EXPLOIT_IMPACT_CONFIRMATION",
                 "completion_allowed": False,
-                "rule": "ValidationResult SUCCESS proves validation only; continue with ExploitResult and ImpactAssessment.",
+                "rule": "ValidationResult VALIDATED proves validation only; continue with ExploitResult and ImpactAssessment.",
             }
         if has_failed_validation:
             return {
@@ -182,17 +185,66 @@ class SecurityFindingService:
             # impact claim, but it is sufficient to materialize the semantic
             # validation result required by this compatibility layer.
             payload = value if isinstance(value, Mapping) else {}
+            embedded = payload.get("validation_result")
+            if isinstance(embedded, Mapping):
+                return self.validation_result_from_evidence(
+                    embedded,
+                    hypothesis_id=str(payload.get("hypothesis_id") or ""),
+                    evidence_ids=evidence_ids,
+                )
             controls = ValidationControls.model_validate(payload.get("controls") or {})
             confidence = float(self._value(fact, "confidence") or 0) / 100
             return ValidationResult(
                 type="SQL_INJECTION_VALIDATION",
                 hypothesis_id=str(payload.get("hypothesis_id") or ""),
-                status=ValidationStatus.SUCCESS,
+                status=ValidationStatus.VALIDATED,
                 evidence_ids=evidence_ids,
                 confidence=min(max(confidence, 0.0), 1.0),
                 controls=controls,
             )
         return None
+
+    @staticmethod
+    def validation_result_from_evidence(
+        evidence: Mapping[str, Any],
+        *,
+        hypothesis_id: str = "",
+        evidence_ids: list[str] | None = None,
+    ) -> ValidationResult:
+        """Normalize the compatibility evidence shape into ValidationResult.
+
+        The reducer may still attach ValidationEvidence-shaped data to a
+        legacy Candidate Fact.  The durable SecurityContext must contain the
+        canonical ValidationResult shape so Lifecycle and Finding consume one
+        status vocabulary.
+        """
+        raw_status = str(evidence.get("status") or "INCONCLUSIVE").upper()
+        status = (
+            ValidationStatus.VALIDATED
+            if raw_status in {"VALIDATED", "SUCCESS"}
+            else ValidationStatus.FAILED
+            if raw_status == "FAILED"
+            else ValidationStatus.INCONCLUSIVE
+        )
+        control_group = evidence.get("control_group") or evidence.get("controls") or {}
+        stable_true = bool(control_group.get("stable_true")) if isinstance(control_group, Mapping) else False
+        stable_false = bool(control_group.get("stable_false")) if isinstance(control_group, Mapping) else False
+        return ValidationResult(
+            hypothesis_id=hypothesis_id,
+            type="SQL_INJECTION_VALIDATION",
+            status=status,
+            evidence_ids=list(evidence_ids or evidence.get("evidence_ids") or []),
+            confidence=min(max(float(evidence.get("confidence") or 0.0), 0.0), 1.0),
+            controls=ValidationControls(
+                baseline=True,
+                positive_control=stable_true,
+                negative_control=stable_false,
+            ),
+            reproduction={
+                "repeat_count": int(evidence.get("repeat_count") or 0),
+                "stable": stable_true and stable_false,
+            },
+        )
 
     def create_finding(
         self,
@@ -202,7 +254,7 @@ class SecurityFindingService:
         impact: ImpactAssessment,
     ) -> SecurityFinding | None:
         """Create a conclusion only when the complete evidence chain exists."""
-        if validation.status != ValidationStatus.SUCCESS:
+        if validation.status != ValidationStatus.VALIDATED:
             return None
         if validation.hypothesis_id != hypothesis.id or exploit.validation_id != validation.id:
             return None

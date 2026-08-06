@@ -50,7 +50,7 @@ from app.orchestration.role_agent_runtime import RoleAgentRuntime
 from app.orchestration.state_machine import RunStatus, transition
 from app.security.decision import security_decision_engine
 from app.security.lifecycle import vulnerability_lifecycle_engine
-from app.security.schemas import InformationEvidence, ValidationEvidence, ValidationResult
+from app.security.schemas import InformationEvidence, ValidationResult
 from app.security.service import security_finding_service
 from app.security.task_policy import get_allowed_tools, validate_tools, vulnerability_type_from_metadata
 from app.schemas.multi_agent import (
@@ -215,6 +215,32 @@ class MultiAgentOrchestrator:
                 return "BUSINESS_BASELINE"
             if "asset_warranty.mysql_boolean_oracle" not in keys:
                 return "BOOLEAN_ORACLE"
+
+            # Baseline and Boolean execution remain deterministic Asset
+            # Warranty constraints.  Once Boolean promotion has materialized
+            # a canonical validation result, the security lifecycle owns the
+            # next phase instead of the legacy calibration sequence.
+            state = await solver_state_service.load(session, run.id)
+            security_context = dict(state.security_context_json or {}) if state else {}
+            if security_context.get("validation_results"):
+                lifecycle = vulnerability_lifecycle_engine.evaluate(security_context)
+                checkpoint = dict(run.recovery_checkpoint_json or {})
+                previous_lifecycle = checkpoint.get("security_lifecycle") or {}
+                if previous_lifecycle != lifecycle:
+                    checkpoint["security_lifecycle"] = lifecycle
+                    run.recovery_checkpoint_json = checkpoint
+                    await self._controller_event(
+                        session,
+                        run.id,
+                        "security.lifecycle.created",
+                        {
+                            "run_id": run.id,
+                            "previous_state": previous_lifecycle.get("current_state"),
+                            **lifecycle,
+                        },
+                    )
+                return str(lifecycle["required_phase"])
+
             if "asset_warranty.oracle_calibration_matrix" not in keys or "asset_warranty.mysql_dbms" not in keys:
                 return "ORACLE_CALIBRATION"
             metadata_required = {
@@ -1110,6 +1136,11 @@ class MultiAgentOrchestrator:
         ):
             state = await solver_state_service.load(session, run.id)
             ledger = state.capability_ledger_json if state else {}
+            lifecycle_required_phase = ""
+            if state and (state.security_context_json or {}).get("validation_results"):
+                lifecycle_required_phase = str(
+                    vulnerability_lifecycle_engine.evaluate(state.security_context_json).get("required_phase") or ""
+                ).upper()
             verified_keys = set((await session.scalars(select(VerifiedFact.fact_key).where(
                 VerifiedFact.run_id == run.id,
                 VerifiedFact.promotion_status == "VERIFIED",
@@ -1154,6 +1185,19 @@ class MultiAgentOrchestrator:
                     "required_capabilities": ["business_response_differential_confirmed"],
                     "success_condition": "Confirm a stable paired TRUE/FALSE Boolean Oracle from the asset-warranty POST contract.",
                     "budget": contract.budget.model_copy(update={"max_logical_calls": 1, "max_internal_requests": 12, "max_runtime_seconds": 300}),
+                })
+            elif lifecycle_required_phase == "EXPLOITATION":
+                # The Boolean fact has already crossed the security
+                # validation boundary.  Keep the Asset-specific baseline and
+                # provenance constraints, but do not send the proposal back
+                # through the legacy calibration stage.
+                contract = contract.model_copy(update={
+                    "current_stage": "EXPLOITATION",
+                    "next_agent": AgentRole.EXPLOIT,
+                    "objective": "Continue from the validated SQL injection into bounded Asset Warranty exploitation.",
+                    "allowed_tools": ["mysql_metadata_discovery", "boolean_config_extract"],
+                    "required_capabilities": [],
+                    "success_condition": "Produce durable evidence of authorized sensitive-data extraction.",
                 })
             elif "mysql_boolean_oracle_confirmed" in ledger and "mysql_dbms_confirmed" not in ledger:
                 calibration_plan = await self._oracle_calibration_plan(session, run)
@@ -2913,8 +2957,7 @@ class MultiAgentOrchestrator:
             "security.sql_injection.validation": "validation_results",
             "security.sql_injection.exploit": "exploit_results",
         }.get(fact.fact_key)
-        unified = fact_value.get("validation_result") if isinstance(fact_value, dict) else None
-        mapped = ValidationEvidence.model_validate(unified) if isinstance(unified, dict) else security_finding_service.map_verified_fact(fact)
+        mapped = security_finding_service.map_verified_fact(fact)
         if mapped is None and direct_collection is None:
             return
 
@@ -2930,7 +2973,7 @@ class MultiAgentOrchestrator:
             "information_evidence": [],
             **(state.security_context_json or {}),
         }
-        collection = direct_collection or ("information_evidence" if isinstance(mapped, InformationEvidence) else "validation_results" if isinstance(mapped, (ValidationResult, ValidationEvidence)) else None)
+        collection = direct_collection or ("information_evidence" if isinstance(mapped, InformationEvidence) else "validation_results" if isinstance(mapped, ValidationResult) else None)
         if collection is None:
             return
         mapped_payload = mapped.model_dump(mode="json") if mapped is not None else fact_value

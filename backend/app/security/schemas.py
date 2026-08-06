@@ -24,16 +24,20 @@ class HypothesisStatus(StrEnum):
 
 
 class ValidationStatus(StrEnum):
-    SUCCESS = "SUCCESS"
     VALIDATED = "VALIDATED"
     FAILED = "FAILED"
     INCONCLUSIVE = "INCONCLUSIVE"
 
+    # Compatibility alias for older callers.  It deliberately serializes to
+    # VALIDATED, so the persisted security vocabulary has one successful
+    # validation status rather than SUCCESS and VALIDATED as two values.
+    SUCCESS = "VALIDATED"
 
-class ValidationEvidenceStatus(StrEnum):
-    INCONCLUSIVE = "INCONCLUSIVE"
-    VALIDATED = "VALIDATED"
-    FAILED = "FAILED"
+
+# ValidationEvidence remains a compatibility-shaped input object for the
+# cross-vulnerability adapters.  Its status vocabulary is the same canonical
+# ValidationStatus used by ValidationResult.
+ValidationEvidenceStatus = ValidationStatus
 
 
 class ExploitStatus(StrEnum):
