@@ -204,6 +204,50 @@ class SecurityFindingService:
             )
         return None
 
+    def map_exploit_fact(self, fact: Any) -> ExploitResult | None:
+        """Map only durable extraction facts into an ExploitResult.
+
+        Metadata facts are deliberately excluded by fact type. An exploit
+        requires a non-empty extracted value produced by bounded extraction.
+        """
+        fact_key = str(self._value(fact, "fact_key") or "")
+        fact_type = str(self._value(fact, "fact_type") or "").upper()
+        if fact_key != "security.sql_injection.exploit" and fact_type != "EXPLOIT_RESULT":
+            return None
+
+        value = self._value(fact, "value_json")
+        payload = value if isinstance(value, Mapping) else {}
+        raw_data = payload.get("extracted_data")
+        if raw_data is None:
+            raw_data = payload.get("extracted_value")
+        if isinstance(raw_data, (str, int, float, bool)):
+            extracted_data = [raw_data] if str(raw_data).strip() else []
+        elif isinstance(raw_data, list):
+            extracted_data = [item for item in raw_data if item not in (None, "")]
+        else:
+            extracted_data = []
+        if not extracted_data:
+            return None
+
+        raw_confidence = payload.get("confidence")
+        if raw_confidence is None:
+            raw_confidence = float(self._value(fact, "confidence") or 0) / 100
+        try:
+            confidence = float(raw_confidence)
+        except (TypeError, ValueError):
+            confidence = 0.0
+        evidence_ids = list(payload.get("evidence_ids") or self._value(fact, "evidence_ids_json") or [])
+        return ExploitResult(
+            type=str(payload.get("vulnerability_type") or payload.get("type") or "SQL_INJECTION"),
+            validation_id=str(payload.get("validation_id") or ""),
+            status=ExploitStatus.SUCCESS,
+            confidence=min(max(confidence, 0.0), 1.0),
+            method=str(payload.get("method") or "BOOLEAN_EXTRACTION"),
+            extracted_data=extracted_data,
+            evidence_ids=evidence_ids,
+            scope=payload.get("scope") or {"type": "DATA_DISCLOSURE", "data_fields": []},
+        )
+
     @staticmethod
     def validation_result_from_evidence(
         evidence: Mapping[str, Any],

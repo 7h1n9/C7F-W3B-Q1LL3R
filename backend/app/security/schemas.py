@@ -112,8 +112,12 @@ class ExploitScope(SecurityModel):
 
 class ExploitResult(SecurityModel):
     id: str = Field(default_factory=_id)
-    validation_id: str
+    type: str = "SQL_INJECTION"
+    validation_id: str = ""
     status: ExploitStatus
+    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    method: str = ""
+    extracted_data: list[Any] = Field(default_factory=list)
     evidence_ids: list[str] = Field(default_factory=list)
     scope: ExploitScope = Field(default_factory=ExploitScope)
 

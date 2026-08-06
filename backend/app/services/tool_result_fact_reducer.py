@@ -322,6 +322,44 @@ class ToolResultFactReducer:
                 name = str(column.get("name") if isinstance(column, dict) else column)
                 if name:
                     result.append({"fact_key": f"asset_warranty.mysql_candidate_column.{name}" if asset_mysql else f"mysql.column.{name}", "fact_type": "SQL_COLUMN", "value": {"column": name, "metadata": column, "dbms": "mysql", "table_schema": "DATABASE()"}, "confidence": 90})
+        if call.tool_name == "boolean_config_extract":
+            metadata = challenge.metadata_json or {}
+            asset_mysql = (
+                str(metadata.get("adapter") or "").lower() == "asset_warranty"
+                and str(metadata.get("dbms") or "").lower() == "mysql"
+            )
+            if asset_mysql:
+                extracted_value = structured.get("extracted_value")
+                if extracted_value is None:
+                    extracted_value = structured.get("value")
+                extracted_data = structured.get("extracted_data")
+                if extracted_data is None and extracted_value not in (None, ""):
+                    extracted_data = [extracted_value] if not isinstance(extracted_value, list) else extracted_value
+                if isinstance(extracted_data, list):
+                    extracted_data = [item for item in extracted_data if item not in (None, "")]
+                else:
+                    extracted_data = []
+                result_status = str(payload.get("status") or structured.get("status") or "").upper()
+                extraction_confirmed = bool(extracted_data) and (
+                    result_status in {"COMPLETED", "SUCCESS"}
+                    or structured.get("oracle_verified") is True
+                )
+                if extraction_confirmed:
+                    result.append({
+                        "fact_key": "security.sql_injection.exploit",
+                        "fact_type": "EXPLOIT_RESULT",
+                        "value": {
+                            "vulnerability_type": "SQL_INJECTION",
+                            "status": "SUCCESS",
+                            "method": "BOOLEAN_EXTRACTION",
+                            "extracted_data": extracted_data,
+                            "extracted_value": extracted_data[0] if len(extracted_data) == 1 else None,
+                            "evidence_ids": list(evidence_ids),
+                            "scope": {"type": "DATA_DISCLOSURE", "data_fields": []},
+                            "confidence": 0.95,
+                        },
+                        "confidence": 95,
+                    })
         if call.tool_name == "oracle_expression_calibration":
             structured = self._normalize_calibration(structured, call, evidence_ids)
             matrix = structured.get("calibration_matrix") if isinstance(structured.get("calibration_matrix"), list) else []

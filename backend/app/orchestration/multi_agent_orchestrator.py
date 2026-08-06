@@ -50,7 +50,7 @@ from app.orchestration.role_agent_runtime import RoleAgentRuntime
 from app.orchestration.state_machine import RunStatus, transition
 from app.security.decision import security_decision_engine
 from app.security.lifecycle import vulnerability_lifecycle_engine
-from app.security.schemas import InformationEvidence, ValidationResult
+from app.security.schemas import ExploitResult, InformationEvidence, ValidationResult
 from app.security.service import security_finding_service
 from app.security.task_policy import get_allowed_tools, validate_tools, vulnerability_type_from_metadata
 from app.schemas.multi_agent import (
@@ -2958,7 +2958,9 @@ class MultiAgentOrchestrator:
             "security.sql_injection.exploit": "exploit_results",
         }.get(fact.fact_key)
         mapped = security_finding_service.map_verified_fact(fact)
-        if mapped is None and direct_collection is None:
+        if mapped is None and fact.fact_key == "security.sql_injection.exploit":
+            mapped = security_finding_service.map_exploit_fact(fact)
+        if mapped is None:
             return
 
         state = await solver_state_service.load(session, run.id)
@@ -2973,7 +2975,12 @@ class MultiAgentOrchestrator:
             "information_evidence": [],
             **(state.security_context_json or {}),
         }
-        collection = direct_collection or ("information_evidence" if isinstance(mapped, InformationEvidence) else "validation_results" if isinstance(mapped, ValidationResult) else None)
+        collection = (
+            "information_evidence" if isinstance(mapped, InformationEvidence)
+            else "validation_results" if isinstance(mapped, ValidationResult)
+            else "exploit_results" if isinstance(mapped, ExploitResult)
+            else None
+        )
         if collection is None:
             return
         mapped_payload = mapped.model_dump(mode="json") if mapped is not None else fact_value
@@ -3000,6 +3007,22 @@ class MultiAgentOrchestrator:
                     "evidence_ids": payload.get("evidence_ids") or fact.evidence_ids_json,
                 },
             )
+        elif collection == "exploit_results":
+            await self._controller_event(
+                session,
+                run.id,
+                "exploit.created",
+                {
+                    "fact_id": fact.id,
+                    "fact_key": fact.fact_key,
+                    "status": payload.get("status"),
+                    "type": payload.get("type") or payload.get("vulnerability_type"),
+                    "method": payload.get("method"),
+                    "confidence": payload.get("confidence"),
+                    "evidence_ids": payload.get("evidence_ids") or fact.evidence_ids_json,
+                },
+            )
+        if collection in {"validation_results", "exploit_results"}:
             await self._controller_event(
                 session,
                 run.id,
@@ -3008,7 +3031,7 @@ class MultiAgentOrchestrator:
                     "collection": collection,
                     "fact_id": fact.id,
                     "fact_key": fact.fact_key,
-                    "validation_count": len(context[collection]),
+                    "item_count": len(context[collection]),
                 },
             )
 
