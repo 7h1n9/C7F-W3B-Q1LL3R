@@ -21,6 +21,7 @@ from app.models.multi_agent import AnalysisReview, EvidenceLedger, PlannerPropos
 from app.models.run import Hypothesis, SolveRun, ToolCall
 from app.models.solver_state import SolverState
 from app.schemas.multi_agent import CompiledApprovedAction
+from app.security.task_policy import get_allowed_tools, validate_tools, vulnerability_type_from_metadata
 from app.tools.registry import ToolDefinition, load_tool_definitions
 
 COMPILER_NAME = "approved_action_compiler"
@@ -65,6 +66,36 @@ class ApprovedActionCompiler:
         definition = definitions.get(tool_name)
         if definition is None or not definition.enabled:
             raise self._error(tool_name, "TOOL_NOT_AVAILABLE", {"tool": tool_name})
+        metadata = challenge.metadata_json or {}
+        if str(metadata.get("adapter") or "").lower() != "asset_warranty":
+            vulnerability_type = vulnerability_type_from_metadata(metadata)
+            current_phase = str(run.current_phase or proposal.current_stage or "")
+            current_policy = get_allowed_tools(vulnerability_type, current_phase)
+            declared_policy = get_allowed_tools(vulnerability_type, proposal.current_stage)
+            policy_result = validate_tools(
+                vulnerability_type,
+                current_phase,
+                [tool_name],
+            )
+            if current_policy["allowed_tools"] and declared_policy["phase"] != current_policy["phase"]:
+                policy_result = {
+                    "decision": "REVISE",
+                    "reason": f"proposal stage {declared_policy['phase']} does not match current phase {current_policy['phase']}",
+                    "invalid_tools": [],
+                    "policy": current_policy,
+                }
+            if policy_result["decision"] == "REVISE":
+                raise DomainError(
+                    "TASK_POLICY_VIOLATION",
+                    "ApprovedAction tool is not allowed in the current vulnerability phase.",
+                    {
+                        "tool": tool_name,
+                        "decision": "REVISE",
+                        "policy": policy_result["policy"],
+                        "reason": policy_result["reason"],
+                    },
+                    422,
+                )
         try:
             arguments = await self._compile_arguments(session, run, challenge, proposal, review, tool_name, definition)
             validated = definition.validate_arguments(arguments)

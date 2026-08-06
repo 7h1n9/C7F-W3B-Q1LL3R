@@ -116,12 +116,16 @@ class RoleAgentRuntime:
 
     def _prompt(self, task: AgentTask, policy: AgentRolePolicy, memory: dict, challenge: Challenge) -> str:
         adapter = adapter_for(challenge)
+        task_context = task.context_json or {}
         context = {
             "run_id": task.run_id, "agent_task_id": task.id, "role": task.agent_role,
             "task_kind": task.task_kind, "objective": task.objective,
             "success_condition": task.success_condition,
             "stop_conditions": task.stop_conditions_json or [],
-            "allowed_tools": task.allowed_tools_json or [], "task_context": task.context_json or {},
+            "allowed_tools": task.allowed_tools_json or [],
+            "current_phase": task_context.get("current_phase"),
+            "task_policy": task_context.get("task_policy") or {},
+            "task_context": task_context,
             "memory": memory,
             "challenge": {"name": challenge.name, "description": challenge.description, "target_url": challenge.target_url, "allowed_hosts": challenge.allowed_hosts, "metadata": challenge.metadata_json or {}},
             "challenge_adapter": adapter.context(challenge) if adapter else None,

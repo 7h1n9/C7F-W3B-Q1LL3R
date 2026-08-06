@@ -52,6 +52,7 @@ from app.security.decision import security_decision_engine
 from app.security.lifecycle import vulnerability_lifecycle_engine
 from app.security.schemas import InformationEvidence, ValidationEvidence, ValidationResult
 from app.security.service import security_finding_service
+from app.security.task_policy import get_allowed_tools, validate_tools, vulnerability_type_from_metadata
 from app.schemas.multi_agent import (
     AgentRole,
     AgentTaskContract,
@@ -452,6 +453,12 @@ class MultiAgentOrchestrator:
         logger.warning("multi_agent.task.policy.done run_id=%s role=%s", run.id, role.value)
         selected_budget = budget or TaskBudget(max_logical_calls=0, max_internal_requests=min(8, policy.max_internal_requests), max_runtime_seconds=min(300, policy.max_runtime_seconds))
         max_calls = min(int(selected_budget.max_logical_calls), int(policy.max_logical_calls)) if tools else 0
+        task_context = dict(context or {})
+        task_context.setdefault("current_phase", str(run.current_phase or ""))
+        if role == AgentRole.PLANNER:
+            challenge = await session.get(Challenge, run.challenge_id)
+            vulnerability_type = vulnerability_type_from_metadata(challenge.metadata_json if challenge else {})
+            task_context["task_policy"] = get_allowed_tools(vulnerability_type, run.current_phase)
         contract = AgentTaskContract(
             task_id=f"AT-{role.value}-{uuid.uuid4().hex[:12]}", run_id=run.id, agent_role=role, task_kind=kind,
             objective=objective, allowed_tools=tools, created_by_task_id=parent,
@@ -459,7 +466,7 @@ class MultiAgentOrchestrator:
             input_snapshot_version=snapshot.version if snapshot else 0,
             budget=selected_budget.model_copy(update={"max_logical_calls": max_calls}),
             success_condition=success_condition,
-            stop_conditions=stop_conditions or ["honor task budget", "stop after one discriminating experiment"], context=context or {},
+            stop_conditions=stop_conditions or ["honor task budget", "stop after one discriminating experiment"], context=task_context,
         )
         logger.warning("multi_agent.task.create.begin run_id=%s task_id=%s role=%s kind=%s parent=%s", run.id, contract.task_id, role.value, kind.value, parent)
         item = await deterministic_controller.create_task(session, contract)
@@ -1209,6 +1216,41 @@ class MultiAgentOrchestrator:
                 "required_capabilities": ["boolean_predicate_oracle_confirmed"],
                 "budget": contract.budget.model_copy(update={"max_logical_calls": 1, "max_internal_requests": 40, "max_runtime_seconds": 600}),
             })
+        # Generic vulnerability paths are governed by the current controller
+        # phase, not by a model-declared future stage.  Asset Warranty keeps
+        # its existing deterministic routing above and is intentionally exempt
+        # from this generic policy.
+        if not self._asset_warranty_mysql(challenge):
+            vulnerability_type = vulnerability_type_from_metadata(metadata)
+            policy_phase = str(run.current_phase or contract.current_stage or "")
+            policy_result = validate_tools(vulnerability_type, policy_phase, contract.allowed_tools)
+            current_policy = policy_result["policy"]
+            declared_policy = get_allowed_tools(vulnerability_type, contract.current_stage)
+            if current_policy["allowed_tools"] and declared_policy["phase"] != current_policy["phase"]:
+                policy_result = {
+                    "decision": "REVISE",
+                    "reason": f"proposal stage {declared_policy['phase']} does not match current phase {current_policy['phase']}",
+                    "invalid_tools": [],
+                    "policy": current_policy,
+                }
+            if policy_result["decision"] == "REVISE":
+                details = {
+                    "task_id": task.id,
+                    "current_phase": policy_result["policy"]["phase"],
+                    "declared_stage": contract.current_stage,
+                    "allowed_tools": policy_result["policy"]["allowed_tools"],
+                    "forbidden_tools": policy_result["policy"]["forbidden_tools"],
+                    "invalid_tools": policy_result["invalid_tools"],
+                    "decision": "REVISE",
+                    "reason": policy_result["reason"],
+                }
+                await self._controller_event(session, run.id, "planner.proposal.policy_violation", details)
+                raise DomainError(
+                    "TASK_POLICY_VIOLATION",
+                    "Planner proposal is not allowed in the current vulnerability phase.",
+                    details,
+                    422,
+                )
         # The model-visible proposal_id may repeat on a later Run.  The
         # relational key must stay globally unique because Review and
         # ApprovedAction reference the PlannerProposal row.
@@ -3016,6 +3058,36 @@ class MultiAgentOrchestrator:
                     )
                     return {"status": RunStatus.PAUSED_CHECKPOINT.value, "error_code": "PLAN_REVIEW_PERSISTENCE_INCOMPLETE", "agent_tasks": cycle + 1}
                 except DomainError as error:
+                    if error.code == "TASK_POLICY_VIOLATION":
+                        # A policy-rejected proposal is a planner revision,
+                        # not an execution failure.  Keep the completed
+                        # Planner turn for audit, then ask the Planner for a
+                        # fresh proposal under the same durable phase policy.
+                        context = {
+                            "replan_reason": "POLICY_VIOLATION",
+                            "task_policy": {
+                                "phase": (error.details or {}).get("current_phase", ""),
+                                "allowed_tools": (error.details or {}).get("allowed_tools", []),
+                                "forbidden_tools": (error.details or {}).get("forbidden_tools", []),
+                            },
+                            "policy_violation": error.details or {},
+                        }
+                        parent = planner_task.id
+                        await self._controller_event(
+                            session,
+                            run.id,
+                            "planner.replan.dispatched",
+                            {
+                                "run_id": run.id,
+                                "source": "task_policy",
+                                "decision": "REVISE",
+                                "reason": (error.details or {}).get("reason") or error.message,
+                            },
+                        )
+                        await self._memory(session, run, stage=str(run.current_phase or ""), task=planner_task, working=context)
+                        await session.commit()
+                        await self._status(session, run, RunStatus.PLANNING)
+                        continue
                     if error.code == "MODEL_OUTPUT_SCHEMA_INVALID" and plan_result.status != AgentTaskStatus.COMPLETED:
                         run.last_error_code = error.code
                         run.last_error_message = error.message[:4000]
