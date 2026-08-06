@@ -222,6 +222,29 @@ async def test_generic_validation_rejects_missing_test_field(session_factory):
 
 
 @pytest.mark.asyncio
+async def test_union_strategy_is_not_downgraded_to_boolean_and(session_factory):
+    async with session_factory() as session:
+        run, challenge, proposal, review = await _rows(
+            session,
+            tool="sql_boolean_compare",
+            arguments={"test_field": "asset_no"},
+        )
+        run.recovery_checkpoint_json = {
+            "planner_strategy_selection": {
+                "strategy": "UNION",
+                "required_strategy": "UNION",
+            }
+        }
+        await session.flush()
+
+        with pytest.raises(DomainError) as error:
+            await approved_action_compiler.compile(session, run, challenge, proposal, review, "sql_boolean_compare")
+
+        assert error.value.code == "APPROVED_ACTION_COMPILE_FAILED"
+        assert error.value.details["reason"] == "STRATEGY_UNSUPPORTED"
+
+
+@pytest.mark.asyncio
 async def test_invalid_generic_boolean_action_cannot_create_tool_call(session_factory):
     async with session_factory() as session:
         run, challenge, proposal, review = await _generic_rows(

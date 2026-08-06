@@ -76,13 +76,13 @@ from app.services.solver_state import solver_state_service
 from app.services.run_finalizer import run_finalizer
 from app.services.tool_result_fact_reducer import tool_result_fact_reducer
 from app.services.boolean_oracle_diagnosis import diagnose_boolean_oracle, boolean_oracle_diagnosis_service
-from app.services.boolean_oracle_failure_analyzer import analyze_boolean_oracle, apply_boolean_strategy_variant
+from app.services.boolean_oracle_failure_analyzer import analyze_boolean_oracle
 from app.services.tool_failure_policy import blocked_failure_for_action, record_tool_failure
 from app.services.payload_strategy import payload_strategy_manager
 from app.services.metadata_stage_decider import metadata_stage_decider
 from app.services.tool_catalog_reconciler import tool_catalog_reconciler
 from app.services.experiment_strategy_manager import experiment_strategy_manager
-from app.services.strategy_continuation import build_strategy_portfolio, strategy_continuation_service, strategy_identity
+from app.services.strategy_continuation import build_strategy_portfolio, normalize_strategy, strategy_continuation_service, strategy_identity, validate_strategy_selection
 from app.services.execution_recovery import execution_recovery_guard
 from app.services.continuations import continuation_service
 from app.tools.gateway import tool_gateway
@@ -1149,6 +1149,10 @@ class MultiAgentOrchestrator:
 
     async def _proposal(self, session, run: SolveRun, challenge: Challenge, task: AgentTask, result: AgentTaskResultContract) -> PlannerProposal:
         raw = (result.proposed_next_action or {}).get("proposal") or {}
+        raw_strategy = {
+            "strategy_family": str(raw.get("strategy_family") or "").upper(),
+            "strategy_variant": str(raw.get("strategy_variant") or "").upper(),
+        }
         try:
             contract = PlannerProposalContract.model_validate(raw)
         except Exception as error:
@@ -1159,6 +1163,8 @@ class MultiAgentOrchestrator:
             else:
                 raise DomainError("MODEL_OUTPUT_SCHEMA_INVALID", f"PlannerProposalContract is invalid: {error}", {"task_id": task.id}) from error
         metadata = challenge.metadata_json or {}
+        strategy_portfolio: dict = {}
+        strategy_selection: str = ""
         if (
             self._asset_warranty_mysql(challenge)
         ):
@@ -1296,6 +1302,29 @@ class MultiAgentOrchestrator:
                 "required_capabilities": ["boolean_predicate_oracle_confirmed"],
                 "budget": contract.budget.model_copy(update={"max_logical_calls": 1, "max_internal_requests": 40, "max_runtime_seconds": 600}),
             })
+        if (
+            self._asset_warranty_mysql(challenge)
+            and str(contract.current_stage or "").upper() == "BOOLEAN_ORACLE"
+            and strategy_portfolio.get("next_required_strategy")
+        ):
+            selection_result = validate_strategy_selection(strategy_portfolio, raw_strategy)
+            required_strategy = selection_result.get("required_strategy")
+            strategy_selection = selection_result.get("selected_strategy") or ""
+            details = {
+                "task_id": task.id,
+                "required_strategy": required_strategy,
+                "selected_strategy": strategy_selection or None,
+                "next_candidates": list(strategy_portfolio.get("next_candidates") or []),
+                "strategy_transition": dict(strategy_portfolio.get("strategy_transition") or {}),
+            }
+            if not selection_result["valid"]:
+                await self._controller_event(session, run.id, "planner.strategy.rejected", {**details, "reason": selection_result["reason"]})
+                raise DomainError(
+                    "STRATEGY_PROPOSAL_INVALID",
+                    "Planner selected a strategy outside the durable transition.",
+                    {**details, "reason": selection_result["reason"]},
+                    422,
+                )
         # Generic vulnerability paths are governed by the current controller
         # phase, not by a model-declared future stage.  Asset Warranty keeps
         # its existing deterministic routing above and is intentionally exempt
@@ -1348,14 +1377,26 @@ class MultiAgentOrchestrator:
         row = PlannerProposal(id=str(uuid.uuid4()), run_id=run.id, proposal_id=proposal_id, current_stage=contract.current_stage, decision_question=contract.decision_question, next_agent=contract.next_agent.value, objective=contract.objective, input_fact_ids_json=contract.input_fact_ids, input_evidence_ids_json=contract.input_evidence_ids, required_capabilities_json=contract.required_capabilities, allowed_tools_json=contract.allowed_tools, budget_json=contract.budget.model_dump(), success_condition=contract.success_condition, stop_conditions_json=contract.stop_conditions, fallback=contract.fallback, created_by_task_id=task.id)
         session.add(row)
         await session.flush()
+        if strategy_selection:
+            checkpoint = dict(run.recovery_checkpoint_json or {})
+            checkpoint["planner_strategy_selection"] = {
+                "proposal_id": row.proposal_id,
+                "strategy": strategy_selection,
+                "strategy_family": raw_strategy.get("strategy_family") or None,
+                "strategy_variant": raw_strategy.get("strategy_variant") or None,
+                "required_strategy": strategy_portfolio.get("next_required_strategy"),
+                "transition": dict(strategy_portfolio.get("strategy_transition") or {}),
+            }
+            run.recovery_checkpoint_json = checkpoint
+            await session.flush()
         proposal_strategy = {}
         if str(row.current_stage or "").upper() == "BOOLEAN_ORACLE":
-            state = await solver_state_service.load(session, run.id)
-            feedback_migration = dict((state.last_experiment_json or {}).get("strategy_migration") or {}) if state else {}
-            recommended = [str(value).upper() for value in (feedback_migration.get("recommended_strategies") or [])]
             proposal_strategy = {
-                "strategy_family": "BOOLEAN",
-                "strategy_variant": recommended[0] if recommended else "AND",
+                "strategy": strategy_selection or "BOOLEAN_AND",
+                "strategy_family": raw_strategy.get("strategy_family") or "BOOLEAN",
+                "strategy_variant": raw_strategy.get("strategy_variant") or "AND",
+                "next_required_strategy": strategy_portfolio.get("next_required_strategy"),
+                "strategy_transition": dict(strategy_portfolio.get("strategy_transition") or {}),
             }
         await self._controller_event(session, run.id, "planner.proposal.created", {"task_id": task.id, "proposal_id": row.proposal_id, "proposal_row_id": row.id, "current_stage": row.current_stage, **proposal_strategy})
         return row
@@ -1808,35 +1849,19 @@ class MultiAgentOrchestrator:
             max_logical_calls=max(1, int(budget.get("max_logical_calls") or 1)),
             expires_at=datetime.now(UTC) + timedelta(seconds=min(300, int(budget.get("max_runtime_seconds") or 300))), status="PENDING_COMPILE",
         )
-        migration = {}
-        if tool_name == "sql_boolean_compare" and self._asset_warranty_mysql(challenge):
-            state = await solver_state_service.load(session, run.id)
-            migration = dict((state.last_experiment_json or {}).get("strategy_migration") or {}) if state else {}
-            recommended = [str(value).upper() for value in (migration.get("recommended_strategies") or [])]
-            if recommended:
+        planner_strategy = {}
+        if self._asset_warranty_mysql(challenge) and tool_name == "sql_boolean_compare":
+            planner_strategy = dict((run.recovery_checkpoint_json or {}).get("planner_strategy_selection") or {})
+            selected_strategy = normalize_strategy(planner_strategy.get("strategy") or "")
+            if selected_strategy.startswith("BOOLEAN_"):
                 semantic = dict(review.approved_arguments_json or {})
-                # A migration changes only the Boolean payload syntax. The
-                # target request, tested field, baseline, and control fields
-                # remain Controller-owned challenge contract data; Planner
-                # prose must not silently switch them between retries.
-                metadata = challenge.metadata_json or {}
-                control_values = metadata.get("control_values")
-                if isinstance(control_values, dict):
-                    field = str(semantic.get("test_field") or "asset_no")
-                    semantic["request"] = {
-                        "method": str(metadata.get("method") or "POST").upper(),
-                        "json": dict(control_values),
-                    }
-                    if field in control_values:
-                        semantic["baseline_value"] = control_values[field]
-                        semantic["control_fields"] = {
-                            key: value for key, value in control_values.items() if key != field
-                        }
-                semantic = apply_boolean_strategy_variant(semantic, recommended[0])
-                # Apply the already persisted migration recommendation at the
-                # Controller/compiler boundary. Runner and Gateway still
-                # receive the normal compiled request contract.
-                review.approved_arguments_json = semantic
+                # The Strategy Engine owns the transition.  The controller may
+                # materialize a supported Boolean variant, but it must never
+                # use the previous experiment's migration recommendation to
+                # rewrite a different Planner proposal.
+                from app.services.boolean_oracle_failure_analyzer import apply_boolean_strategy_variant
+
+                review.approved_arguments_json = apply_boolean_strategy_variant(semantic, selected_strategy)
         try:
             compiled = await approved_action_compiler.compile(session, run, challenge, proposal, review, tool_name)
         except DomainError as error:
@@ -1873,7 +1898,10 @@ class MultiAgentOrchestrator:
         )
         continuation_state = await solver_state_service.load(session, run.id) if str(tool_name) == "sql_boolean_compare" else None
         continuation_portfolio = dict((continuation_state.capability_ledger_json or {}).get("strategy_portfolio") or {}) if continuation_state else {}
-        expected_strategy = str((continuation_portfolio.get("next_candidates") or [""])[0]).upper()
+        # The transition is the single source of truth.  `next_candidates` is
+        # planner context, not an authorization decision: the controller must
+        # enforce the explicitly required next strategy.
+        expected_strategy = str(continuation_portfolio.get("next_required_strategy") or "").upper()
         actual_strategy = strategy_identity(strategy_metadata)
         if expected_strategy and str(tool_name) == "sql_boolean_compare" and actual_strategy != expected_strategy:
             await self._controller_event(
@@ -1988,6 +2016,8 @@ class MultiAgentOrchestrator:
             "strategy_feedback": dict(state.last_experiment_json or {}) if state else {},
             "strategy_migration": dict((state.last_experiment_json or {}).get("strategy_migration") or {}) if state else {},
             "strategy_portfolio": dict((state.capability_ledger_json or {}).get("strategy_portfolio") or {}) if state else {},
+            "next_required_strategy": ((state.capability_ledger_json or {}).get("strategy_portfolio") or {}).get("next_required_strategy") if state else None,
+            "strategy_transition": dict(((state.capability_ledger_json or {}).get("strategy_portfolio") or {}).get("strategy_transition") or {}) if state else {},
             "security_context": security_context,
             "vulnerability_lifecycle": vulnerability_lifecycle,
             "security_reasoning_rules": security_finding_service.planner_guidance(security_context),
@@ -3310,6 +3340,32 @@ class MultiAgentOrchestrator:
                                 "decision": "REVISE",
                                 "reason": error.message,
                                 "required_strategy": details.get("expected_strategy"),
+                            },
+                        )
+                        await self._memory(session, run, stage="STRATEGY_REVIEW", task=planner_task, working=context)
+                        await session.commit()
+                        await self._status(session, run, RunStatus.PLANNING)
+                        continue
+                    if error.code == "STRATEGY_PROPOSAL_INVALID":
+                        details = error.details or {}
+                        context = {
+                            "replan_reason": "STRATEGY_PROPOSAL_INVALID",
+                            "strategy_transition": dict(details.get("strategy_transition") or {}),
+                            "required_strategy": details.get("required_strategy"),
+                            "selected_strategy": details.get("selected_strategy"),
+                        }
+                        parent = planner_task.id
+                        await self._controller_event(
+                            session,
+                            run.id,
+                            "planner.replan.dispatched",
+                            {
+                                "run_id": run.id,
+                                "source": "strategy_policy",
+                                "decision": "REVISE",
+                                "reason": error.message,
+                                "required_strategy": details.get("required_strategy"),
+                                "selected_strategy": details.get("selected_strategy"),
                             },
                         )
                         await self._memory(session, run, stage="STRATEGY_REVIEW", task=planner_task, working=context)

@@ -220,6 +220,11 @@ class PlannerProposalContract(BaseModel):
     proposal_id: str = Field(min_length=1, max_length=80)
     run_id: str = Field(min_length=1, max_length=80)
     current_stage: str = Field(min_length=1, max_length=40)
+    # Strategy metadata is declarative Planner output.  It is never an
+    # executable payload; the Controller validates it against the durable
+    # Strategy Portfolio before creating an ApprovedAction.
+    strategy_family: str | None = Field(default=None, max_length=80)
+    strategy_variant: str | None = Field(default=None, max_length=120)
     decision_question: str = Field(default="", max_length=2000)
     next_agent: AgentRole
     objective: str = Field(min_length=1, max_length=4000)

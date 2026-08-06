@@ -22,6 +22,7 @@ from app.models.run import Hypothesis, SolveRun, ToolCall
 from app.models.solver_state import SolverState
 from app.schemas.multi_agent import CompiledApprovedAction
 from app.security.task_policy import get_allowed_tools, validate_tools, vulnerability_type_from_metadata
+from app.services.strategy_continuation import normalize_strategy
 from app.tools.registry import ToolDefinition, load_tool_definitions
 
 COMPILER_NAME = "approved_action_compiler"
@@ -188,6 +189,18 @@ class ApprovedActionCompiler:
                 **({"body": body} if body is not None else {"json": json_body} if isinstance(json_body, dict) else {}),
             }
         if tool_name == "sql_boolean_compare" and adapter:
+            planner_strategy = dict((run.recovery_checkpoint_json or {}).get("planner_strategy_selection") or {})
+            selected_strategy = normalize_strategy(planner_strategy.get("strategy") or "")
+            if selected_strategy and not selected_strategy.startswith("BOOLEAN_"):
+                raise self._error(
+                    "sql_boolean_compare",
+                    "STRATEGY_UNSUPPORTED",
+                    {
+                        "strategy": selected_strategy,
+                        "required_tool": selected_strategy.lower(),
+                        "message": "This compiler cannot execute the selected non-Boolean strategy and will not downgrade it to Boolean AND.",
+                    },
+                )
             return self._asset_boolean_compare(challenge, adapter, semantic, review)
         if tool_name == "sql_boolean_compare":
             return await self._generic_boolean_compare(session, run, challenge, semantic, review)

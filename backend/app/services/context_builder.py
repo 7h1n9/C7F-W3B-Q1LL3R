@@ -258,6 +258,8 @@ class ContextBuilder:
                 "strategy_feedback": dict(state.last_experiment_json or {}) if state else {},
                 "strategy_migration": dict((state.last_experiment_json or {}).get("strategy_migration") or {}) if state else {},
                 "strategy_portfolio": dict((state.capability_ledger_json or {}).get("strategy_portfolio") or {}) if state else {},
+                "next_required_strategy": ((state.capability_ledger_json or {}).get("strategy_portfolio") or {}).get("next_required_strategy") if state else None,
+                "strategy_transition": dict(((state.capability_ledger_json or {}).get("strategy_portfolio") or {}).get("strategy_transition") or {}) if state else {},
                 "vulnerability_lifecycle": vulnerability_lifecycle,
                 "active_skill_ids": sorted(active_skill_ids),
                 "no_progress_count": state.no_progress_count if state else 0,

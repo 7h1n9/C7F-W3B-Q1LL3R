@@ -133,6 +133,23 @@ class RoleAgentRuntime:
         if task.agent_role == AgentRole.PLANNER.value:
             schema = {"proposal": PlannerProposalContract.model_json_schema()}
             instruction = "Output only PlannerProposalContract, either as the object itself or wrapped in {proposal: ...}. Do not output AgentTaskResult, status, new_facts, or proposed_next_action. allowed_tools must contain only exact names from the Controller catalog: http_request, content_discovery, sql_boolean_compare, oracle_probe_matrix, mysql_metadata_discovery, boolean_config_extract, script_run, http_compare."
+            required_strategy = str((memory or {}).get("next_required_strategy") or "").upper()
+            if required_strategy:
+                if required_strategy.startswith("BOOLEAN_"):
+                    strategy_family = "BOOLEAN"
+                    strategy_variant = required_strategy.removeprefix("BOOLEAN_")
+                else:
+                    strategy_family = required_strategy
+                    strategy_variant = required_strategy
+                instruction += (
+                    f" The Strategy Portfolio is a hard constraint. You MUST set "
+                    f"strategy_family={strategy_family!r} and "
+                    f"strategy_variant={strategy_variant!r}; their canonical identity "
+                    f"must be exactly {required_strategy}. Do not omit these fields, "
+                    "put endpoint/condition words in them, choose another strategy, "
+                    "or reuse a tried strategy. The Controller will reject a missing "
+                    "or different identity."
+                )
             if adapter:
                 instruction += " For the asset_warranty adapter, use only http_request for RECON proposals. Schedule exactly one bounded request per proposal; never use http_compare, never put a requests array in approved_arguments, and do not combine valid and invalid controls under max_logical_calls=1. Read the endpoint, method, fields, and control values from challenge_adapter."
         elif task.agent_role == AgentRole.ANALYSIS.value:

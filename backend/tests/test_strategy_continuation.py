@@ -9,6 +9,7 @@ from app.services.solver_state import solver_state_service
 from app.services.strategy_continuation import (
     build_strategy_portfolio,
     strategy_continuation_service,
+    validate_strategy_selection,
 )
 
 
@@ -42,6 +43,7 @@ def test_portfolio_excludes_tried_and_keeps_remaining_candidates():
     assert portfolio["tried_strategies"][1]["strategy"] == "BOOLEAN_AND_COMMENT_HASH"
     assert portfolio["remaining_strategies"][:2] == ["UNION", "TIME_BASED"]
     assert "BOOLEAN_AND" not in portfolio["next_candidates"]
+    assert portfolio["next_required_strategy"] == "UNION"
     assert portfolio["search_exhausted"] is False
 
 
@@ -78,6 +80,79 @@ def test_business_baselines_do_not_consume_security_strategy_budget():
     assert [item["experiment_id"] for item in portfolio["tried_strategies"]] == ["boolean-and"]
     assert portfolio["attempts"] == 1
     assert "BOOLEAN_AND" not in portfolio["next_candidates"]
+
+
+def test_strategy_transition_records_family_exhaustion():
+    history = [
+        _entry("BOOLEAN", "AND", "e-and"),
+        _entry("BOOLEAN", "AND_COMMENT_HASH", "e-hash"),
+        _entry("BOOLEAN", "AND_ENCODING", "e-encoding"),
+    ]
+
+    portfolio = build_strategy_portfolio(
+        history,
+        {"strategy_migration": {"recommended_strategies": ["UNION", "TIME_BASED"]}},
+    )
+
+    assert portfolio["strategy_transition"] == {
+        "from": "BOOLEAN_AND_ENCODING",
+        "to": "UNION",
+        "reason": "BOOLEAN_FAMILY_EXHAUSTED",
+        "approved": True,
+    }
+
+
+def test_failed_strategy_not_reselected():
+    portfolio = {
+        "next_required_strategy": "BOOLEAN_OR",
+        "next_candidates": ["BOOLEAN_OR", "ERROR_BASED"],
+    }
+
+    rejected = validate_strategy_selection(
+        portfolio,
+        {"strategy_family": "BOOLEAN", "strategy_variant": "AND"},
+    )
+    accepted = validate_strategy_selection(
+        portfolio,
+        {"strategy_family": "BOOLEAN", "strategy_variant": "OR"},
+    )
+
+    assert rejected["valid"] is False
+    assert rejected["reason"] == "STRATEGY_NOT_ALLOWED"
+    assert accepted["valid"] is True
+
+
+def test_strategy_transition_accepts_control_annotation_without_changing_identity():
+    portfolio = {
+        "next_required_strategy": "BOOLEAN_AND_COMMENT_HASH",
+        "next_candidates": ["BOOLEAN_AND_COMMENT_HASH"],
+    }
+
+    result = validate_strategy_selection(
+        portfolio,
+        {"strategy_family": "BOOLEAN", "strategy_variant": "AND_COMMENT_HASH_VALID_CONTROL"},
+    )
+
+    assert result["valid"] is True
+    assert result["selected_strategy"] == "BOOLEAN_AND_COMMENT_HASH"
+
+
+def test_strategy_transition_canonicalizes_prefixed_family_annotation():
+    portfolio = {
+        "next_required_strategy": "BOOLEAN_AND_COMMENT_HASH",
+        "next_candidates": ["BOOLEAN_AND_COMMENT_HASH"],
+    }
+
+    result = validate_strategy_selection(
+        portfolio,
+        {
+            "strategy_family": "BOOLEAN_AND_COMMENT_HASH",
+            "strategy_variant": "ASSET_NO_TRUE_PREDICATE_HASH_COMMENT",
+        },
+    )
+
+    assert result["valid"] is True
+    assert result["selected_strategy"] == "BOOLEAN_AND_COMMENT_HASH"
 
 
 @pytest.fixture

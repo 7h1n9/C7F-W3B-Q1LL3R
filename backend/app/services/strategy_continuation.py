@@ -34,16 +34,34 @@ def normalize_strategy(value: Any) -> str:
     token = _text(value)
     if not token:
         return ""
+    if token.startswith("BOOLEAN_BOOLEAN_"):
+        token = token.removeprefix("BOOLEAN_")
     if token in {"OR", "BOOLEAN_OR"}:
         return "BOOLEAN_OR"
     if token in {"AND", "BOOLEAN_AND"}:
         return "BOOLEAN_AND"
+    # Planner prose may annotate a strategy with its control purpose (for
+    # example ``AND_COMMENT_HASH_VALID_CONTROL``).  The annotation is not a
+    # different attack strategy; canonicalize only known strategy prefixes so
+    # the portfolio remains the authority.
+    for prefix in (
+        "BOOLEAN_AND_COMMENT_HASH",
+        "BOOLEAN_AND_COMMENT_INLINE",
+        "BOOLEAN_AND_ENCODING",
+        "BOOLEAN_OR",
+    ):
+        if token.startswith(prefix):
+            return prefix
     if token in {"TIME", "TIME_BASED"}:
         return "TIME_BASED"
     if token in {"ERROR", "ERROR_BASED"}:
         return "ERROR_BASED"
-    if token in {"UNION", "UNION_BASED"}:
+    if token in {"UNION", "UNION_BASED", "BOOLEAN_UNION", "BOOLEAN_UNION_BASED"}:
         return "UNION"
+    if token in {"ERROR_BASED", "BOOLEAN_ERROR_BASED"}:
+        return "ERROR_BASED"
+    if token in {"BOOLEAN_TIME_BASED"}:
+        return "TIME_BASED"
     return token
 
 
@@ -56,8 +74,29 @@ def strategy_identity(entry: Mapping[str, Any] | None) -> str:
     if family == "BOOLEAN":
         return normalize_strategy(f"BOOLEAN_{variant}" if variant else family)
     if family and variant:
-        return f"{family}_{variant}"
+        return normalize_strategy(f"{family}_{variant}")
     return normalize_strategy(variant or family)
+
+
+def validate_strategy_selection(
+    portfolio: Mapping[str, Any] | None,
+    selection: Mapping[str, Any] | str | None,
+) -> dict[str, Any]:
+    """Validate one Planner selection against the durable transition."""
+    state = portfolio or {}
+    required = str(state.get("next_required_strategy") or "").upper()
+    if isinstance(selection, Mapping):
+        selected = strategy_identity(selection)
+    else:
+        selected = normalize_strategy(selection)
+    candidates = [str(item).upper() for item in (state.get("next_candidates") or [])]
+    if not required:
+        return {"valid": True, "selected_strategy": selected or None, "required_strategy": None, "reason": "NO_TRANSITION_REQUIRED"}
+    if not selected:
+        return {"valid": False, "selected_strategy": None, "required_strategy": required, "reason": "STRATEGY_REQUIRED", "next_candidates": candidates}
+    if selected != required or selected not in candidates:
+        return {"valid": False, "selected_strategy": selected, "required_strategy": required, "reason": "STRATEGY_NOT_ALLOWED", "next_candidates": candidates}
+    return {"valid": True, "selected_strategy": selected, "required_strategy": required, "reason": "STRATEGY_ALLOWED", "next_candidates": candidates}
 
 
 def _entries(history: Iterable[Any]) -> list[dict[str, Any]]:
@@ -118,6 +157,19 @@ def build_strategy_portfolio(
     attempts = len(typed)
     exhausted = attempts >= max_attempts or not remaining
     current_strategy = strategy_identity(latest) or (tried[-1]["strategy"] if tried else "")
+    next_required = remaining[0] if remaining and not exhausted else None
+    if not next_required:
+        transition_reason = "STRATEGY_SEARCH_EXHAUSTED"
+    elif current_strategy.startswith("BOOLEAN_") and not next_required.startswith("BOOLEAN_"):
+        transition_reason = "BOOLEAN_FAMILY_EXHAUSTED"
+    else:
+        transition_reason = "STRATEGY_MIGRATION_RECOMMENDED"
+    transition = {
+        "from": current_strategy or None,
+        "to": next_required,
+        "reason": transition_reason,
+        "approved": bool(next_required),
+    }
     return {
         "vulnerability_type": _text(latest.get("vulnerability_type") or "SQL_INJECTION"),
         "hypothesis": latest.get("hypothesis") or latest.get("result_reason") or "",
@@ -125,6 +177,8 @@ def build_strategy_portfolio(
         "failed_strategies": failures,
         "remaining_strategies": remaining,
         "next_candidates": remaining[:4],
+        "next_required_strategy": next_required,
+        "strategy_transition": transition,
         "current_strategy": current_strategy,
         "attempts": attempts,
         "max_attempts": max_attempts,
