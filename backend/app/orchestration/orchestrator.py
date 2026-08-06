@@ -616,6 +616,13 @@ class SolveOrchestrator:
 
     async def start(self, run_id: str, user_message: str | None = None) -> None:
         task = asyncio.current_task()
+        existing = self.active_tasks.get(run_id)
+        if existing is not None and existing is not task and not existing.done():
+            # A supervisor wake-up may race with the original controller task
+            # before the durable production ToolCall exists.  The original
+            # task owns this Run; a second start must not create another
+            # Planner/Proposal chain.
+            return
         if task:
             self.active_tasks[run_id] = task
         async with SessionLocal() as session:

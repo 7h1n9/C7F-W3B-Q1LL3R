@@ -21,6 +21,7 @@ from app.services.user_input_consumer import consume_user_inputs
 from app.services.writeup_builder import writeup_builder
 from app.services.events import event_service
 from app.services.continuations import continuation_service
+from app.services.execution_recovery import execution_recovery_guard
 from app.core.database import SessionLocal
 
 
@@ -501,6 +502,16 @@ class RunSupervisor:
             checkpoint["planner_context_consumed"] = True
             run.recovery_checkpoint_json = checkpoint
             await session.commit()
+            active_production_calls = await execution_recovery_guard.active_production_calls(
+                session, run.id
+            )
+            if active_production_calls:
+                return RunOutcome(
+                    run.id,
+                    str(run.status),
+                    str(run.current_phase or ""),
+                    "PRODUCTION_EXECUTION_ACTIVE",
+                )
             await orchestrator.start(run_id, next_message)
             user_message = None
             await session.rollback()

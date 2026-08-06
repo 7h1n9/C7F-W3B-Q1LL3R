@@ -14,6 +14,7 @@ from app.schemas.multi_agent import AgentTaskStatus
 from app.orchestration.state_machine import TERMINAL, RunStatus
 from app.services.codex_preflight import codex_preflight_service
 from app.services.events import event_service
+from app.services.execution_recovery import execution_recovery_guard
 from app.services.solver_state import solver_state_service
 from app.services.terminal_outcomes import terminal_outcome_resolver
 
@@ -75,21 +76,35 @@ class RunAttemptService:
         """Recover abandoned execution rows without interrupting fresh work."""
         now = utc_now()
         cutoff = now - timedelta(seconds=stale_after_seconds)
-        stale_calls = list((await session.scalars(select(ToolCall).where(
-            ToolCall.run_id == run.id,
-            ToolCall.status.in_(["REQUESTED", "STARTED"]),
-            ToolCall.created_at < cutoff,
-        ))).all())
+        stale_calls = await execution_recovery_guard.recoverable_tool_calls(
+            session,
+            run.id,
+            stale_after_seconds=stale_after_seconds,
+            now=now,
+        )
+        protected_production_calls = await execution_recovery_guard.protected_production_calls(
+            session, run.id, now=now
+        )
         running_tasks = list((await session.scalars(select(AgentTask).where(
             AgentTask.run_id == run.id,
             AgentTask.status == AgentTaskStatus.RUNNING.value,
             AgentTask.idle_deadline_at.is_not(None),
             AgentTask.idle_deadline_at < now,
         ))).all())
+        # A healthy Runner-backed production call owns the execution boundary.
+        # Do not replan an expired analysis/task lease around it; that is how a
+        # normal STARTED ToolCall previously caused a second Planner proposal.
+        if protected_production_calls:
+            running_tasks = []
         expired_leases = list((await session.scalars(select(RunExecutionLease).where(
             RunExecutionLease.run_id == run.id,
             RunExecutionLease.expires_at < now,
         ))).all())
+        # A healthy Runner-backed production call owns the whole controller
+        # boundary.  Do not recover unrelated task leases or emit a stale
+        # recovery event while that call is still in flight.
+        if protected_production_calls:
+            expired_leases = []
         changed = bool(stale_calls or running_tasks or expired_leases)
         checkpoint = dict(run.recovery_checkpoint_json or {})
         watchdog = dict(checkpoint.get("tool_dispatch_watchdog") or {})

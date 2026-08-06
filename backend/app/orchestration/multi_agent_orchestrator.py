@@ -78,6 +78,7 @@ from app.services.payload_strategy import payload_strategy_manager
 from app.services.metadata_stage_decider import metadata_stage_decider
 from app.services.tool_catalog_reconciler import tool_catalog_reconciler
 from app.services.experiment_strategy_manager import experiment_strategy_manager
+from app.services.execution_recovery import execution_recovery_guard
 from app.services.continuations import continuation_service
 from app.tools.gateway import tool_gateway
 
@@ -116,8 +117,23 @@ class MultiAgentOrchestrator:
             RunContinuation.status.in_(("PENDING", "RUNNING")),
             RunContinuation.kind.in_(("RESULT_REVIEW_PENDING", "RESULT_REVIEW_PROMOTION")),
         ))).all())
+        active_production_calls = await execution_recovery_guard.active_production_calls(
+            session, run.id
+        )
+        if active_production_calls:
+            return False, "PRODUCTION_EXECUTION_ACTIVE"
         if pending_reviews:
             return False, "RESULT_REVIEW_PENDING"
+        active_controller_tasks = list((await session.scalars(select(AgentTask).where(
+            AgentTask.run_id == run.id,
+            AgentTask.agent_role.in_((AgentRole.PLANNER.value, AgentRole.ANALYSIS.value)),
+            AgentTask.status.in_((
+                AgentTaskStatus.PENDING.value,
+                AgentTaskStatus.RUNNING.value,
+            )),
+        ))).all())
+        if active_controller_tasks:
+            return False, "CONTROLLER_TASK_ACTIVE"
         if candidate_count and active_continuations:
             return False, "CANDIDATE_PROMOTION_PENDING"
         if any(item.kind == "RESULT_REVIEW_PROMOTION" for item in active_continuations):
