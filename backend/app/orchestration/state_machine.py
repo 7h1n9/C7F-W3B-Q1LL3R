@@ -44,7 +44,7 @@ SOLVER_PHASES = {
     # Multi-agent solver phases are persisted on SolveRun as solver phases,
     # not lifecycle statuses.  Keep them from being reset to INTAKE when the
     # lifecycle moves through EXECUTING/EVALUATING/PLANNING.
-    "BUSINESS_BASELINE", "BOOLEAN_ORACLE", "ORACLE_CALIBRATION",
+    "BUSINESS_BASELINE", "BOOLEAN_ORACLE", "STRATEGY_REVIEW", "ORACLE_CALIBRATION",
     "MYSQL_METADATA_DISCOVERY", "BOUNDED_EXTRACTION",
 }
 RESTARTABLE = {

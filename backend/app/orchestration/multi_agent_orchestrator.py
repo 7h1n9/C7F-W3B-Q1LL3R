@@ -82,6 +82,7 @@ from app.services.payload_strategy import payload_strategy_manager
 from app.services.metadata_stage_decider import metadata_stage_decider
 from app.services.tool_catalog_reconciler import tool_catalog_reconciler
 from app.services.experiment_strategy_manager import experiment_strategy_manager
+from app.services.strategy_continuation import build_strategy_portfolio, strategy_continuation_service, strategy_identity
 from app.services.execution_recovery import execution_recovery_guard
 from app.services.continuations import continuation_service
 from app.tools.gateway import tool_gateway
@@ -212,16 +213,26 @@ class MultiAgentOrchestrator:
                 VerifiedFact.run_id == run.id,
                 VerifiedFact.promotion_status == "VERIFIED",
             ))).all())
+            state = await solver_state_service.load(session, run.id)
             if "asset_warranty.valid_baseline" not in keys or "asset_warranty.invalid_baseline" not in keys:
                 return "BUSINESS_BASELINE"
             if "asset_warranty.mysql_boolean_oracle" not in keys:
+                portfolio = dict((state.capability_ledger_json or {}).get("strategy_portfolio") or {}) if state else {}
+                if not portfolio and state and state.last_result_classification:
+                    portfolio = build_strategy_portfolio(
+                        state.attack_strategy_history_json or [],
+                        state.last_experiment_json or {},
+                    )
+                if portfolio.get("next_candidates") and str(state.last_result_classification or "").upper() in {
+                    "TRUE_SIDE_FAILED", "FALSE_SIDE_FAILED", "NO_DIFFERENCE", "NO_SIGNAL",
+                }:
+                    return "STRATEGY_REVIEW"
                 return "BOOLEAN_ORACLE"
 
             # Baseline and Boolean execution remain deterministic Asset
             # Warranty constraints.  Once Boolean promotion has materialized
             # a canonical validation result, the security lifecycle owns the
             # next phase instead of the legacy calibration sequence.
-            state = await solver_state_service.load(session, run.id)
             security_context = dict(state.security_context_json or {}) if state else {}
             if security_context.get("validation_results"):
                 lifecycle = vulnerability_lifecycle_engine.evaluate(security_context)
@@ -1153,6 +1164,7 @@ class MultiAgentOrchestrator:
         ):
             state = await solver_state_service.load(session, run.id)
             ledger = state.capability_ledger_json if state else {}
+            strategy_portfolio = dict((ledger or {}).get("strategy_portfolio") or {}) if state else {}
             lifecycle_required_phase = ""
             if state and (state.security_context_json or {}).get("validation_results"):
                 lifecycle_required_phase = str(
@@ -1194,10 +1206,17 @@ class MultiAgentOrchestrator:
                 oracle_fact is None
                 and "mysql_boolean_oracle_confirmed" not in ledger
             ):
+                next_candidates = list(strategy_portfolio.get("next_candidates") or [])
+                continuation_objective = (
+                    "Reflect on the failed Boolean validation and select the next remaining bounded strategy: "
+                    + ", ".join(next_candidates)
+                    if next_candidates else
+                    "Use the confirmed asset-warranty business response differential to test one declared field as a stable MySQL Boolean Oracle."
+                )
                 contract = contract.model_copy(update={
                     "current_stage": "BOOLEAN_ORACLE",
                     "next_agent": AgentRole.EXPLOIT,
-                    "objective": "Use the confirmed asset-warranty business response differential to test one declared field as a stable MySQL Boolean Oracle.",
+                    "objective": continuation_objective,
                     "allowed_tools": ["sql_boolean_compare"],
                     "required_capabilities": ["business_response_differential_confirmed"],
                     "success_condition": "Confirm a stable paired TRUE/FALSE Boolean Oracle from the asset-warranty POST contract.",
@@ -1852,6 +1871,31 @@ class MultiAgentOrchestrator:
             compiled.arguments,
             review,
         )
+        continuation_state = await solver_state_service.load(session, run.id) if str(tool_name) == "sql_boolean_compare" else None
+        continuation_portfolio = dict((continuation_state.capability_ledger_json or {}).get("strategy_portfolio") or {}) if continuation_state else {}
+        expected_strategy = str((continuation_portfolio.get("next_candidates") or [""])[0]).upper()
+        actual_strategy = strategy_identity(strategy_metadata)
+        if expected_strategy and str(tool_name) == "sql_boolean_compare" and actual_strategy != expected_strategy:
+            await self._controller_event(
+                session,
+                run.id,
+                "strategy.continuation.rejected",
+                {
+                    "expected_strategy": expected_strategy,
+                    "actual_strategy": actual_strategy,
+                    "tool_name": tool_name,
+                    "reason": "PLANNER_SELECTED_NON_REMAINING_STRATEGY",
+                },
+            )
+            raise DomainError(
+                "STRATEGY_CONTINUATION_MISMATCH",
+                "Planner action does not match the next strategy in the durable portfolio.",
+                {
+                    "expected_strategy": expected_strategy,
+                    "actual_strategy": actual_strategy,
+                    "remaining_strategies": continuation_portfolio.get("remaining_strategies") or [],
+                },
+            )
         reserved, experiment = await experiment_strategy_manager.reserve(
             session,
             run,
@@ -1943,6 +1987,7 @@ class MultiAgentOrchestrator:
             "failed_strategies": payload_strategy_manager.failed_strategies(list(state.attack_strategy_history_json or [])) if state else [],
             "strategy_feedback": dict(state.last_experiment_json or {}) if state else {},
             "strategy_migration": dict((state.last_experiment_json or {}).get("strategy_migration") or {}) if state else {},
+            "strategy_portfolio": dict((state.capability_ledger_json or {}).get("strategy_portfolio") or {}) if state else {},
             "security_context": security_context,
             "vulnerability_lifecycle": vulnerability_lifecycle,
             "security_reasoning_rules": security_finding_service.planner_guidance(security_context),
@@ -3220,6 +3265,57 @@ class MultiAgentOrchestrator:
                     )
                     return {"status": RunStatus.PAUSED_CHECKPOINT.value, "error_code": "PLAN_REVIEW_PERSISTENCE_INCOMPLETE", "agent_tasks": cycle + 1}
                 except DomainError as error:
+                    if error.code == "STRATEGY_CONTINUATION_MISMATCH":
+                        details = error.details or {}
+                        # _persist_plan_review intentionally keeps Analysis
+                        # RUNNING until its durable dispatch chain is
+                        # complete.  A strategy mismatch is a controller
+                        # rejection before production dispatch, so close that
+                        # Analysis task explicitly before asking for a new
+                        # Planner turn.  Otherwise can_dispatch_planner()
+                        # correctly sees the old task as active and blocks
+                        # the continuation forever.
+                        plan_task_id = str(plan_task.id)
+                        await deterministic_controller.complete_task(
+                            session,
+                            plan_task_id,
+                            plan_result,
+                            plan_token,
+                        )
+                        await self._controller_event(
+                            session,
+                            run.id,
+                            "agent.task.completed",
+                            {
+                                "task_id": plan_task_id,
+                                "agent_role": AgentRole.ANALYSIS.value,
+                                "task_kind": AgentTaskKind.PLAN_REVIEW.value,
+                                "status": plan_result.status.value,
+                                "reason": "STRATEGY_CONTINUATION_MISMATCH",
+                            },
+                        )
+                        context = {
+                            "replan_reason": "STRATEGY_CONTINUATION_MISMATCH",
+                            "strategy_portfolio": dict(details),
+                            "required_strategy": details.get("expected_strategy"),
+                        }
+                        parent = planner_task.id
+                        await self._controller_event(
+                            session,
+                            run.id,
+                            "planner.replan.dispatched",
+                            {
+                                "run_id": run.id,
+                                "source": "strategy_continuation",
+                                "decision": "REVISE",
+                                "reason": error.message,
+                                "required_strategy": details.get("expected_strategy"),
+                            },
+                        )
+                        await self._memory(session, run, stage="STRATEGY_REVIEW", task=planner_task, working=context)
+                        await session.commit()
+                        await self._status(session, run, RunStatus.PLANNING)
+                        continue
                     if error.code == "TASK_POLICY_VIOLATION":
                         # A policy-rejected proposal is a planner revision,
                         # not an execution failure.  Keep the completed
@@ -3549,8 +3645,52 @@ class MultiAgentOrchestrator:
                             "next_strategy": next_strategy,
                         },
                     )
-                    context = {"replan_reason": "BOOLEAN_ORACLE_INCONCLUSIVE"}
-                    continue
+                    portfolio = await strategy_continuation_service.update(
+                        session,
+                        run.id,
+                        max_attempts=self._max_replan_cycles(
+                            run,
+                            await session.get(Challenge, challenge_id),
+                        ),
+                    )
+                    if portfolio.get("next_candidates") and not portfolio.get("search_exhausted"):
+                        await self._phase(session, run, "STRATEGY_REVIEW")
+                        await self._controller_event(
+                            session,
+                            run.id,
+                            "strategy.review.entered",
+                            {
+                                "run_id": run.id,
+                                "reason": "BOOLEAN_ORACLE_INCONCLUSIVE",
+                                "classification": portfolio.get("failed_strategies", [{}])[-1].get("result") if portfolio.get("failed_strategies") else None,
+                                "next_candidates": portfolio.get("next_candidates") or [],
+                                "remaining_strategies": portfolio.get("remaining_strategies") or [],
+                            },
+                        )
+                        context = {
+                            "replan_reason": "STRATEGY_REVIEW",
+                            "strategy_portfolio": portfolio,
+                            "required_strategy": (portfolio.get("next_candidates") or [None])[0],
+                        }
+                        await self._status(session, run, RunStatus.PLANNING)
+                        continue
+                    run.last_error_code = "STRATEGY_SEARCH_EXHAUSTED"
+                    run.last_error_message = "No bounded strategy remains for the current validation hypothesis."
+                    run.recovery_checkpoint_json = {
+                        **(run.recovery_checkpoint_json or {}),
+                        "checkpoint_type": "STRATEGY_SEARCH_EXHAUSTED",
+                        "current_phase": "STRATEGY_REVIEW",
+                        "strategy_portfolio": portfolio,
+                    }
+                    await self._phase(session, run, "STRATEGY_REVIEW")
+                    await self._status(session, run, RunStatus.PAUSED_CHECKPOINT)
+                    await session.commit()
+                    return {
+                        "status": run.status,
+                        "current_phase": run.current_phase,
+                        "error_code": run.last_error_code,
+                        "strategy_search_exhausted": True,
+                    }
                 await session.refresh(run)
                 await session.refresh(attempt)
                 await session.refresh(proposal)
