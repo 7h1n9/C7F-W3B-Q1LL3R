@@ -25,6 +25,7 @@ class HypothesisStatus(StrEnum):
 
 class ValidationStatus(StrEnum):
     SUCCESS = "SUCCESS"
+    VALIDATED = "VALIDATED"
     FAILED = "FAILED"
     INCONCLUSIVE = "INCONCLUSIVE"
 

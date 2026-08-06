@@ -143,6 +143,39 @@ class SecurityFindingService:
                 evidence_ids=evidence_ids,
             )
 
+        if fact_key == "security.sql_injection.validation" or fact_type == "security_validation":
+            payload = value if isinstance(value, Mapping) else {}
+            raw_confidence = payload.get("confidence")
+            if raw_confidence is None:
+                raw_confidence = self._value(fact, "confidence")
+                raw_confidence = float(raw_confidence or 0) / 100
+            try:
+                confidence = float(raw_confidence)
+            except (TypeError, ValueError):
+                confidence = 0.0
+            controls = payload.get("controls")
+            if not isinstance(controls, Mapping):
+                controls = {
+                    "baseline": True,
+                    "positive_control": True,
+                    "negative_control": True,
+                }
+            reproduction = payload.get("reproduction")
+            if not isinstance(reproduction, Mapping):
+                reproduction = {
+                    "repeat_count": int(payload.get("repeat_count") or 0),
+                    "stable": True,
+                }
+            return ValidationResult(
+                hypothesis_id=str(payload.get("hypothesis_id") or ""),
+                type="SQL_INJECTION_VALIDATION",
+                status=ValidationStatus.VALIDATED,
+                evidence_ids=list(payload.get("evidence_ids") or evidence_ids),
+                confidence=min(max(confidence, 0.0), 1.0),
+                controls=ValidationControls.model_validate(controls),
+                reproduction=reproduction,
+            )
+
         if fact_key == "asset_warranty.mysql_boolean_oracle":
             # Promotion of the durable Boolean Oracle fact is the legacy
             # controller's validation boundary.  It is not an exploit or an

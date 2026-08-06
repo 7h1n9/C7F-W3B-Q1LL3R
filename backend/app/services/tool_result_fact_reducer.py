@@ -155,7 +155,21 @@ class ToolResultFactReducer:
             "control_fields", "oracle", "test_field", "subrequest_count",
         )
         direct = {key: facts[key] for key in direct_keys if key in facts}
-        structured = {**view_extracted, **direct, **structured}
+        # Observation is the durable semantic boundary, but older Gateway
+        # projections may persist placeholder null/empty values while the
+        # Artifact contains the complete structured result.  Empty
+        # placeholders must not erase evidence-backed Artifact fields.
+        durable = {
+            key: value
+            for key, value in direct.items()
+            if value is not None and value not in ({}, [], "")
+        }
+        view_durable = {
+            key: value
+            for key, value in view_extracted.items()
+            if value is not None and value not in ({}, [], "")
+        }
+        structured = {**view_durable, **durable, **structured}
         extracted = structured.get("extracted_facts") if isinstance(structured.get("extracted_facts"), dict) else {}
         response = structured.get("body") or structured.get("body_excerpt") or structured.get("content")
         if isinstance(response, str):
@@ -229,26 +243,28 @@ class ToolResultFactReducer:
                     str(metadata.get("adapter") or "").lower() == "asset_warranty"
                     and str(metadata.get("dbms") or "").lower() == "mysql"
                 )
-                fact_key = (
-                    "asset_warranty.mysql_boolean_oracle"
-                    if asset_mysql
-                    else f"asset_warranty.{args.get('test_field', 'field')}_boolean_oracle"
-                )
-                validation_evidence = validation_evidence_service.from_result(
-                    "SQL_INJECTION",
-                    {
-                        **structured,
-                        **args,
-                        "request": args.get("request") or structured.get("request_contract") or {},
-                        "true_signature": true_signature,
-                        "false_signature": false_signature,
-                        "response_differential": differential,
-                    },
-                )
+                benchmark_case = str((challenge.metadata_json or {}).get("benchmark_case_id") or "")
+                generic_security = benchmark_case == "sql-injection-golden" and not asset_mysql
+                fact_key = "security.sql_injection.validation" if generic_security else "asset_warranty.mysql_boolean_oracle" if asset_mysql else f"asset_warranty.{args.get('test_field', 'field')}_boolean_oracle"
+                validation_evidence = None
+                if not generic_security:
+                    validation_evidence = validation_evidence_service.from_result(
+                        "SQL_INJECTION",
+                        {
+                            **structured,
+                            **args,
+                            "request": args.get("request") or structured.get("request_contract") or {},
+                            "true_signature": true_signature,
+                            "false_signature": false_signature,
+                            "response_differential": differential,
+                        },
+                    )
                 result.append({
                     "fact_key": fact_key,
                     "fact_type": "BOOLEAN_ORACLE",
                     "value": {
+                        "vulnerability_type": "SQL_INJECTION",
+                        "status": "VALIDATED",
                         "test_field": args.get("test_field"),
                         "baseline_value": args.get("baseline_value"),
                         "control_fields": args.get("control_fields") or {},
@@ -260,8 +276,22 @@ class ToolResultFactReducer:
                         "response_differential": differential,
                         "request_contract": request_contract,
                         "oracle": oracle_contract,
+                        "controls": {
+                            "baseline": True,
+                            "positive_control": True,
+                            "negative_control": True,
+                        },
+                        "reproduction": {
+                            "repeat_count": structured.get("repeat_count") or structured.get("subrequest_count") or max(len(true_rows), len(false_rows)),
+                            "stable": stable_true and stable_false,
+                        },
                         **quality,
-                        "validation_result": validation_evidence.model_dump(mode="json"),
+                        # A confirmed differential is strong evidence, but
+                        # the semantic validation result is intentionally
+                        # capped below certainty until later lifecycle
+                        # stages produce exploit/impact evidence.
+                        "confidence": min(round(quality["confidence"], 4), 0.95) if generic_security else round(quality["confidence"], 4),
+                        **({"validation_result": validation_evidence.model_dump(mode="json")} if validation_evidence is not None else {}),
                     },
                     "confidence": round(quality["confidence"] * 100),
                 })

@@ -2933,7 +2933,8 @@ class MultiAgentOrchestrator:
         collection = direct_collection or ("information_evidence" if isinstance(mapped, InformationEvidence) else "validation_results" if isinstance(mapped, (ValidationResult, ValidationEvidence)) else None)
         if collection is None:
             return
-        payload = {"fact_id": fact.id, "fact_key": fact.fact_key, **(fact_value if direct_collection else mapped.model_dump(mode="json"))}
+        mapped_payload = mapped.model_dump(mode="json") if mapped is not None else fact_value
+        payload = {"fact_id": fact.id, "fact_key": fact.fact_key, **mapped_payload}
         if collection == "information_evidence":
             if any(str(item.get("fact_id")) == fact.id for item in context[collection] if isinstance(item, dict)):
                 return
@@ -2942,6 +2943,31 @@ class MultiAgentOrchestrator:
         context[collection] = [*context[collection], payload]
         state.security_context_json = context
         await session.flush()
+        if collection == "validation_results":
+            await self._controller_event(
+                session,
+                run.id,
+                "validation.created",
+                {
+                    "fact_id": fact.id,
+                    "fact_key": fact.fact_key,
+                    "status": payload.get("status"),
+                    "type": payload.get("type") or payload.get("vulnerability_type"),
+                    "confidence": payload.get("confidence"),
+                    "evidence_ids": payload.get("evidence_ids") or fact.evidence_ids_json,
+                },
+            )
+            await self._controller_event(
+                session,
+                run.id,
+                "security.context.updated",
+                {
+                    "collection": collection,
+                    "fact_id": fact.id,
+                    "fact_key": fact.fact_key,
+                    "validation_count": len(context[collection]),
+                },
+            )
 
     async def run(self, session, run: SolveRun, challenge: Challenge, attempt: RunAttempt, lease: RunExecutionLease, *, engine: object | None = None) -> dict:
         # Lifecycle, event and dispatch boundaries commit this session. Keep

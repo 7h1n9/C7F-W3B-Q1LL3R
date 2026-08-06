@@ -1,4 +1,5 @@
 import pytest
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
@@ -6,6 +7,7 @@ from app.models import Base
 from app.models.challenge import Challenge
 from app.models.multi_agent import VerifiedFact
 from app.models.run import SolveRun
+from app.models.run import RunEvent
 from app.models.solver_state import SolverState
 from app.security.schemas import (
     ExploitResult,
@@ -19,6 +21,7 @@ from app.security.schemas import (
 from app.security.decision import security_decision_engine
 from app.security.service import security_finding_service
 from app.services.solver_state import solver_state_service
+from app.orchestration.multi_agent_orchestrator import MultiAgentOrchestrator
 
 
 @pytest.fixture
@@ -93,6 +96,65 @@ def test_mysql_boolean_oracle_maps_to_successful_validation_result():
     assert mapped.type == "SQL_INJECTION_VALIDATION"
     assert mapped.status == ValidationStatus.SUCCESS
     assert mapped.evidence_ids == ["e-oracle"]
+
+
+def test_generic_sql_validation_fact_maps_to_validated_result():
+    fact = VerifiedFact(
+        id="fact-golden-validation",
+        run_id="run-1",
+        fact_key="security.sql_injection.validation",
+        fact_type="SECURITY_VALIDATION",
+        value_json={
+            "vulnerability_type": "SQL_INJECTION",
+            "status": "VALIDATED",
+            "confidence": 0.95,
+            "evidence_ids": ["e-validation"],
+            "controls": {"baseline": True, "positive_control": True, "negative_control": True},
+            "reproduction": {"repeat_count": 5, "stable": True},
+        },
+        confidence=95,
+        evidence_ids_json=["e-validation"],
+        promotion_status="VERIFIED",
+    )
+
+    mapped = security_finding_service.map_verified_fact(fact)
+
+    assert mapped is not None
+    assert isinstance(mapped, ValidationResult)
+    assert mapped.status == ValidationStatus.VALIDATED
+    assert mapped.confidence == 0.95
+    assert mapped.evidence_ids == ["e-validation"]
+
+
+@pytest.mark.asyncio
+async def test_verified_generic_validation_updates_security_context_and_events(session_factory):
+    async with session_factory() as session:
+        run = await _run(session)
+        state = SolverState(run_id=run.id)
+        session.add(state)
+        fact = VerifiedFact(
+            id="fact-context-validation",
+            run_id=run.id,
+            fact_key="security.sql_injection.validation",
+            fact_type="SECURITY_VALIDATION",
+            value_json={"status": "VALIDATED", "confidence": 0.95, "evidence_ids": ["e-context"]},
+            confidence=95,
+            evidence_ids_json=["e-context"],
+            promotion_status="VERIFIED",
+        )
+        session.add(fact)
+        await session.flush()
+
+        await MultiAgentOrchestrator()._record_security_mapping(session, run, fact)
+
+        loaded = await solver_state_service.load(session, run.id)
+        assert loaded.security_context_json["validation_results"][0]["status"] == "VALIDATED"
+        assert loaded.security_context_json["validation_results"][0]["confidence"] == 0.95
+        events = list((await session.scalars(select(RunEvent).where(RunEvent.run_id == run.id).order_by(RunEvent.sequence))).all())
+        assert [event.event_type for event in events] == [
+            "validation.created",
+            "security.context.updated",
+        ]
 
 
 def test_business_baseline_does_not_map_to_vulnerability_semantics():
