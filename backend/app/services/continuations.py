@@ -84,8 +84,17 @@ class ContinuationService:
                 payload=payload,
                 attempt_id=attempt_id,
             )
+            # Capture scalar values before commit.  The continuation crosses
+            # into the Supervisor after this session is closed; returning the
+            # ORM row would allow an expired attribute access to trigger an
+            # async lazy load (MissingGreenlet).
+            snapshot = {
+                "id": str(item.id),
+                "run_id": str(item.run_id),
+                "status": str(item.status),
+            }
             await session.commit()
-            return {"id": item.id, "run_id": item.run_id, "status": item.status}
+            return snapshot
 
     async def recover_stale(self, session, *, stale_after_seconds: int = 300) -> int:
         cutoff = utc_now() - timedelta(seconds=stale_after_seconds)
@@ -102,7 +111,7 @@ class ContinuationService:
             await session.commit()
         return len(rows)
 
-    async def claim(self, session, continuation_id: str) -> RunContinuation | None:
+    async def claim(self, session, continuation_id: str) -> dict | None:
         item = await session.scalar(select(RunContinuation).where(
             RunContinuation.id == continuation_id,
             RunContinuation.status == CONTINUATION_PENDING,
@@ -114,8 +123,18 @@ class ContinuationService:
         item.owner_instance_id = self.owner_instance_id
         item.claimed_at = utc_now()
         item.attempts += 1
+        # Do not return `item` after commit.  The Supervisor consumes this
+        # value outside the claim transaction and must receive a detached,
+        # ID-driven snapshot only.
+        snapshot = {
+            "id": str(item.id),
+            "run_id": str(item.run_id),
+            "kind": str(item.kind),
+            "payload": dict(item.payload_json or {}),
+            "status": str(item.status),
+        }
         await session.commit()
-        return item
+        return snapshot
 
     async def complete(self, session, continuation_id: str) -> None:
         item = await session.get(RunContinuation, continuation_id)
@@ -136,11 +155,15 @@ class ContinuationService:
         item.last_error_message = str(error)[:4000]
         await session.commit()
 
-    async def pending(self, session) -> list[RunContinuation]:
-        return list((await session.scalars(select(RunContinuation).where(
+    async def pending(self, session) -> list[dict]:
+        rows = list((await session.scalars(select(RunContinuation).where(
             RunContinuation.status.in_(ACTIVE_CONTINUATION_STATES),
             RunContinuation.available_at <= utc_now(),
         ).order_by(RunContinuation.created_at))).all())
+        return [
+            {"id": str(item.id), "run_id": str(item.run_id)}
+            for item in rows
+        ]
 
 
 continuation_service = ContinuationService()

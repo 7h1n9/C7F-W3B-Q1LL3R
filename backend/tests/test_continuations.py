@@ -48,7 +48,9 @@ async def test_continuation_survives_claim_and_completion(continuation_session):
 
     claimed = await continuation_service.claim(session, item.id)
     assert claimed is not None
-    assert claimed.status == CONTINUATION_RUNNING
+    assert claimed["status"] == CONTINUATION_RUNNING
+    assert claimed["run_id"] == run.id
+    assert claimed["payload"] == {"phase": "BUSINESS_BASELINE"}
 
     await continuation_service.complete(session, item.id)
     persisted = await session.get(RunContinuation, item.id)

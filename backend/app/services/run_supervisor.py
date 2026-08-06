@@ -84,8 +84,8 @@ class RunSupervisor:
                     dedupe_key=f"{kind}:{run_id}:{revision}:{phase}",
                     payload={"reason": reason, "context_revision": revision, "phase": phase},
                 )
+                continuation_id = str(item.id)
                 await session.commit()
-                continuation_id = item.id
         except Exception:
             # Compatibility during migration rollout and for isolated tests.
             logger.exception("Continuation persistence unavailable run_id=%s reason=%s", run_id, reason)
@@ -106,7 +106,7 @@ class RunSupervisor:
             await continuation_service.recover_stale(session)
             rows = await continuation_service.pending(session)
         for item in rows:
-            await self.enqueue_continuation(item.id, item.run_id)
+            await self.enqueue_continuation(item["id"], item["run_id"])
         return len(rows)
 
     async def _execute_continuation(self, continuation_id: str) -> None:
@@ -119,11 +119,11 @@ class RunSupervisor:
             item = await continuation_service.claim(session, continuation_id)
             if item is None:
                 return
-            payload = dict(item.payload_json or {})
+            payload = dict(item.get("payload") or {})
             continuation = {
-                "id": str(item.id),
-                "kind": str(item.kind),
-                "run_id": str(item.run_id),
+                "id": str(item["id"]),
+                "kind": str(item["kind"]),
+                "run_id": str(item["run_id"]),
                 "producing_task_id": str(payload.get("producing_task_id") or ""),
                 "user_message": payload.get("user_message"),
             }

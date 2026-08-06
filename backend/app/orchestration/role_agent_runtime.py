@@ -68,7 +68,7 @@ class RoleAgentRuntime:
             raise RuntimeError(f"AGENT_ROLE_NOT_CONFIGURED:{task.agent_role}")
         return policy
 
-    async def _new_turn(self, session, run: SolveRun, task: AgentTask, prompt: str) -> AgentTurn:
+    async def _new_turn(self, session, run: SolveRun, task: AgentTask, prompt: str) -> str:
         step = int(await session.scalar(select(func.max(AgentTurn.step_number)).where(AgentTurn.run_id == run.id)) or 0) + 1
         turn = AgentTurn(
             run_id=run.id, agent_task_id=task.id, agent_role=task.agent_role,
@@ -82,10 +82,17 @@ class RoleAgentRuntime:
         await session.flush()
         run.active_turn_id = turn.id
         await deterministic_controller.touch_task(session, task.id)
+        turn_id = str(turn.id)
         await session.commit()
-        return turn
+        # Only the scalar ID crosses the commit/runtime boundary.  Callers
+        # reload the turn in _finish_turn instead of retaining an expired ORM
+        # instance.
+        return turn_id
 
-    async def _finish_turn(self, session, run: SolveRun, task: AgentTask, turn: AgentTurn, trace: dict[str, Any], action: dict[str, Any], *, parse_error: str | None = None) -> None:
+    async def _finish_turn(self, session, run: SolveRun, task: AgentTask, turn_id: str, trace: dict[str, Any], action: dict[str, Any], *, parse_error: str | None = None) -> None:
+        turn = await session.get(AgentTurn, turn_id)
+        if turn is None:
+            raise DomainError("AGENT_TURN_NOT_FOUND", "Agent turn disappeared before completion.", {"turn_id": turn_id})
         turn.latency_ms = trace.get("latency_ms")
         turn.input_tokens = trace.get("input_tokens")
         turn.output_tokens = trace.get("output_tokens")

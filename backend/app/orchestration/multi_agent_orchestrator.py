@@ -534,10 +534,10 @@ class MultiAgentOrchestrator:
     async def ensure_result_review_continuation(
         self,
         session,
-        run: SolveRun,
-        producing_task: AgentTask,
+        run_id: str,
+        producing_task_id: str,
         result_payload: dict,
-    ) -> tuple[AgentTask, str]:
+    ) -> tuple[str, str]:
         """Ensure every completed producing task enters exactly one ResultReview.
 
         The producer's reducer has already created evidence-backed candidate
@@ -545,7 +545,17 @@ class MultiAgentOrchestrator:
         may promote them, so a missing review task must be repaired
         deterministically instead of allowing the candidate to remain orphaned.
         """
-        run_id = run.id
+        # ResultReview recovery crosses a controller/Supervisor session
+        # boundary. Reload the ORM rows here from scalar IDs rather than
+        # accepting objects from the previous transaction.
+        run = await session.get(SolveRun, run_id)
+        producing_task = await session.get(AgentTask, producing_task_id)
+        if run is None or producing_task is None:
+            raise DomainError(
+                "RESULT_REVIEW_CONTEXT_MISSING",
+                "ResultReview context could not be reloaded from durable IDs.",
+                {"run_id": run_id, "task_id": producing_task_id},
+            )
         candidate = await session.scalar(select(VerifiedFact).where(
             VerifiedFact.run_id == run.id,
             VerifiedFact.source_task_id == producing_task.id,
@@ -555,7 +565,7 @@ class MultiAgentOrchestrator:
             raise DomainError(
                 "RESULT_REVIEW_CANDIDATE_MISSING",
                 "A completed producing task has no candidate fact for ResultReview.",
-                {"task_id": producing_task.id},
+                {"task_id": producing_task_id},
             )
         existing = await session.scalar(select(AgentTask).where(
             AgentTask.run_id == run.id,
@@ -563,7 +573,7 @@ class MultiAgentOrchestrator:
             AgentTask.created_by_task_id == producing_task.id,
         ).order_by(AgentTask.created_at.desc()))
         if existing is not None:
-            return existing, existing.lease_token or ""
+            return str(existing.id), str(existing.lease_token or "")
         review_task, review_token = await self._task(
             session,
             run,
@@ -577,7 +587,8 @@ class MultiAgentOrchestrator:
         # Persist the task before the audit-event insert.  Event sequence
         # contention may rollback its transaction; leaving this task only
         # flushed would erase the ResultReview task during that rollback.
-        review_task_id = review_task.id
+        review_task_id = str(review_task.id)
+        producing_task_id = str(producing_task.id)
         await session.commit()
         await self._controller_event(
             session,
@@ -586,7 +597,7 @@ class MultiAgentOrchestrator:
             {
                 "run_id": run_id,
                 "task_id": review_task_id,
-                "producing_task_id": producing_task.id,
+                "producing_task_id": producing_task_id,
                 "source": "ensure_result_review_continuation",
                 "timestamp": datetime.now(UTC).isoformat(),
             },
@@ -598,7 +609,7 @@ class MultiAgentOrchestrator:
                 "ResultReview task was not durable after dispatch.",
                 {"task_id": review_task_id},
             )
-        return review_task, review_token
+        return str(review_task.id), str(review_token or "")
 
     async def _resume_result_review(self, producing_task_id: str) -> None:
         """Complete a missing ResultReview after a producer task commits."""
@@ -642,17 +653,17 @@ class MultiAgentOrchestrator:
                 result_payload = (await self.build_production_result_context(
                     session, run, attempt, proposal, plan_review, approved, producing_task
                 )).model_dump(mode="json")
-                review_task, review_token = await self.ensure_result_review_continuation(
-                    session, run, producing_task, result_payload
+                review_task_id, review_token = await self.ensure_result_review_continuation(
+                    session, run_id, producing_task_id, result_payload
                 )
-                review_task_id = review_task.id
                 # _controller_event commits and expires ORM instances in the
                 # recovery session.  Refresh the objects before the runtime
                 # reads them; otherwise lazy reloads occur outside the
                 # async greenlet and abort ResultReview continuation.
                 await session.refresh(run)
+                producing_task = await session.get(AgentTask, producing_task_id)
                 review_task = await session.get(AgentTask, review_task_id)
-                if review_task is None:
+                if producing_task is None or review_task is None:
                     raise DomainError(
                         "RESULT_REVIEW_TASK_MISSING",
                         "ResultReview task disappeared before runtime execution.",
@@ -750,7 +761,7 @@ class MultiAgentOrchestrator:
                     transition(run, RunStatus.PLANNING)
                 await session.commit()
                 await self._request_controller_continuation(
-                    run,
+                    run_id,
                     producing_task_id=producing_task_id,
                     result_review_task_id=review_task_id,
                 )
@@ -768,7 +779,7 @@ class MultiAgentOrchestrator:
 
     async def _request_controller_continuation(
         self,
-        run: SolveRun,
+        run_id: str,
         *,
         producing_task_id: str,
         result_review_task_id: str,
@@ -781,7 +792,6 @@ class MultiAgentOrchestrator:
         the existing Orchestrator.start entry point.  This deliberately does
         not call MultiAgentOrchestrator.run recursively.
         """
-        run_id = run.id
         continuation_id: str | None = None
         async with SessionLocal() as session:
             current = await session.get(SolveRun, run_id)
@@ -791,6 +801,7 @@ class MultiAgentOrchestrator:
                 RunStatus.CANCELLED.value,
             }:
                 return
+            current_id = str(current.id)
             checkpoint = dict(current.recovery_checkpoint_json or {})
             if checkpoint.get("controller_continuation_requested_for") == producing_task_id:
                 return
@@ -813,14 +824,14 @@ class MultiAgentOrchestrator:
                     "result_review_task_id": result_review_task_id,
                 },
             )
-            continuation_id = continuation.id
+            continuation_id = str(continuation.id)
             await session.commit()
             await self._controller_event(
                 session,
-                current.id,
+                current_id,
                 "solver.continue.requested",
                 {
-                    "run_id": current.id,
+                    "run_id": current_id,
                     "source": "result_review_promotion",
                     "producing_task_id": producing_task_id,
                     "result_review_task_id": result_review_task_id,
@@ -830,10 +841,10 @@ class MultiAgentOrchestrator:
             )
             await self._controller_event(
                 session,
-                current.id,
+                current_id,
                 "planner.replan.dispatched",
                 {
-                    "run_id": current.id,
+                    "run_id": current_id,
                     "source": "result_review_promotion",
                     "parent_task_id": result_review_task_id,
                     "producing_task_id": producing_task_id,
@@ -2302,6 +2313,7 @@ class MultiAgentOrchestrator:
         phase_before_dispatch = str(run.current_phase or "")
         # Freeze identity/lifecycle values before independent-session commits.
         run_id = run.id
+        challenge_id = challenge.id
         task_id = task.id
         approved_action_id = approved_action.id
         tool_name = approved_action.tool_name
@@ -2388,7 +2400,7 @@ class MultiAgentOrchestrator:
             used_separate_dispatch_session = False
             async with SessionLocal() as dispatch_session:
                 dispatch_run = await dispatch_session.get(SolveRun, run_id)
-                dispatch_challenge = await dispatch_session.get(Challenge, challenge.id)
+                dispatch_challenge = await dispatch_session.get(Challenge, challenge_id)
                 if dispatch_run is None or dispatch_challenge is None:
                     # Unit fixtures may intentionally keep the Run in an
                     # uncommitted outer transaction.  Preserve that test
@@ -2691,6 +2703,10 @@ class MultiAgentOrchestrator:
         await session.flush()
 
     async def run(self, session, run: SolveRun, challenge: Challenge, attempt: RunAttempt, lease: RunExecutionLease, *, engine: object | None = None) -> dict:
+        # Lifecycle, event and dispatch boundaries commit this session. Keep
+        # the challenge identity scalar before those boundaries so an expired
+        # Challenge ORM instance is never read for its primary key later.
+        challenge_id = challenge.id
         await deterministic_controller.seed_policies(session)
         if not await self._ensure_asset_warranty_metadata_or_pause(session, run, challenge):
             return {"status": run.status, "error_code": run.last_error_code, "current_phase": run.current_phase}
@@ -2761,7 +2777,7 @@ class MultiAgentOrchestrator:
                     **({"security_decision": security_context} if security_context else {}),
                 }
                 planner_task, planner_token = await self._task(session, run, AgentRole.PLANNER, AgentTaskKind.PLANNING, "Select the next bounded stage from the current memory snapshot.", [], parent=parent, context=planner_context)
-                planner_result = await self._complete(session, run, planner_task, planner_token, await self.runtime.execute(session, run.id, challenge.id, attempt.id, planner_task.id, planner_token))
+                planner_result = await self._complete(session, run, planner_task, planner_token, await self.runtime.execute(session, run.id, challenge_id, attempt.id, planner_task.id, planner_token))
                 if planner_result.status != AgentTaskStatus.COMPLETED:
                     run.last_error_code = "PLANNER_RESULT_INVALID"
                     run.last_error_message = planner_result.handoff_summary
@@ -2783,7 +2799,7 @@ class MultiAgentOrchestrator:
                 # validated and its durable dispatch chain is written.  The
                 # old order completed the task first, so a failed Review
                 # insert stranded the Run in PLANNING forever.
-                plan_result = await self.runtime.execute(session, run.id, challenge.id, attempt.id, plan_task.id, plan_token)
+                plan_result = await self.runtime.execute(session, run.id, challenge_id, attempt.id, plan_task.id, plan_token)
                 try:
                     plan_review, approved, production_task, production_token = await asyncio.wait_for(
                         self._persist_plan_review(session, run, challenge, proposal, plan_task, plan_token, plan_result),
@@ -3033,9 +3049,16 @@ class MultiAgentOrchestrator:
                 await session.refresh(approved)
                 await session.refresh(exec_task)
                 try:
-                    result_review_task, result_review_token = await self.ensure_result_review_continuation(
-                        session, run, exec_task, result_payload
+                    result_review_task_id, result_review_token = await self.ensure_result_review_continuation(
+                        session, run.id, exec_task.id, result_payload
                     )
+                    result_review_task = await session.get(AgentTask, result_review_task_id)
+                    if result_review_task is None:
+                        raise DomainError(
+                            "RESULT_REVIEW_TASK_MISSING",
+                            "ResultReview task was not durable after dispatch.",
+                            {"task_id": result_review_task_id},
+                        )
                 except DomainError as error:
                     # A completed Boolean tool call with no strict candidate
                     # is an inconclusive experiment, not a ResultReview
@@ -3073,7 +3096,7 @@ class MultiAgentOrchestrator:
                 await session.refresh(plan_review)
                 await session.refresh(approved)
                 await session.refresh(exec_task)
-                result_review = await self._complete(session, run, result_review_task, result_review_token, await self.runtime.execute(session, run.id, challenge.id, attempt.id, result_review_task.id, result_review_token))
+                result_review = await self._complete(session, run, result_review_task, result_review_token, await self.runtime.execute(session, run.id, challenge_id, attempt.id, result_review_task.id, result_review_token))
                 result_review_row = await self._review(session, run, proposal, result_review_task, result_review)
                 await self._controller_event(
                     session,
@@ -3095,7 +3118,7 @@ class MultiAgentOrchestrator:
                     if error.code != "RESULT_REVIEW_PROMOTION_EMPTY":
                         raise
                     repair_task, repair_token = await self._task(session, run, AgentRole.ANALYSIS, AgentTaskKind.RESULT_REVIEW, "Repair the approved result review by selecting candidate facts or explicitly accepting a capability.", [], parent=result_review_task.id, context={**result_payload, "repair_attempt": True})
-                    repair_result = await self._complete(session, run, repair_task, repair_token, await self.runtime.execute(session, run.id, challenge.id, attempt.id, repair_task.id, repair_token))
+                    repair_result = await self._complete(session, run, repair_task, repair_token, await self.runtime.execute(session, run.id, challenge_id, attempt.id, repair_task.id, repair_token))
                     result_review_row = await self._review(session, run, proposal, repair_task, repair_result)
                     promoted = await self._apply_result_review(session, run, exec_task, result_review_row)
                 await self._controller_event(
