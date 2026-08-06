@@ -39,7 +39,7 @@ TERMINAL = {status for status in RunStatus if status.name.startswith(("COMPLETED
     RunStatus.POLICY_BLOCKED,
 }
 SOLVER_PHASES = {
-    "INTAKE", "BASELINE", "RECON", "MAPPING", "HYPOTHESIS", "TESTING", "CHAINING", "ENUMERATION",
+    "INTAKE", "BASELINE", "RECON", "MAPPING", "HYPOTHESIS", "VALIDATION", "EXPLOITATION", "IMPACT", "TESTING", "CHAINING", "ENUMERATION",
     "FLAG_SEARCH", "FLAG_VERIFICATION", "REPORTING",
     # Multi-agent solver phases are persisted on SolveRun as solver phases,
     # not lifecycle statuses.  Keep them from being reset to INTAKE when the

@@ -11,12 +11,14 @@ from app.security.schemas import (
     VulnerabilityHypothesis,
 )
 from app.security.decision import SecurityDecision, SecurityDecisionEngine, security_decision_engine
+from app.security.lifecycle import VulnerabilityLifecycleEngine, vulnerability_lifecycle_engine
 from app.security.service import SecurityFindingService, ValidationEvidenceService, security_finding_service, validation_evidence_service
 
 __all__ = [
     "ExploitResult",
     "SecurityDecision",
     "SecurityDecisionEngine",
+    "VulnerabilityLifecycleEngine",
     "ImpactAssessment",
     "InformationEvidence",
     "SecurityFinding",
@@ -29,4 +31,5 @@ __all__ = [
     "security_finding_service",
     "validation_evidence_service",
     "security_decision_engine",
+    "vulnerability_lifecycle_engine",
 ]

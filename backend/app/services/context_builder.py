@@ -18,6 +18,7 @@ from app.models.run import (
     ToolCall,
 )
 from app.models.skill import RunSkillSnapshot, Skill
+from app.security.lifecycle import vulnerability_lifecycle_engine
 from app.services.challenge_lessons import challenge_lesson_service
 from app.services.skill_selection import specialist_skill_catalog
 from app.services.solver_state import solver_state_service
@@ -66,6 +67,16 @@ class ContextBuilder:
 
     async def build(self, session: AsyncSession, run: SolveRun, challenge: Challenge) -> list[dict]:
         state = await solver_state_service.load(session, run.id)
+        security_context = {
+            "hypotheses": [],
+            "validation_results": [],
+            "exploit_results": [],
+            "impact_assessments": [],
+            "findings": [],
+            "information_evidence": [],
+            **(state.security_context_json or {} if state else {}),
+        }
+        vulnerability_lifecycle = vulnerability_lifecycle_engine.evaluate(security_context)
         # A compacted run starts from the semantic snapshot.  Only records
         # created after the snapshot boundary are eligible for the live tail;
         # this prevents re-injecting the archived event stream into context.
@@ -232,6 +243,8 @@ class ContextBuilder:
             },
             "RunPlan": (snapshot_data.get("current_exploit_plan") if snapshot_data else None) or (state.run_plan_json if state else {}),
             "AttackChainPlan": (snapshot_data.get("attack_chain") if snapshot_data else None) or (state.attack_chain_plan_json if state else {}),
+            "Security Context": security_context,
+            "vulnerability_lifecycle": vulnerability_lifecycle,
             "Capability Ledger": (snapshot_data.get("confirmed_capabilities") if snapshot_data else None) or (state.capability_ledger_json if state else {}),
             "Recovery Checkpoint": run.recovery_checkpoint_json or {},
             "Solver State": {
@@ -244,6 +257,7 @@ class ContextBuilder:
                 "attack_strategy_history": list(state.attack_strategy_history_json or []) if state else [],
                 "strategy_feedback": dict(state.last_experiment_json or {}) if state else {},
                 "strategy_migration": dict((state.last_experiment_json or {}).get("strategy_migration") or {}) if state else {},
+                "vulnerability_lifecycle": vulnerability_lifecycle,
                 "active_skill_ids": sorted(active_skill_ids),
                 "no_progress_count": state.no_progress_count if state else 0,
                 "last_result_classification": state.last_result_classification if state else None,

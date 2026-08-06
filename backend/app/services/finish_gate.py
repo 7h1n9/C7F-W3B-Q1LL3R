@@ -26,6 +26,29 @@ class FinishGate:
         unresolved_flags = list((await session.scalars(select(FlagCandidate).where(FlagCandidate.run_id == run.id, FlagCandidate.review_state == "OPEN"))).all())
         missing: list[str] = []
 
+        # SecurityContext is a semantic completion boundary.  Once security
+        # reasoning has produced any object, environmental information or a
+        # partial lifecycle cannot be reported as a completed finding.
+        security_context = dict(state.security_context_json or {})
+        security_context_active = any(
+            security_context.get(key)
+            for key in (
+                "information_evidence",
+                "hypotheses",
+                "validation_results",
+                "exploit_results",
+                "impact_assessments",
+                "findings",
+            )
+        )
+        finding_created = any(
+            str(item.get("status") or "").upper() == "CREATED"
+            for item in (security_context.get("findings") or [])
+            if isinstance(item, dict)
+        )
+        if security_context_active and not finding_created:
+            missing.append("SecurityFinding with CREATED status")
+
         hard_blockers = {
             "TARGET_UNREACHABLE",
             "REQUIRED_ATTACHMENT_MISSING",

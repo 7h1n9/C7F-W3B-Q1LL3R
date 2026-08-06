@@ -49,6 +49,7 @@ from app.models.run import (
 from app.orchestration.role_agent_runtime import RoleAgentRuntime
 from app.orchestration.state_machine import RunStatus, transition
 from app.security.decision import security_decision_engine
+from app.security.lifecycle import vulnerability_lifecycle_engine
 from app.security.schemas import InformationEvidence, ValidationEvidence, ValidationResult
 from app.security.service import security_finding_service
 from app.schemas.multi_agent import (
@@ -226,6 +227,36 @@ class MultiAgentOrchestrator:
                 return "FLAG_VERIFICATION"
             return "BOUNDED_EXTRACTION"
         state = await solver_state_service.load(session, run.id)
+        security_context = dict(state.security_context_json or {}) if state else {}
+        security_signal = any(
+            security_context.get(key)
+            for key in (
+                "information_evidence",
+                "hypotheses",
+                "validation_results",
+                "exploit_results",
+                "impact_assessments",
+                "findings",
+            )
+        )
+        if security_signal:
+            lifecycle = vulnerability_lifecycle_engine.evaluate(security_context)
+            checkpoint = dict(run.recovery_checkpoint_json or {})
+            previous_lifecycle = checkpoint.get("security_lifecycle") or {}
+            if previous_lifecycle != lifecycle:
+                checkpoint["security_lifecycle"] = lifecycle
+                run.recovery_checkpoint_json = checkpoint
+                await self._controller_event(
+                    session,
+                    run.id,
+                    "security.lifecycle.created",
+                    {
+                        "run_id": run.id,
+                        "previous_state": previous_lifecycle.get("current_state"),
+                        **lifecycle,
+                    },
+                )
+            return str(lifecycle["required_phase"])
         security_decision = security_decision_engine.evaluate(state.security_context_json if state else {})
         if security_decision is not None:
             previous_phase = str(run.current_phase or "")
@@ -1789,6 +1820,7 @@ class MultiAgentOrchestrator:
             "information_evidence": list(raw_security_context.get("information_evidence") or []),
             "boolean_diagnosis": dict(raw_security_context.get("boolean_diagnosis") or {}),
         }
+        vulnerability_lifecycle = vulnerability_lifecycle_engine.evaluate(security_context)
         working = {
             **working,
             "capability_ledger": (state.capability_ledger_json if state else {}),
@@ -1797,6 +1829,7 @@ class MultiAgentOrchestrator:
             "strategy_feedback": dict(state.last_experiment_json or {}) if state else {},
             "strategy_migration": dict((state.last_experiment_json or {}).get("strategy_migration") or {}) if state else {},
             "security_context": security_context,
+            "vulnerability_lifecycle": vulnerability_lifecycle,
             "security_reasoning_rules": security_finding_service.planner_guidance(security_context),
             "unverified_candidates": [item.id for item in candidate_result.all()],
         }
@@ -2919,6 +2952,7 @@ class MultiAgentOrchestrator:
                 required_phase = await self._capability_phase(session, run)
                 await self._phase(session, run, required_phase)
                 security_context = (run.recovery_checkpoint_json or {}).get("security_decision")
+                vulnerability_lifecycle = (run.recovery_checkpoint_json or {}).get("security_lifecycle")
                 if security_context and not security_context.get("planner_replan_emitted"):
                     checkpoint = dict(run.recovery_checkpoint_json or {})
                     checkpoint["security_decision"] = {**security_context, "planner_replan_emitted": True}
@@ -2937,6 +2971,7 @@ class MultiAgentOrchestrator:
                 planner_context = {
                     **context,
                     **({"security_decision": security_context} if security_context else {}),
+                    **({"vulnerability_lifecycle": vulnerability_lifecycle} if vulnerability_lifecycle else {}),
                 }
                 planner_task, planner_token = await self._task(session, run, AgentRole.PLANNER, AgentTaskKind.PLANNING, "Select the next bounded stage from the current memory snapshot.", [], parent=parent, context=planner_context)
                 planner_result = await self._complete(session, run, planner_task, planner_token, await self.runtime.execute(session, run.id, challenge_id, attempt.id, planner_task.id, planner_token))
