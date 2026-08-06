@@ -76,6 +76,7 @@ from app.services.solver_state import solver_state_service
 from app.services.run_finalizer import run_finalizer
 from app.services.tool_result_fact_reducer import tool_result_fact_reducer
 from app.services.boolean_oracle_diagnosis import diagnose_boolean_oracle, boolean_oracle_diagnosis_service
+from app.services.boolean_oracle_failure_analyzer import analyze_boolean_oracle, apply_boolean_strategy_variant
 from app.services.tool_failure_policy import blocked_failure_for_action, record_tool_failure
 from app.services.payload_strategy import payload_strategy_manager
 from app.services.metadata_stage_decider import metadata_stage_decider
@@ -563,7 +564,17 @@ class MultiAgentOrchestrator:
                     "oracle": arguments.get("oracle") or diagnosis_payload.get("oracle") or {},
                     "control_fields": arguments.get("control_fields") or diagnosis_payload.get("control_fields") or {},
                 })
-                await boolean_oracle_diagnosis_service.record(session, run.id, diagnosis_payload)
+                if any(
+                    diagnosis_payload.get(key) is not None
+                    for key in (
+                        "stable_true",
+                        "stable_false",
+                        "response_differential",
+                        "true_false_differential",
+                        "boolean_oracle_confirmed",
+                    )
+                ):
+                    await boolean_oracle_diagnosis_service.record(session, run.id, diagnosis_payload)
         await deterministic_controller.complete_task(session, task.id, result, token)
         # The task result and candidate facts are already durable.  Event
         # fan-out must not hold the controller before it can enter
@@ -957,6 +968,12 @@ class MultiAgentOrchestrator:
                 family, variant, signal = "ERROR_BASED", "ERROR", "ERROR_DIFFERENTIAL"
             elif " or " in f" {conditions} ":
                 family, variant, signal = "BOOLEAN", "OR", "RESPONSE_DIFFERENTIAL"
+            elif "#" in conditions:
+                family, variant, signal = "BOOLEAN", "AND_COMMENT_HASH", "RESPONSE_DIFFERENTIAL"
+            elif "/**/" in conditions:
+                family, variant, signal = "BOOLEAN", "AND_COMMENT_INLINE", "RESPONSE_DIFFERENTIAL"
+            elif "%27" in conditions or "%20" in conditions:
+                family, variant, signal = "BOOLEAN", "AND_ENCODING", "RESPONSE_DIFFERENTIAL"
             else:
                 family, variant, signal = "BOOLEAN", "AND", "RESPONSE_DIFFERENTIAL"
             request = arguments.get("request") if isinstance(arguments.get("request"), dict) else {}
@@ -1776,15 +1793,27 @@ class MultiAgentOrchestrator:
         if tool_name == "sql_boolean_compare" and self._asset_warranty_mysql(challenge):
             state = await solver_state_service.load(session, run.id)
             migration = dict((state.last_experiment_json or {}).get("strategy_migration") or {}) if state else {}
-            recommended = {str(value).upper() for value in (migration.get("recommended_strategies") or [])}
-            if "OR" in recommended:
+            recommended = [str(value).upper() for value in (migration.get("recommended_strategies") or [])]
+            if recommended:
                 semantic = dict(review.approved_arguments_json or {})
-                for key, fallback in {
-                    "true_condition": "' OR 1=1 -- ",
-                    "false_condition": "' OR 1=2 -- ",
-                }.items():
-                    value = str(semantic.get(key) or fallback)
-                    semantic[key] = re.sub(r"\bAND\b", "OR", value, flags=re.IGNORECASE)
+                # A migration changes only the Boolean payload syntax. The
+                # target request, tested field, baseline, and control fields
+                # remain Controller-owned challenge contract data; Planner
+                # prose must not silently switch them between retries.
+                metadata = challenge.metadata_json or {}
+                control_values = metadata.get("control_values")
+                if isinstance(control_values, dict):
+                    field = str(semantic.get("test_field") or "asset_no")
+                    semantic["request"] = {
+                        "method": str(metadata.get("method") or "POST").upper(),
+                        "json": dict(control_values),
+                    }
+                    if field in control_values:
+                        semantic["baseline_value"] = control_values[field]
+                        semantic["control_fields"] = {
+                            key: value for key, value in control_values.items() if key != field
+                        }
+                semantic = apply_boolean_strategy_variant(semantic, recommended[0])
                 # Apply the already persisted migration recommendation at the
                 # Controller/compiler boundary. Runner and Gateway still
                 # receive the normal compiled request contract.
@@ -2774,6 +2803,29 @@ class MultiAgentOrchestrator:
                         Observation.tool_call_id == completed_calls[-1].id,
                     ).order_by(Observation.created_at.desc()))
                 diagnosis_payload = dict(observation.facts_json or {}) if observation else {}
+                structured_result = result.get("structured_result") if isinstance(result.get("structured_result"), dict) else {}
+                # Observation projections can retain null placeholders while
+                # the completed production result contains the Boolean
+                # signatures. Prefer non-empty structured result fields for
+                # diagnosis without changing the Evidence/Fact pipeline.
+                for key, value in structured_result.items():
+                    if value not in (None, {}, []):
+                        diagnosis_payload[key] = value
+                if not structured_result and completed_calls:
+                    diagnosis_artifact = await session.scalar(select(Artifact).where(
+                        Artifact.run_id == run_id,
+                        Artifact.tool_call_id == completed_calls[-1].id,
+                    ).order_by(Artifact.created_at.desc()))
+                    if diagnosis_artifact:
+                        artifact_path = Path(run.workspace_path, diagnosis_artifact.file_path)
+                        if artifact_path.is_file():
+                            with contextlib.suppress(json.JSONDecodeError, OSError):
+                                artifact_payload = json.loads(artifact_path.read_text(encoding="utf-8", errors="replace"))
+                                artifact_structured = artifact_payload.get("structured_result") if isinstance(artifact_payload, dict) else {}
+                                if isinstance(artifact_structured, dict):
+                                    for key, value in artifact_structured.items():
+                                        if value not in (None, {}, []):
+                                            diagnosis_payload[key] = value
                 arguments = approved_action.compiled_arguments_json or {}
                 diagnosis_payload.update({
                     "request_contract": arguments.get("request") or diagnosis_payload.get("request_contract") or {},
@@ -2784,7 +2836,21 @@ class MultiAgentOrchestrator:
                     "oracle": arguments.get("oracle") or diagnosis_payload.get("oracle") or {},
                     "control_fields": arguments.get("control_fields") or diagnosis_payload.get("control_fields") or {},
                 })
-                boolean_diagnosis = diagnose_boolean_oracle(diagnosis_payload)
+                boolean_diagnosis = analyze_boolean_oracle(diagnosis_payload)
+                await boolean_oracle_diagnosis_service.record(session, run_id, diagnosis_payload)
+                await self._controller_event(
+                    session,
+                    run_id,
+                    "boolean.diagnosis.created",
+                    {
+                        "classification": boolean_diagnosis.get("classification"),
+                        "reason": boolean_diagnosis.get("reason") or [],
+                        "recommended_strategy": boolean_diagnosis.get("recommended_strategy") or [],
+                        "next_action": boolean_diagnosis.get("next_action"),
+                        "confidence": boolean_diagnosis.get("confidence"),
+                        "payload_fingerprint": boolean_diagnosis.get("payload_fingerprint"),
+                    },
+                )
             feedback = await experiment_strategy_manager.record_result(
                 session,
                 run,
@@ -2806,7 +2872,11 @@ class MultiAgentOrchestrator:
                         {
                             "previous_strategy": previous_strategy,
                             "classification": feedback.get("result_classification"),
-                            "next_strategy": f"{str(feedback.get('strategy_family') or '').upper()}_{next_strategies[0]}",
+                            "next_strategy": (
+                                next_strategies[0]
+                                if next_strategies[0].startswith(f"{str(feedback.get('strategy_family') or '').upper()}_")
+                                else f"{str(feedback.get('strategy_family') or '').upper()}_{next_strategies[0]}"
+                            ),
                         },
                     )
         completed = AgentTaskResultContract(
@@ -3458,9 +3528,12 @@ class MultiAgentOrchestrator:
                     migration = dict(feedback.get("strategy_migration") or {})
                     current = migration.get("current_strategy") or {}
                     next_strategies = [str(value).upper() for value in (migration.get("recommended_strategies") or [])]
+                    family = str(current.get("family") or "").upper() if isinstance(current, dict) else ""
                     next_strategy = (
-                        f"{str(current.get('family') or '').upper()}_{next_strategies[0]}"
-                        if isinstance(current, dict) and current.get("family") and next_strategies
+                        next_strategies[0]
+                        if next_strategies and next_strategies[0].startswith(f"{family}_")
+                        else f"{family}_{next_strategies[0]}"
+                        if family and next_strategies
                         else None
                     )
                     await self._controller_event(

@@ -67,6 +67,12 @@ def _metadata_from_arguments(
             family, variant, signal = "ERROR_BASED", "ERROR", "ERROR_DIFFERENTIAL"
         elif re.search(r"\bor\b", combined):
             family, variant, signal = "BOOLEAN", "OR", "RESPONSE_DIFFERENTIAL"
+        elif "#" in combined:
+            family, variant, signal = "BOOLEAN", "AND_COMMENT_HASH", "RESPONSE_DIFFERENTIAL"
+        elif "/**/" in combined:
+            family, variant, signal = "BOOLEAN", "AND_COMMENT_INLINE", "RESPONSE_DIFFERENTIAL"
+        elif "%27" in combined or "%20" in combined:
+            family, variant, signal = "BOOLEAN", "AND_ENCODING", "RESPONSE_DIFFERENTIAL"
         else:
             family, variant, signal = "BOOLEAN", "AND", "RESPONSE_DIFFERENTIAL"
         return {

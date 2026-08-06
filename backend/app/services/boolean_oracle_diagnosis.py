@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.run import SolveRun
 from app.models.solver_state import SolverState
 from app.services.payload_strategy import payload_family, payload_strategy_manager
+from app.services.boolean_oracle_failure_analyzer import analyze_boolean_oracle
 
 
 CLASSIFICATIONS = {
@@ -47,55 +48,18 @@ def payload_fingerprint(payload: dict[str, Any]) -> str:
 
 def diagnose_boolean_oracle(payload: dict[str, Any]) -> dict[str, Any]:
     """Return a deterministic diagnosis for one Boolean Oracle result."""
-    stable_true = _bool(payload.get("stable_true"))
-    stable_false = _bool(payload.get("stable_false"))
-    differential = _bool(payload.get("response_differential")) or _bool(payload.get("true_false_differential"))
-    confirmed = _bool(payload.get("boolean_oracle_confirmed"))
-
-    if confirmed and stable_true and stable_false and differential:
-        classification = "ORACLE_CONFIRMED"
-        next_action = "enter_calibration"
-        strategy = "confirmed_oracle_calibration"
-        reason = "TRUE and FALSE controls are stable and produce a confirmed response differential."
-    elif not stable_true and stable_false:
-        classification = "TRUE_SIDE_FAILED"
-        next_action = "retry_true_condition"
-        strategy = "repair_true_condition"
-        reason = "The FALSE control is stable, but the TRUE condition does not produce the expected stable signal."
-    elif stable_true and not stable_false:
-        classification = "FALSE_SIDE_FAILED"
-        next_action = "validate_negative_control"
-        strategy = "repair_negative_control"
-        reason = "The TRUE control is stable, but the FALSE control is not stable; the negative control must be validated."
-    elif stable_true and stable_false and not differential:
-        classification = "NO_DIFFERENCE"
-        next_action = "change_signal_strategy"
-        strategy = "change_response_signal"
-        reason = "Both controls are stable, but their response signatures do not differ."
-    else:
-        classification = "NO_SIGNAL"
-        next_action = "change_payload_family"
-        strategy = "change_payload_family"
-        reason = "Neither control forms a stable Boolean signal."
-
-    confidence = 0.95 if classification == "ORACLE_CONFIRMED" else 0.9 if classification in {"TRUE_SIDE_FAILED", "FALSE_SIDE_FAILED"} else 0.85
+    diagnosis = analyze_boolean_oracle(payload)
     return {
-        "classification": classification,
-        "confidence": confidence,
-        "reason": reason,
-        "next_action": next_action,
-        "recommended_strategy": strategy,
-        "stable_true": stable_true,
-        "stable_false": stable_false,
-        "response_differential": differential,
-        "boolean_oracle_confirmed": confirmed,
-        "payload_fingerprint": payload_fingerprint(payload),
+        **diagnosis,
+        "reason": diagnosis.get("reason_text") or "; ".join(diagnosis.get("reason") or []),
+        "recommended_strategy": (diagnosis.get("recommended_strategy") or ["change_payload_family"])[0],
+        "next_action": "enter_calibration" if diagnosis.get("classification") == "ORACLE_CONFIRMED" else diagnosis.get("next_action"),
     }
 
 
 class BooleanOracleDiagnosisService:
     async def record(self, session: AsyncSession, run_id: str, payload: dict[str, Any]) -> dict[str, Any]:
-        diagnosis = diagnose_boolean_oracle(payload)
+        diagnosis = analyze_boolean_oracle(payload)
         state = await session.scalar(select(SolverState).where(SolverState.run_id == run_id))
         if state is None:
             return diagnosis

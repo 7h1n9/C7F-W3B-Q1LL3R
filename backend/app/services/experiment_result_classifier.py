@@ -23,6 +23,7 @@ class StrategyMigrationEngine:
         strategy_variant: str,
         classification: str,
         family_attempts: int = 0,
+        diagnostic_recommendations: list[str] | None = None,
     ) -> dict[str, Any]:
         family = str(strategy_family or "GENERAL").upper()
         variant = str(strategy_variant or "").upper()
@@ -36,16 +37,22 @@ class StrategyMigrationEngine:
             recommendations = ["UNION", "TIME_BASED"]
             reason = "The BOOLEAN strategy family exhausted its bounded budget; migrate to independent signal families."
         elif classification == "TRUE_SIDE_FAILED":
-            recommendations = ["OR"] if variant != "OR" else ["ERROR_BASED"]
+            recommendations = [str(item).upper() for item in (diagnostic_recommendations or [])]
+            if not recommendations:
+                recommendations = ["OR"] if variant != "OR" else ["ERROR_BASED"]
             reason = "The TRUE side failed while the FALSE control was stable; migrate the predicate family."
         elif classification == "NO_DIFFERENCE":
-            recommendations = ["ERROR_BASED"]
+            recommendations = [str(item).upper() for item in (diagnostic_recommendations or [])]
+            if not recommendations:
+                recommendations = ["ERROR_BASED"]
             reason = "Both controls were stable but the response signal did not differ; change the signal strategy."
         elif classification == "FALSE_SIDE_FAILED":
             recommendations = ["VALIDATE_NEGATIVE_CONTROL"]
             reason = "The negative control is unstable; validate the control before reusing the payload family."
         elif classification == "NO_SIGNAL":
-            recommendations = ["OR"] if variant != "OR" else ["ERROR_BASED"]
+            recommendations = [str(item).upper() for item in (diagnostic_recommendations or [])]
+            if not recommendations:
+                recommendations = ["OR"] if variant != "OR" else ["ERROR_BASED"]
             reason = "The current payload family did not form a stable signal."
         elif classification == "FAILED":
             recommendations = ["RETRY_ONCE"]
@@ -133,7 +140,8 @@ class ExperimentResultClassifier:
         elif classification in self.DIAGNOSIS_CLASSES:
             status = "INCONCLUSIVE"
             normalized_classification = classification
-            reason = str(diagnostic.get("reason") or "The experiment did not produce a confirmed result.")
+            raw_reason = diagnostic.get("reason")
+            reason = "; ".join(str(item) for item in raw_reason) if isinstance(raw_reason, list) else str(raw_reason or "The experiment did not produce a confirmed result.")
         elif explicit in {"FAILED", "ERROR", "TIMEOUT"}:
             status = "FAILED"
             normalized_classification = "FAILED"
@@ -158,6 +166,11 @@ class ExperimentResultClassifier:
             strategy_variant=str(current_strategy.get("strategy_variant") or current_strategy.get("variant") or ""),
             classification=normalized_classification,
             family_attempts=family_attempts,
+            diagnostic_recommendations=(
+                [str(item).upper() for item in (diagnostic.get("recommended_strategy") or diagnostic.get("recommended_strategies") or [])]
+                if isinstance(diagnostic.get("recommended_strategy") or diagnostic.get("recommended_strategies"), list)
+                else None
+            ),
         )
         if status == "CONFIRMED":
             migration["recommended_strategies"] = []
