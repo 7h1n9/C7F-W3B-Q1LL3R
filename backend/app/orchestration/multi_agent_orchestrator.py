@@ -13,6 +13,7 @@ import contextlib
 import hashlib
 import json
 import logging
+import re
 import uuid
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -72,7 +73,7 @@ from app.services.multi_agent import deterministic_controller
 from app.services.solver_state import solver_state_service
 from app.services.run_finalizer import run_finalizer
 from app.services.tool_result_fact_reducer import tool_result_fact_reducer
-from app.services.boolean_oracle_diagnosis import boolean_oracle_diagnosis_service
+from app.services.boolean_oracle_diagnosis import diagnose_boolean_oracle, boolean_oracle_diagnosis_service
 from app.services.tool_failure_policy import blocked_failure_for_action, record_tool_failure
 from app.services.payload_strategy import payload_strategy_manager
 from app.services.metadata_stage_decider import metadata_stage_decider
@@ -1194,7 +1195,16 @@ class MultiAgentOrchestrator:
         row = PlannerProposal(id=str(uuid.uuid4()), run_id=run.id, proposal_id=proposal_id, current_stage=contract.current_stage, decision_question=contract.decision_question, next_agent=contract.next_agent.value, objective=contract.objective, input_fact_ids_json=contract.input_fact_ids, input_evidence_ids_json=contract.input_evidence_ids, required_capabilities_json=contract.required_capabilities, allowed_tools_json=contract.allowed_tools, budget_json=contract.budget.model_dump(), success_condition=contract.success_condition, stop_conditions_json=contract.stop_conditions, fallback=contract.fallback, created_by_task_id=task.id)
         session.add(row)
         await session.flush()
-        await self._controller_event(session, run.id, "planner.proposal.created", {"task_id": task.id, "proposal_id": row.proposal_id, "proposal_row_id": row.id, "current_stage": row.current_stage})
+        proposal_strategy = {}
+        if str(row.current_stage or "").upper() == "BOOLEAN_ORACLE":
+            state = await solver_state_service.load(session, run.id)
+            feedback_migration = dict((state.last_experiment_json or {}).get("strategy_migration") or {}) if state else {}
+            recommended = [str(value).upper() for value in (feedback_migration.get("recommended_strategies") or [])]
+            proposal_strategy = {
+                "strategy_family": "BOOLEAN",
+                "strategy_variant": recommended[0] if recommended else "AND",
+            }
+        await self._controller_event(session, run.id, "planner.proposal.created", {"task_id": task.id, "proposal_id": row.proposal_id, "proposal_row_id": row.id, "current_stage": row.current_stage, **proposal_strategy})
         return row
 
     async def _validate_controller_result_review(self, session, run: SolveRun, proposal: PlannerProposal, task: AgentTask, contract: AnalysisReviewContract) -> None:
@@ -1645,6 +1655,23 @@ class MultiAgentOrchestrator:
             max_logical_calls=max(1, int(budget.get("max_logical_calls") or 1)),
             expires_at=datetime.now(UTC) + timedelta(seconds=min(300, int(budget.get("max_runtime_seconds") or 300))), status="PENDING_COMPILE",
         )
+        migration = {}
+        if tool_name == "sql_boolean_compare" and self._asset_warranty_mysql(challenge):
+            state = await solver_state_service.load(session, run.id)
+            migration = dict((state.last_experiment_json or {}).get("strategy_migration") or {}) if state else {}
+            recommended = {str(value).upper() for value in (migration.get("recommended_strategies") or [])}
+            if "OR" in recommended:
+                semantic = dict(review.approved_arguments_json or {})
+                for key, fallback in {
+                    "true_condition": "' OR 1=1 -- ",
+                    "false_condition": "' OR 1=2 -- ",
+                }.items():
+                    value = str(semantic.get(key) or fallback)
+                    semantic[key] = re.sub(r"\bAND\b", "OR", value, flags=re.IGNORECASE)
+                # Apply the already persisted migration recommendation at the
+                # Controller/compiler boundary. Runner and Gateway still
+                # receive the normal compiled request contract.
+                review.approved_arguments_json = semantic
         try:
             compiled = await approved_action_compiler.compile(session, run, challenge, proposal, review, tool_name)
         except DomainError as error:
@@ -1698,6 +1725,25 @@ class MultiAgentOrchestrator:
                 {"experiment_id": experiment.get("experiment_id"), "tool": tool_name, "stage": stage},
             )
         state = await solver_state_service.load(session, run.id)
+        if state is not None and str(strategy_metadata.get("vulnerability_type") or "").upper() == "SQL_INJECTION":
+            migration = dict((state.last_experiment_json or {}).get("strategy_migration") or {})
+            recommended = [str(item).upper() for item in (migration.get("recommended_strategies") or [])]
+            current_family = str(strategy_metadata.get("strategy_family") or "").upper()
+            current_variant = str(strategy_metadata.get("strategy_variant") or "").upper()
+            current_strategy = f"{current_family}_{current_variant}"
+            if recommended and any(item in {current_family, current_variant, current_strategy} for item in recommended):
+                previous = migration.get("current_strategy") or {}
+                from_strategy = (
+                    f"{str(previous.get('family') or '').upper()}_{str(previous.get('variant') or '').upper()}"
+                    if isinstance(previous, dict) and previous.get("family") and previous.get("variant")
+                    else str(migration.get("from") or "").split("/")[-1] or current_strategy
+                )
+                await self._controller_event(
+                    session,
+                    run.id,
+                    "strategy.migration.applied",
+                    {"from": from_strategy, "to": current_strategy},
+                )
         experiment_fingerprint = fingerprint_compiled_action(tool_name, compiled.arguments_digest, proposal.success_condition, stage)
         prior = (state.action_fingerprints_json if state else {}).get(experiment_fingerprint)
         if isinstance(prior, dict) and str(prior.get("status") or "").upper() in {"COMPLETED", "CONFIRMED"}:
@@ -1903,7 +1949,8 @@ class MultiAgentOrchestrator:
 
         await event_service.append(session, run.id, "analysis.review.created", {"proposal_id": proposal.proposal_id, "analysis_review_id": review.id, "task_kind": review.task_kind, "decision": review.decision})
         if approved and production_task:
-            await event_service.append(session, run.id, "approved_action.created", {"proposal_id": proposal.proposal_id, "analysis_review_id": review.id, "approved_action_id": approved.id, "agent_role": approved.agent_role, "tool": approved.tool_name})
+            experiment_record = (approved.argument_constraints_json or {}).get("experiment_record") or {}
+            await event_service.append(session, run.id, "approved_action.created", {"proposal_id": proposal.proposal_id, "analysis_review_id": review.id, "approved_action_id": approved.id, "agent_role": approved.agent_role, "tool": approved.tool_name, "strategy_family": experiment_record.get("strategy_family"), "strategy_variant": experiment_record.get("strategy_variant")})
             await event_service.append(session, run.id, "agent.task.created", {"task_id": production_task.id, "agent_role": production_task.agent_role, "task_kind": production_task.task_kind, "proposal_id": proposal.proposal_id})
             await event_service.append(session, run.id, "agent.task.claimed", {"task_id": production_task.id, "agent_role": production_task.agent_role, "task_kind": production_task.task_kind})
         return review, approved, production_task, production_token
@@ -2597,15 +2644,52 @@ class MultiAgentOrchestrator:
         approved_action.status = "CONSUMED"
         experiment_id = str((approved_action.argument_constraints_json or {}).get("experiment_id") or "")
         if experiment_id:
-            await experiment_strategy_manager.record_result(
+            boolean_diagnosis = None
+            if str(approved_action.tool_name) == "sql_boolean_compare" and completed_calls:
+                # The durable Observation is the semantic source for Boolean
+                # diagnosis.  _complete() persists the diagnosis later, but
+                # record_result() must receive it before Planner can replan.
+                async with SessionLocal() as diagnosis_session:
+                    observation = await diagnosis_session.scalar(select(Observation).where(
+                        Observation.run_id == run_id,
+                        Observation.tool_call_id == completed_calls[-1].id,
+                    ).order_by(Observation.created_at.desc()))
+                diagnosis_payload = dict(observation.facts_json or {}) if observation else {}
+                arguments = approved_action.compiled_arguments_json or {}
+                diagnosis_payload.update({
+                    "request_contract": arguments.get("request") or diagnosis_payload.get("request_contract") or {},
+                    "test_field": arguments.get("test_field") or diagnosis_payload.get("test_field"),
+                    "baseline_value": arguments.get("baseline_value"),
+                    "true_condition": arguments.get("true_condition"),
+                    "false_condition": arguments.get("false_condition"),
+                    "oracle": arguments.get("oracle") or diagnosis_payload.get("oracle") or {},
+                    "control_fields": arguments.get("control_fields") or diagnosis_payload.get("control_fields") or {},
+                })
+                boolean_diagnosis = diagnose_boolean_oracle(diagnosis_payload)
+            feedback = await experiment_strategy_manager.record_result(
                 session,
                 run,
                 experiment_id,
                 observed_signal={"result_status": result_status, "tool_call_ids": [call.id for call in calls]},
                 result="COMPLETED",
                 next_allowed_actions=["invalid_baseline"] if str(approved_action.tool_name) == "http_request" and str(run.current_phase) == "BUSINESS_BASELINE" else [],
-                diagnosis=(result.get("structured_result") if isinstance(result.get("structured_result"), dict) else result) if str(approved_action.tool_name) == "sql_boolean_compare" else None,
+                diagnosis=boolean_diagnosis or ((result.get("structured_result") if isinstance(result.get("structured_result"), dict) else result) if str(approved_action.tool_name) == "sql_boolean_compare" else None),
             )
+            if feedback and str(approved_action.tool_name) == "sql_boolean_compare":
+                migration = dict(feedback.get("strategy_migration") or {})
+                next_strategies = [str(item).upper() for item in (migration.get("recommended_strategies") or [])]
+                if next_strategies and str(feedback.get("status") or "").upper() != "CONFIRMED":
+                    previous_strategy = f"{str(feedback.get('strategy_family') or '').upper()}_{str(feedback.get('strategy_variant') or '').upper()}"
+                    await self._controller_event(
+                        session,
+                        run.id,
+                        "strategy.feedback.created",
+                        {
+                            "previous_strategy": previous_strategy,
+                            "classification": feedback.get("result_classification"),
+                            "next_strategy": f"{str(feedback.get('strategy_family') or '').upper()}_{next_strategies[0]}",
+                        },
+                    )
         completed = AgentTaskResultContract(
             task_id=task.id,
             status=AgentTaskStatus.COMPLETED,
@@ -3166,6 +3250,29 @@ class MultiAgentOrchestrator:
                         },
                     )
                     await self._status(session, run, RunStatus.PLANNING)
+                    state = await solver_state_service.load(session, run.id)
+                    feedback = dict((state.last_experiment_json or {}) if state else {})
+                    migration = dict(feedback.get("strategy_migration") or {})
+                    current = migration.get("current_strategy") or {}
+                    next_strategies = [str(value).upper() for value in (migration.get("recommended_strategies") or [])]
+                    next_strategy = (
+                        f"{str(current.get('family') or '').upper()}_{next_strategies[0]}"
+                        if isinstance(current, dict) and current.get("family") and next_strategies
+                        else None
+                    )
+                    await self._controller_event(
+                        session,
+                        run.id,
+                        "planner.replan.dispatched",
+                        {
+                            "run_id": run.id,
+                            "source": "strategy_feedback",
+                            "parent_task_id": exec_task.id,
+                            "reason": "BOOLEAN_ORACLE_INCONCLUSIVE",
+                            "classification": feedback.get("result_classification"),
+                            "next_strategy": next_strategy,
+                        },
+                    )
                     context = {"replan_reason": "BOOLEAN_ORACLE_INCONCLUSIVE"}
                     continue
                 await session.refresh(run)
