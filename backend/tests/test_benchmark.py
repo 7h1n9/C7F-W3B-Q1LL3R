@@ -9,6 +9,7 @@ def test_three_benchmark_cases_load():
 
     assert {case.case_id for case in cases} == {
         "sql-injection-boolean",
+        "sql-injection-golden",
         "xss-reflected",
         "ssrf-internal",
     }
@@ -55,6 +56,10 @@ def test_evaluation_records_agent_effect_efficiency_and_reasoning_metrics(tmp_pa
         "finding_created": True,
     }
     assert report["metrics"]["efficiency"]["total_tokens"] == 20
+    assert report["validation_success"] is True
+    assert report["exploit_success"] is True
+    assert report["impact_confirmed"] is True
+    assert report["finding_created"] is True
     assert report["metrics"]["reasoning"] == {
         "strategy_migrations": 1,
         "feedback_events": 1,

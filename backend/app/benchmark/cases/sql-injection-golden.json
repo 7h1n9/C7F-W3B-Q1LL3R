@@ -1,0 +1,38 @@
+{
+  "case_id": "sql-injection-golden",
+  "vulnerability_type": "SQL_INJECTION",
+  "target": "http://192.168.236.1:8092/search?asset_no=",
+  "initial_knowledge": [
+    "The target is a deterministic local benchmark service.",
+    "The search endpoint accepts asset_no and exposes a boolean matched signal.",
+    "A successful extraction returns assets.secret in extracted_data."
+  ],
+  "attack_surface": [
+    {"method": "GET", "endpoint": "/search", "parameter": "asset_no", "role": "input"}
+  ],
+  "expected_hypothesis": {
+    "type": "SQL_INJECTION",
+    "location_parameter": "asset_no",
+    "status": "OPEN"
+  },
+  "expected_validation": {
+    "type": "SQL_INJECTION",
+    "status": "VALIDATED",
+    "requires": ["baseline", "positive_control", "negative_control", "stable_differential"]
+  },
+  "expected_exploit": {
+    "status": "SUCCESS",
+    "scope_type": "BUSINESS_DATA",
+    "data_fields": ["assets.secret"]
+  },
+  "expected_impact": {
+    "status": "CONFIRMED",
+    "severity": "HIGH",
+    "impact_type": "database_data_disclosure"
+  },
+  "expected_finding": {
+    "status": "CREATED",
+    "vulnerability_type": "SQL_INJECTION",
+    "severity": "HIGH"
+  }
+}

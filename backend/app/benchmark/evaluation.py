@@ -166,6 +166,12 @@ def evaluate_run(case: BenchmarkCase, snapshot: Mapping[str, Any], output_dir: s
         "evidence_chain": _evidence_chain(context, snapshot.get("evidence_chain"), events),
         "strategy_changes": strategy_changes,
         "final_result": final_result,
+        # Flat lifecycle flags make thesis aggregation possible without
+        # parsing the nested metrics object.
+        "validation_success": validation_success,
+        "exploit_success": exploit_complete,
+        "impact_confirmed": _status(impacts, "CONFIRMED"),
+        "finding_created": finding_created,
         "metrics": {
             "agent": {
                 "agent_calls": agent_calls,

@@ -1,0 +1,372 @@
+{
+  "target": "http://192.168.236.1:8092/search?asset_no=",
+  "vulnerability": "SQL_INJECTION",
+  "case_id": "sql-injection-golden",
+  "run_id": "a628e4a6-fc06-43fa-9c41-050d3cc5c276",
+  "agents": [
+    "ANALYSIS",
+    "PLANNER",
+    "RECON"
+  ],
+  "timeline": [
+    {
+      "sequence": 1,
+      "event_type": "run.created",
+      "challenge_id": "b5795c26-ab83-49db-b65e-ae22bac879e4"
+    },
+    {
+      "sequence": 2,
+      "event_type": "attempt.tool_manifest_refreshed",
+      "manifest_id": "3c4d0980-d2b1-4af5-9d44-f35d771d3b8b",
+      "manifest_sha256": "1ffa66e2feb014a457ab01ca33afb2e722cb0cacfe5ea39b232006907121c424",
+      "missing_expected_tools": []
+    },
+    {
+      "sequence": 3,
+      "event_type": "run.status_changed",
+      "status": "PREPARING",
+      "controller": "multi_agent_v1"
+    },
+    {
+      "sequence": 4,
+      "event_type": "run.status_changed",
+      "status": "ANALYZING",
+      "controller": "multi_agent_v1"
+    },
+    {
+      "sequence": 5,
+      "event_type": "run.status_changed",
+      "status": "PLANNING",
+      "controller": "multi_agent_v1"
+    },
+    {
+      "sequence": 6,
+      "event_type": "run.phase_changed",
+      "phase": "BASELINE",
+      "source": "role_agent_runtime",
+      "previous_phase": "HYPOTHESIS"
+    },
+    {
+      "sequence": 7,
+      "event_type": "agent.task.completed",
+      "status": "COMPLETED",
+      "task_id": "AT-PLANNER-25667fa3e7fa",
+      "task_kind": "PLANNING",
+      "agent_role": "PLANNER",
+      "evidence_ids": []
+    },
+    {
+      "sequence": 8,
+      "event_type": "planner.proposal.created",
+      "task_id": "AT-PLANNER-25667fa3e7fa",
+      "proposal_id": "PP-009c9739dee3",
+      "current_stage": "INTAKE",
+      "proposal_row_id": "9794179b-da08-4956-9a1e-89e0ec7f5d47"
+    },
+    {
+      "sequence": 9,
+      "event_type": "analysis.plan_review.dispatched",
+      "task_id": "AT-ANALYSIS-facf20e73a82",
+      "task_kind": "PLAN_REVIEW",
+      "proposal_id": "9794179b-da08-4956-9a1e-89e0ec7f5d47",
+      "parent_task_id": "AT-PLANNER-25667fa3e7fa"
+    },
+    {
+      "sequence": 10,
+      "event_type": "analysis.review.created",
+      "decision": "APPROVE",
+      "task_kind": "PLAN_REVIEW",
+      "proposal_id": "PP-009c9739dee3",
+      "analysis_review_id": "c86d8c1c-dcd3-4006-bb3d-b87084de86ce"
+    },
+    {
+      "sequence": 11,
+      "event_type": "approved_action.created",
+      "tool": "http_request",
+      "agent_role": "RECON",
+      "proposal_id": "PP-009c9739dee3",
+      "strategy_family": "INTAKE",
+      "strategy_variant": "HTTP_REQUEST",
+      "analysis_review_id": "c86d8c1c-dcd3-4006-bb3d-b87084de86ce",
+      "approved_action_id": "AA-b4d9ff8beef8"
+    },
+    {
+      "sequence": 12,
+      "event_type": "agent.task.created",
+      "task_id": "AT-RECON-def0c961fc3d",
+      "task_kind": "RECON",
+      "agent_role": "RECON",
+      "proposal_id": "PP-009c9739dee3"
+    },
+    {
+      "sequence": 13,
+      "event_type": "agent.task.claimed",
+      "task_id": "AT-RECON-def0c961fc3d",
+      "task_kind": "RECON",
+      "agent_role": "RECON"
+    },
+    {
+      "sequence": 14,
+      "event_type": "run.phase_changed",
+      "phase": "INTAKE",
+      "source": "role_agent_runtime",
+      "previous_phase": "BASELINE"
+    },
+    {
+      "sequence": 15,
+      "event_type": "run.status_changed",
+      "status": "EXECUTING",
+      "controller": "multi_agent_v1"
+    },
+    {
+      "sequence": 16,
+      "event_type": "tool.requested",
+      "tool": "http_request",
+      "tool_call_id": "26d8f2c4-842e-4169-9cd2-fc9b50c9167b",
+      "execution_layer": "multi_agent",
+      "logical_tool_call_id": "mcp:a628e4a6-fc06-43fa-9c41-050d3cc5c276:AT-RECON-def0c961fc3d:6fd425825b72"
+    },
+    {
+      "sequence": 17,
+      "event_type": "tool.dispatch.requested",
+      "tool": "http_request",
+      "tool_call_id": "26d8f2c4-842e-4169-9cd2-fc9b50c9167b",
+      "execution_layer": "multi_agent",
+      "logical_tool_call_id": "mcp:a628e4a6-fc06-43fa-9c41-050d3cc5c276:AT-RECON-def0c961fc3d:6fd425825b72"
+    },
+    {
+      "sequence": 18,
+      "event_type": "tool.runner.accepted",
+      "tool": "http_request",
+      "tool_call_id": "26d8f2c4-842e-4169-9cd2-fc9b50c9167b",
+      "runner_job_id": "cde0e743-44b5-4322-9ee6-a2a79c15186f",
+      "execution_layer": "multi_agent",
+      "logical_tool_call_id": "mcp:a628e4a6-fc06-43fa-9c41-050d3cc5c276:AT-RECON-def0c961fc3d:6fd425825b72"
+    },
+    {
+      "sequence": 19,
+      "event_type": "tool.started",
+      "tool": "http_request",
+      "tool_call_id": "26d8f2c4-842e-4169-9cd2-fc9b50c9167b",
+      "runner_job_id": "cde0e743-44b5-4322-9ee6-a2a79c15186f",
+      "execution_layer": "multi_agent",
+      "logical_tool_call_id": "mcp:a628e4a6-fc06-43fa-9c41-050d3cc5c276:AT-RECON-def0c961fc3d:6fd425825b72"
+    },
+    {
+      "sequence": 20,
+      "event_type": "tool.runner.completed",
+      "tool": "http_request",
+      "job_status": "COMPLETED",
+      "tool_call_id": "26d8f2c4-842e-4169-9cd2-fc9b50c9167b",
+      "runner_job_id": "cde0e743-44b5-4322-9ee6-a2a79c15186f",
+      "logical_tool_call_id": "mcp:a628e4a6-fc06-43fa-9c41-050d3cc5c276:AT-RECON-def0c961fc3d:6fd425825b72"
+    },
+    {
+      "sequence": 21,
+      "event_type": "tool.result.collected",
+      "tool": "http_request",
+      "tool_call_id": "26d8f2c4-842e-4169-9cd2-fc9b50c9167b",
+      "artifact_path": "responses/cde0e743-44b5-4322-9ee6-a2a79c15186f.json",
+      "result_status": "COMPLETED",
+      "runner_job_id": "cde0e743-44b5-4322-9ee6-a2a79c15186f",
+      "logical_tool_call_id": "mcp:a628e4a6-fc06-43fa-9c41-050d3cc5c276:AT-RECON-def0c961fc3d:6fd425825b72"
+    },
+    {
+      "sequence": 22,
+      "event_type": "tool.artifact.created",
+      "path": "responses/cde0e743-44b5-4322-9ee6-a2a79c15186f.json",
+      "size": 1543,
+      "tool": "http_request",
+      "sha256": "0bc0a629a6ed5e19390ce174d612cb267b5e0d3bc3589276611e9d7f9f5369ad",
+      "artifact_id": "935d4b8a-cf82-4ab2-975b-f5fdd8f5b910",
+      "tool_call_id": "26d8f2c4-842e-4169-9cd2-fc9b50c9167b"
+    },
+    {
+      "sequence": 23,
+      "event_type": "observation.created",
+      "tool": "http_request",
+      "tool_call_id": "26d8f2c4-842e-4169-9cd2-fc9b50c9167b",
+      "observation_id": "adea0024-0f17-42e0-ab34-801b2c381253"
+    },
+    {
+      "sequence": 24,
+      "event_type": "artifact.created",
+      "path": "responses/cde0e743-44b5-4322-9ee6-a2a79c15186f.json",
+      "size": 1543,
+      "sha256": "0bc0a629a6ed5e19390ce174d612cb267b5e0d3bc3589276611e9d7f9f5369ad",
+      "artifact_id": "935d4b8a-cf82-4ab2-975b-f5fdd8f5b910"
+    },
+    {
+      "sequence": 25,
+      "event_type": "tool.completed",
+      "tool": "http_request",
+      "result": {
+        "stage": "EXECUTION",
+        "status": "COMPLETED",
+        "content": null,
+        "summary": null,
+        "warning": null,
+        "artifacts": [
+          {
+            "size": 1543,
+            "sha256": "0bc0a629a6ed5e19390ce174d612cb267b5e0d3bc3589276611e9d7f9f5369ad",
+            "mime_type": "text/plain",
+            "artifact_id": "935d4b8a-cf82-4ab2-975b-f5fdd8f5b910",
+            "relative_path": "responses/cde0e743-44b5-4322-9ee6-a2a79c15186f.json"
+          }
+        ],
+        "retryable": false,
+        "error_code": null,
+        "model_view": {
+          "summary": "HTTP 200 from 192.168.236.1",
+          "warnings": [],
+          "content_excerpt": "{\"matched\":false}",
+          "extracted_facts": {
+            "final_url": "http://192.168.236.1:8092/search",
+            "json_keys": [
+              "matched"
+            ],
+            "body_length": 17,
+            "status_code": 200,
+            "content_type": "application/json",
+            "cookie_names": [],
+            "suspected_flags": [],
+            "redirect_history": [],
+            "selected_headers": {
+              "server": "uvicorn",
+              "content-type": "application/json"
+            },
+            "suspected_credentials": []
+          },
+          "suggested_next_dimensions": []
+        },
+        "diagnostic_id": null,
+        "error_details": {},
+        "error_message": null,
+        "required_next_dimension": null,
+        "tool_execution_completed": true
+      },
+      "tool_call_id": "26d8f2c4-842e-4169-9cd2-fc9b50c9167b",
+      "execution_layer": "multi_agent",
+      "logical_tool_call_id": "mcp:a628e4a6-fc06-43fa-9c41-050d3cc5c276:AT-RECON-def0c961fc3d:6fd425825b72"
+    },
+    {
+      "sequence": 26,
+      "event_type": "agent.task.completed",
+      "status": "COMPLETED",
+      "task_id": "AT-RECON-def0c961fc3d",
+      "task_kind": "RECON",
+      "agent_role": "RECON",
+      "evidence_ids": [
+        "E-9758b51848da"
+      ]
+    },
+    {
+      "sequence": 27,
+      "event_type": "run.status_changed",
+      "status": "EVALUATING",
+      "controller": "multi_agent_v1"
+    },
+    {
+      "sequence": 28,
+      "event_type": "production.result_context.started",
+      "run_id": "a628e4a6-fc06-43fa-9c41-050d3cc5c276",
+      "task_id": "AT-RECON-def0c961fc3d",
+      "timestamp": "2026-08-06T06:44:01.923095+00:00",
+      "attempt_id": "0f8b725d-ded1-4fa7-b894-cd9761ef7798",
+      "proposal_id": "9794179b-da08-4956-9a1e-89e0ec7f5d47",
+      "approved_action_id": "AA-b4d9ff8beef8"
+    },
+    {
+      "sequence": 29,
+      "event_type": "production.result_context.completed",
+      "run_id": "a628e4a6-fc06-43fa-9c41-050d3cc5c276",
+      "task_id": "AT-RECON-def0c961fc3d",
+      "timestamp": "2026-08-06T06:44:02.847799+00:00",
+      "attempt_id": "0f8b725d-ded1-4fa7-b894-cd9761ef7798",
+      "proposal_id": "9794179b-da08-4956-9a1e-89e0ec7f5d47",
+      "artifact_count": 1,
+      "evidence_count": 1,
+      "tool_call_count": 1,
+      "approved_action_id": "AA-b4d9ff8beef8"
+    },
+    {
+      "sequence": 30,
+      "event_type": "run.status_changed",
+      "status": "FAILED_ENGINE",
+      "controller": "multi_agent_v1"
+    },
+    {
+      "sequence": 31,
+      "event_type": "run.lifecycle.cleaned",
+      "run_id": "a628e4a6-fc06-43fa-9c41-050d3cc5c276",
+      "status": "FAILED_ENGINE",
+      "leases_deleted": 1,
+      "attempts_closed": 0,
+      "tasks_interrupted": 0,
+      "tool_calls_closed": 0
+    }
+  ],
+  "evidence_chain": [
+    {
+      "type": "tool.artifact.created",
+      "sequence": 22,
+      "id": "935d4b8a-cf82-4ab2-975b-f5fdd8f5b910",
+      "tool": "http_request",
+      "evidence_ids": []
+    },
+    {
+      "type": "observation.created",
+      "sequence": 23,
+      "id": "adea0024-0f17-42e0-ab34-801b2c381253",
+      "tool": "http_request",
+      "evidence_ids": []
+    },
+    {
+      "type": "artifact.created",
+      "sequence": 24,
+      "id": "935d4b8a-cf82-4ab2-975b-f5fdd8f5b910",
+      "tool": null,
+      "evidence_ids": []
+    },
+    {
+      "type": "production.result_context.completed",
+      "sequence": 29,
+      "id": "AT-RECON-def0c961fc3d",
+      "tool": null,
+      "evidence_ids": []
+    }
+  ],
+  "strategy_changes": [],
+  "final_result": "FAILED_ENGINE",
+  "validation_success": false,
+  "exploit_success": false,
+  "impact_confirmed": false,
+  "finding_created": false,
+  "metrics": {
+    "agent": {
+      "agent_calls": 2,
+      "tool_calls": 1,
+      "planner_calls": 1
+    },
+    "effect": {
+      "vulnerability_discovered": false,
+      "validation_success": false,
+      "exploit_complete": false,
+      "finding_created": false
+    },
+    "efficiency": {
+      "duration_seconds": 19.0,
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "total_tokens": 0,
+      "tool_calls": 1
+    },
+    "reasoning": {
+      "strategy_migrations": 0,
+      "feedback_events": 0,
+      "failed_attempts": 0,
+      "duplicate_experiments": 0
+    }
+  }
+}
