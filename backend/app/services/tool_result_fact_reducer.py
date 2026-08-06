@@ -17,8 +17,9 @@ from sqlalchemy import select
 from app.models.challenge import Challenge
 from app.models.multi_agent import AgentTask
 from app.models.run import Artifact, Observation, SolveRun, ToolCall
-from app.services.boolean_oracle_quality import score_boolean_oracle
 from app.security.service import validation_evidence_service
+from app.services.boolean_oracle_quality import score_boolean_oracle
+from app.services.security_fact_reducer import security_fact_reducer
 
 
 class ToolResultFactReducer:
@@ -96,6 +97,14 @@ class ToolResultFactReducer:
         if not evidence_ids:
             return []
         calls = list((await session.scalars(select(ToolCall).where(ToolCall.run_id == run.id, ToolCall.agent_task_id == task.id, ToolCall.status == "COMPLETED").order_by(ToolCall.created_at))).all())
+        paired_records: list[tuple[ToolCall, Observation, dict[str, Any]]] = []
+        if (challenge.metadata_json or {}).get("benchmark_case_id") == "sql-injection-golden":
+            benchmark_calls = list((await session.scalars(select(ToolCall).where(ToolCall.run_id == run.id, ToolCall.tool_name == "http_request", ToolCall.status == "COMPLETED").order_by(ToolCall.created_at))).all())
+            for benchmark_call in benchmark_calls:
+                benchmark_observation = await session.scalar(select(Observation).where(Observation.run_id == run.id, Observation.tool_call_id == benchmark_call.id).order_by(Observation.created_at.desc()))
+                if benchmark_observation:
+                    benchmark_artifact = await session.scalar(select(Artifact).where(Artifact.run_id == run.id, Artifact.tool_call_id == benchmark_call.id).order_by(Artifact.created_at.desc()))
+                    paired_records.append((benchmark_call, benchmark_observation, self._payload(run, benchmark_artifact)))
         candidates: list[dict[str, Any]] = []
         for call in calls:
             observation = await session.scalar(select(Observation).where(Observation.run_id == run.id, Observation.tool_call_id == call.id).order_by(Observation.created_at.desc()))
@@ -103,8 +112,17 @@ class ToolResultFactReducer:
             if not observation:
                 continue
             payload = self._payload(run, artifact)
-            candidates.extend(self._reduce_one(challenge, call, observation, payload, evidence_ids))
-        return candidates
+            candidates.extend(self._reduce_one(challenge, call, observation, payload, evidence_ids, paired_records=paired_records))
+        security_keys: set[str] = set()
+        deduplicated: list[dict[str, Any]] = []
+        for candidate in candidates:
+            key = candidate.get("fact_key")
+            if isinstance(key, str) and key.startswith("security."):
+                if key in security_keys:
+                    continue
+                security_keys.add(key)
+            deduplicated.append(candidate)
+        return deduplicated
 
     @staticmethod
     def _payload(run: SolveRun, artifact: Artifact | None) -> dict[str, Any]:
@@ -121,7 +139,7 @@ class ToolResultFactReducer:
             pass
         return {}
 
-    def _reduce_one(self, challenge: Challenge, call: ToolCall, observation: Observation, payload: dict[str, Any], evidence_ids: list[str]) -> list[dict[str, Any]]:
+    def _reduce_one(self, challenge: Challenge, call: ToolCall, observation: Observation, payload: dict[str, Any], evidence_ids: list[str], *, paired_records: list[tuple[ToolCall, Observation, dict[str, Any]]] | None = None) -> list[dict[str, Any]]:
         facts = observation.facts_json or {}
         structured = payload.get("structured_result") if isinstance(payload.get("structured_result"), dict) else payload
         # Runner artifact JSON is preferred, but Observation is the durable
@@ -148,6 +166,7 @@ class ToolResultFactReducer:
         if not isinstance(response, dict):
             response = {}
         result: list[dict[str, Any]] = []
+        result.extend(security_fact_reducer.reduce(challenge, call, observation, payload, evidence_ids, paired_records=paired_records))
         adapter = (challenge.metadata_json or {}).get("adapter")
         if call.tool_name == "http_request" and adapter == "asset_warranty":
             matched = response.get("matched")

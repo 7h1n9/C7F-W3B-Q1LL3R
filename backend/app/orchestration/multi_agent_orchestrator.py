@@ -2867,9 +2867,13 @@ class MultiAgentOrchestrator:
     async def _record_security_mapping(self, session, run: SolveRun, fact: VerifiedFact) -> None:
         """Materialize the security meaning of a newly verified legacy fact."""
         fact_value = fact.value_json if isinstance(fact.value_json, dict) else {}
+        direct_collection = {
+            "security.sql_injection.validation": "validation_results",
+            "security.sql_injection.exploit": "exploit_results",
+        }.get(fact.fact_key)
         unified = fact_value.get("validation_result") if isinstance(fact_value, dict) else None
         mapped = ValidationEvidence.model_validate(unified) if isinstance(unified, dict) else security_finding_service.map_verified_fact(fact)
-        if mapped is None:
+        if mapped is None and direct_collection is None:
             return
 
         state = await solver_state_service.load(session, run.id)
@@ -2884,10 +2888,10 @@ class MultiAgentOrchestrator:
             "information_evidence": [],
             **(state.security_context_json or {}),
         }
-        collection = "information_evidence" if isinstance(mapped, InformationEvidence) else "validation_results" if isinstance(mapped, (ValidationResult, ValidationEvidence)) else None
+        collection = direct_collection or ("information_evidence" if isinstance(mapped, InformationEvidence) else "validation_results" if isinstance(mapped, (ValidationResult, ValidationEvidence)) else None)
         if collection is None:
             return
-        payload = mapped.model_dump(mode="json")
+        payload = {"fact_id": fact.id, "fact_key": fact.fact_key, **(fact_value if direct_collection else mapped.model_dump(mode="json"))}
         if collection == "information_evidence":
             if any(str(item.get("fact_id")) == fact.id for item in context[collection] if isinstance(item, dict)):
                 return
