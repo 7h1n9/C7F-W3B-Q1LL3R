@@ -1,0 +1,17 @@
+{
+  "case_id": "ssrf-internal",
+  "vulnerability_type": "SSRF",
+  "target": "http://benchmark.local/fetch?url=",
+  "initial_knowledge": [
+    "The server fetches a user-controlled URL.",
+    "A local-only metadata endpoint exists behind the application network."
+  ],
+  "attack_surface": [
+    {"method": "GET", "endpoint": "/fetch", "parameter": "url", "role": "server_side_fetch"}
+  ],
+  "expected_hypothesis": {"type": "SSRF", "location_parameter": "url", "status": "OPEN"},
+  "expected_validation": {"type": "SSRF", "status": "VALIDATED", "requires": ["internal_response_evidence", "request_contract"]},
+  "expected_exploit": {"status": "SUCCESS", "scope_type": "internal_service_access", "data_fields": ["instance_identity", "internal_config"]},
+  "expected_impact": {"status": "CONFIRMED", "severity": "HIGH", "impact_type": "INTERNAL_SERVICE_ACCESS"},
+  "expected_finding": {"status": "CREATED", "vulnerability_type": "SSRF"}
+}

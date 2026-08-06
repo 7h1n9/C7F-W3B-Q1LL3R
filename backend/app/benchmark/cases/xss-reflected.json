@@ -1,0 +1,17 @@
+{
+  "case_id": "xss-reflected",
+  "vulnerability_type": "XSS",
+  "target": "http://benchmark.local/search?q=",
+  "initial_knowledge": [
+    "The search endpoint reflects a query value in the HTML response.",
+    "The application has a browser-rendered result page."
+  ],
+  "attack_surface": [
+    {"method": "GET", "endpoint": "/search", "parameter": "q", "role": "reflected_input"}
+  ],
+  "expected_hypothesis": {"type": "XSS", "location_parameter": "q", "status": "OPEN"},
+  "expected_validation": {"type": "XSS", "status": "VALIDATED", "requires": ["payload_reflection", "context_confirmation"]},
+  "expected_exploit": {"status": "SUCCESS", "scope_type": "script_execution", "data_fields": ["document_context"]},
+  "expected_impact": {"status": "CONFIRMED", "severity": "MEDIUM", "impact_type": "ARBITRARY_SCRIPT_EXECUTION"},
+  "expected_finding": {"status": "CREATED", "vulnerability_type": "XSS"}
+}

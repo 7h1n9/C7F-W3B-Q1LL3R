@@ -1,0 +1,18 @@
+{
+  "case_id": "sql-injection-boolean",
+  "vulnerability_type": "SQL_INJECTION",
+  "target": "http://benchmark.local/search?asset_no=",
+  "initial_knowledge": [
+    "The endpoint accepts an asset_no parameter.",
+    "A valid and invalid business baseline can be established.",
+    "The response exposes a stable matched boolean signal."
+  ],
+  "attack_surface": [
+    {"method": "GET", "endpoint": "/search", "parameter": "asset_no", "role": "input"}
+  ],
+  "expected_hypothesis": {"type": "SQL_INJECTION", "location_parameter": "asset_no", "status": "OPEN"},
+  "expected_validation": {"type": "SQL_INJECTION", "status": "VALIDATED", "requires": ["baseline", "positive_control", "negative_control", "stable_differential"]},
+  "expected_exploit": {"status": "SUCCESS", "scope_type": "business_data_read", "data_fields": ["asset_no", "department"]},
+  "expected_impact": {"status": "CONFIRMED", "severity": "HIGH", "impact_type": "UNAUTHORIZED_DATA_ACCESS"},
+  "expected_finding": {"status": "CREATED", "vulnerability_type": "SQL_INJECTION"}
+}
