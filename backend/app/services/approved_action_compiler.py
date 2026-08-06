@@ -161,22 +161,36 @@ class ApprovedActionCompiler:
     ) -> dict[str, Any]:
         semantic = _as_dict(review.approved_arguments_json)
         adapter = self._asset_context(challenge)
-        if (challenge.metadata_json or {}).get("adapter") and not adapter:
-            raise self._error(tool_name, "UNSUPPORTED_ADAPTER", {"adapter": (challenge.metadata_json or {}).get("adapter")})
+        metadata = challenge.metadata_json or {}
+        declared_adapter = str(metadata.get("adapter") or "").lower()
+        generic_golden = (
+            declared_adapter == "benchmark_sql_injection_easy"
+            and str(metadata.get("benchmark_case_id") or "") == "sql-injection-golden"
+        )
+        if declared_adapter and not adapter and not generic_golden:
+            raise self._error(tool_name, "UNSUPPORTED_ADAPTER", {"adapter": metadata.get("adapter")})
         if tool_name == "http_request" and adapter:
             return self._asset_http_request(challenge, adapter, semantic, review)
         if tool_name == "http_request":
             request = _as_dict(semantic.get("request"))
+            if not request:
+                request = _as_dict(metadata.get("baseline_request"))
+            request = dict(request)
+            if "params" in request and "query" not in request:
+                request["query"] = request.pop("params")
             body = request.get("body", semantic.get("body"))
             json_body = request.get("json", semantic.get("json"))
             return {
                 "method": str(request.get("method") or semantic.get("method") or "GET").upper(),
                 "url": str(request.get("url") or semantic.get("url") or challenge.target_url or ""),
                 **({"headers": _as_dict(request.get("headers") or semantic.get("headers"))} if request.get("headers") or semantic.get("headers") else {}),
+                **({"query": _as_dict(request.get("query"))} if request.get("query") else {}),
                 **({"body": body} if body is not None else {"json": json_body} if isinstance(json_body, dict) else {}),
             }
         if tool_name == "sql_boolean_compare" and adapter:
             return self._asset_boolean_compare(challenge, adapter, semantic, review)
+        if tool_name == "sql_boolean_compare":
+            return await self._generic_boolean_compare(session, run, challenge, semantic, review)
         if tool_name == "sqlite_metadata_discovery" and adapter:
             raise self._error(tool_name, "DBMS_ROUTE_FORBIDDEN", {"adapter": adapter["adapter"], "dbms": adapter["dbms"], "required_tool": "mysql_metadata_discovery"})
         if tool_name == "mysql_metadata_discovery":
@@ -252,6 +266,144 @@ class ApprovedActionCompiler:
             "true_condition": str(semantic.get("true_condition") or "' AND 1=1 -- "),
             "false_condition": str(semantic.get("false_condition") or "' AND 1=2 -- "),
             "oracle": {"json_field": str(oracle.get("json_field") or "matched"), "true_value": oracle.get("true_value", True), "false_value": oracle.get("false_value", False)},
+            "max_requests": max(5, int(semantic.get("max_requests") or 5)),
+        }
+
+    @staticmethod
+    def _request_value(request: dict[str, Any], field: str) -> tuple[Any, str | None]:
+        """Find a baseline field in a RequestSpec without inventing it."""
+        for container_name in ("params", "query", "json", "form"):
+            container = request.get(container_name)
+            if isinstance(container, dict) and field in container:
+                return container[field], container_name
+        body = request.get("body")
+        if isinstance(body, dict) and field in body:
+            return body[field], "body"
+        if isinstance(body, str):
+            parsed = _json_payload(body)
+            if field in parsed:
+                return parsed[field], "body"
+        return None, None
+
+    @staticmethod
+    def _request_control_fields(request: dict[str, Any], field: str) -> dict[str, Any]:
+        controls: dict[str, Any] = {}
+        for container_name in ("params", "query", "json", "form"):
+            container = request.get(container_name)
+            if isinstance(container, dict):
+                controls.update({key: value for key, value in container.items() if key != field})
+        body = request.get("body")
+        if isinstance(body, dict):
+            controls.update({key: value for key, value in body.items() if key != field})
+        return controls
+
+    async def _generic_boolean_compare(
+        self,
+        session: AsyncSession,
+        run: SolveRun,
+        challenge: Challenge,
+        semantic: dict[str, Any],
+        review: AnalysisReview,
+    ) -> dict[str, Any]:
+        """Compile a generic SQL Boolean action from durable target context.
+
+        Planner/Analysis may identify the field or objective, but the final
+        RequestSpec and controls are owned by this Controller boundary.
+        """
+        metadata = challenge.metadata_json or {}
+        request = _as_dict(semantic.get("request"))
+        if not request:
+            request = _json_payload(metadata.get("baseline_request"), metadata.get("request"))
+        if not request:
+            prior_call = await session.scalar(
+                select(ToolCall)
+                .where(
+                    ToolCall.run_id == run.id,
+                    ToolCall.tool_name == "http_request",
+                    ToolCall.status == "COMPLETED",
+                )
+                .order_by(ToolCall.created_at.desc())
+            )
+            if prior_call is not None:
+                prior_arguments = _as_dict(prior_call.arguments_json)
+                request = {
+                    key: prior_arguments[key]
+                    for key in ("method", "url", "headers", "json", "body", "params", "query", "form")
+                    if key in prior_arguments
+                }
+        request = dict(request)
+        if "params" in request and "query" not in request:
+            request["query"] = request.pop("params")
+        request["method"] = str(request.get("method") or metadata.get("method") or "GET").upper()
+        target_url = str(request.get("url") or semantic.get("url") or challenge.target_url or "")
+        if target_url.startswith("/") and challenge.target_url:
+            target_url = urljoin(challenge.target_url.rstrip("/") + "/", target_url.lstrip("/"))
+        if not target_url:
+            raise self._error("sql_boolean_compare", "REQUEST_CONTRACT_MISSING", {"required": ["method", "url"]})
+        request["url"] = target_url
+
+        attack_surface = metadata.get("attack_surface")
+        surface_parameter = ""
+        if isinstance(attack_surface, list):
+            for item in attack_surface:
+                if isinstance(item, dict) and item.get("parameter"):
+                    surface_parameter = str(item["parameter"])
+                    break
+        request_fields: list[str] = []
+        for container_name in ("query", "json", "form"):
+            container = request.get(container_name)
+            if isinstance(container, dict):
+                request_fields.extend(str(key).strip() for key in container if str(key).strip())
+        requested_field = str(
+            semantic.get("test_field")
+            or review.independent_variable
+            or ""
+        ).strip()
+        declared_fields = [
+            str(value).strip()
+            for value in (*request_fields, metadata.get("test_field"), metadata.get("parameter"), surface_parameter)
+            if str(value or "").strip()
+        ]
+        field = requested_field
+        if declared_fields:
+            exact = next((value for value in declared_fields if value == requested_field), None)
+            if exact:
+                field = exact
+            else:
+                matches = [value for value in declared_fields if value.lower() in requested_field.lower()]
+                field = matches[0] if len(matches) == 1 else declared_fields[0]
+        if not field:
+            field = declared_fields[0] if declared_fields else ""
+        if not field:
+            raise self._error(
+                "sql_boolean_compare",
+                "TEST_FIELD_NOT_DECLARED",
+                {"required": "test_field", "source": "challenge metadata or baseline request"},
+            )
+        baseline, _ = self._request_value(request, field)
+        if baseline is None:
+            baseline = semantic.get("baseline_value")
+        if baseline is None:
+            baseline = (metadata.get("baseline_values") or {}).get(field) if isinstance(metadata.get("baseline_values"), dict) else None
+        if baseline is None:
+            raise self._error("sql_boolean_compare", "BASELINE_VALUE_MISSING", {"test_field": field})
+
+        controls = _as_dict(semantic.get("control_fields"))
+        if not controls:
+            controls = self._request_control_fields(request, field)
+        oracle = _as_dict(semantic.get("oracle")) or {
+            "json_field": str(metadata.get("oracle_field") or "matched"),
+            "true_value": True,
+            "false_value": False,
+        }
+        return {
+            "request": request,
+            "test_field": field,
+            "baseline_value": str(baseline),
+            "control_fields": controls,
+            "oracle": oracle,
+            "true_condition": str(semantic.get("true_condition") or "' AND 1=1 -- "),
+            "false_condition": str(semantic.get("false_condition") or "' AND 1=2 -- "),
             "max_requests": max(5, int(semantic.get("max_requests") or 5)),
         }
 
