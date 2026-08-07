@@ -5,15 +5,22 @@ This package is intentionally isolated from the legacy orchestrators.  Phase
 out of scope until the skeleton is reviewed and verified.
 """
 
+from .action import ActionIntent
 from .coordinator import Coordinator, CoordinatorStep
-from .planner import NoopPlanner, Planner, SolverIntent
+from .planner import DeterministicPlanner, NoopPlanner, Planner, SolverIntent
+from .policy import ActionPolicyValidator, PolicyDecision, PolicyResult
 from .state_machine import SolverPhase, TaskStateMachine
 from .worker import NoopWorker, Worker, WorkerResult
 
 __all__ = [
     "Coordinator",
     "CoordinatorStep",
+    "ActionIntent",
+    "ActionPolicyValidator",
+    "DeterministicPlanner",
     "NoopPlanner",
+    "PolicyDecision",
+    "PolicyResult",
     "NoopWorker",
     "Planner",
     "SolverIntent",

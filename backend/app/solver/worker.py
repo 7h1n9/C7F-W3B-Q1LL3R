@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Protocol
 
-from .planner import SolverIntent
+from .action import ActionIntent
 
 
 class WorkerResult:
@@ -23,11 +23,11 @@ class WorkerResult:
 
 
 class Worker(Protocol):
-    async def execute(self, intent: SolverIntent) -> WorkerResult: ...
+    async def execute(self, intent: ActionIntent) -> WorkerResult: ...
 
 
 class NoopWorker:
     """Placeholder worker; real execution adapters are a later phase."""
 
-    async def execute(self, intent: SolverIntent) -> WorkerResult:
+    async def execute(self, intent: ActionIntent) -> WorkerResult:
         return WorkerResult(status="NOT_IMPLEMENTED")

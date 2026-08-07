@@ -2,8 +2,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from .action import ActionIntent
 from .blackboard import Blackboard, BlackboardState
-from .planner import NoopPlanner, Planner, SolverIntent
+from .planner import NoopPlanner, Planner
+from .policy import ActionPolicyValidator
 from .state_machine import TaskStateMachine
 from .worker import NoopWorker, Worker, WorkerResult
 
@@ -12,7 +14,7 @@ from .worker import NoopWorker, Worker, WorkerResult
 class CoordinatorStep:
     status: str
     state: BlackboardState
-    intent: SolverIntent | None = None
+    intent: ActionIntent | None = None
     result: WorkerResult | None = None
 
 
@@ -26,11 +28,13 @@ class Coordinator:
         state_machine: TaskStateMachine | None = None,
         planner: Planner | None = None,
         worker: Worker | None = None,
+        policy: ActionPolicyValidator | None = None,
     ) -> None:
         self.blackboard = blackboard
         self.state_machine = state_machine or TaskStateMachine()
         self.planner = planner or NoopPlanner()
         self.worker = worker or NoopWorker()
+        self.policy = policy or ActionPolicyValidator()
 
     async def step(self, run_id: str) -> CoordinatorStep:
         state = self.blackboard.read(run_id)
@@ -46,13 +50,27 @@ class Coordinator:
             )
             return CoordinatorStep("WAITING", updated)
 
-        if not self.state_machine.is_allowed(state, intent.action):
+        if not self.state_machine.is_allowed(state, intent.action_name):
             updated = self.blackboard.update(
                 run_id,
                 event={
                     "type": "intent.rejected",
-                    "action": intent.action,
+                    "action": intent.action_name,
                     "phase": state.phase,
+                    "reason": "action is outside StateMachine allowed actions",
+                },
+            )
+            return CoordinatorStep("REJECTED", updated, intent=intent)
+
+        policy_result = self.policy.validate(state.phase, intent)
+        if not policy_result.allowed:
+            updated = self.blackboard.update(
+                run_id,
+                event={
+                    "type": "intent.rejected",
+                    "action": intent.action_name,
+                    "phase": state.phase,
+                    "reason": policy_result.reason,
                 },
             )
             return CoordinatorStep("REJECTED", updated, intent=intent)
