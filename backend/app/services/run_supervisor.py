@@ -8,22 +8,30 @@ from datetime import UTC, datetime
 
 from sqlalchemy import func, select
 
+from app.core.database import SessionLocal
 from app.models.challenge import Challenge
 from app.models.multi_agent import AgentTask, PlannerProposal, VerifiedFact
-from app.models.run import FlagCandidate, RunAttempt, RunContinuation, RunEvent, RunExecutionLease, RunUserInput, SolveRun, ToolCall
+from app.models.run import (
+    FlagCandidate,
+    RunAttempt,
+    RunContinuation,
+    RunEvent,
+    RunExecutionLease,
+    RunUserInput,
+    SolveRun,
+    ToolCall,
+)
 from app.models.solver_state import SolverState
 from app.orchestration.state_machine import RunStatus, transition
-from app.services.run_finalizer import run_finalizer
+from app.services.continuations import continuation_service
+from app.services.events import event_service
+from app.services.execution_recovery import execution_recovery_guard
 from app.services.run_attempts import run_attempt_service
+from app.services.run_finalizer import run_finalizer
 from app.services.stage_decider import stage_decider
 from app.services.supervisor_progress import supervisor_progress_evaluator
 from app.services.user_input_consumer import consume_user_inputs
 from app.services.writeup_builder import writeup_builder
-from app.services.events import event_service
-from app.services.continuations import continuation_service
-from app.services.execution_recovery import execution_recovery_guard
-from app.core.database import SessionLocal
-
 
 USER_VISIBLE_TERMINAL = {"WAITING_USER", "COMPLETED_SOLVED", "COMPLETED_UNSOLVED", "CANCELLED"}
 logger = logging.getLogger(__name__)
@@ -393,6 +401,15 @@ class RunSupervisor:
             raise
 
     async def continue_until_terminal(self, session, run_id: str, user_message: str | None = None) -> RunOutcome:
+        # ``solver_v2`` is an explicit opt-in execution mode.  Keep the
+        # legacy supervisor/orchestrator path compatible for existing runs
+        # and route only the new mode to SolverRuntimeService.
+        selected = await session.get(SolveRun, run_id)
+        if selected is not None and selected.solver_mode == "solver_v2":
+            from app.solver.service import solver_runtime_service
+
+            return await solver_runtime_service.run(session, run_id, user_message)
+
         from app.orchestration.orchestrator import orchestrator
 
         for _ in range(32):
