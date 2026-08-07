@@ -1,6 +1,21 @@
-"""Minimal Blackboard contracts and storage abstraction for Solver Core."""
+"""Blackboard state, serialization and durable repository adapters."""
 
 from .models import BlackboardState
+from .mysql_store import BlackboardRecord, MySQLBlackboardStore
+from .repository import BlackboardRepository, BlackboardVersionConflict
+from .serializer import CURRENT_SCHEMA_VERSION, deserialize_state, serialize_state
 from .store import Blackboard, BlackboardStore, InMemoryBlackboardStore
 
-__all__ = ["Blackboard", "BlackboardState", "BlackboardStore", "InMemoryBlackboardStore"]
+__all__ = [
+    "Blackboard",
+    "BlackboardRecord",
+    "BlackboardRepository",
+    "BlackboardState",
+    "BlackboardStore",
+    "BlackboardVersionConflict",
+    "CURRENT_SCHEMA_VERSION",
+    "InMemoryBlackboardStore",
+    "MySQLBlackboardStore",
+    "deserialize_state",
+    "serialize_state",
+]

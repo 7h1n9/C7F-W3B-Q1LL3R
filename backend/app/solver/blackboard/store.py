@@ -8,11 +8,7 @@ from .models import BlackboardState
 
 
 class BlackboardStore(Protocol):
-    """Persistence contract for the Blackboard.
-
-    Phase 1.1 uses the in-memory implementation.  A later migration may add a
-    durable adapter without changing Coordinator, Planner, or Worker APIs.
-    """
+    """Legacy synchronous storage contract used by the skeleton tests."""
 
     def load(self, run_id: str) -> BlackboardState | None: ...
 
@@ -20,7 +16,7 @@ class BlackboardStore(Protocol):
 
 
 class InMemoryBlackboardStore:
-    """Small deterministic store used by the skeleton and unit tests."""
+    """Small deterministic store retained for the non-durable skeleton path."""
 
     def __init__(self) -> None:
         self._states: dict[str, BlackboardState] = {}
@@ -36,7 +32,7 @@ class InMemoryBlackboardStore:
 
 
 class Blackboard:
-    """Facade for versioned Blackboard reads and writes."""
+    """Synchronous facade retained for Phase 1.1 compatibility."""
 
     def __init__(self, store: BlackboardStore | None = None) -> None:
         self.store = store or InMemoryBlackboardStore()
@@ -54,7 +50,8 @@ class Blackboard:
         state = BlackboardState(
             run_id=run_id,
             phase=phase,
-            allowed_actions=list(allowed_actions or []),
+            control={"allowed_actions": list(allowed_actions or [])},
+            knowledge={"facts": [], "hypotheses": []},
         )
         return self.store.save(state)
 
@@ -81,11 +78,11 @@ class Blackboard:
         if phase is not None:
             next_state.phase = phase
         if allowed_actions is not None:
-            next_state.allowed_actions = list(allowed_actions)
+            next_state.control["allowed_actions"] = list(allowed_actions)
         if facts:
-            next_state.facts.extend(deepcopy(list(facts)))
+            next_state.knowledge.setdefault("facts", []).extend(deepcopy(list(facts)))
         if hypotheses:
-            next_state.hypotheses.extend(deepcopy(list(hypotheses)))
+            next_state.knowledge.setdefault("hypotheses", []).extend(deepcopy(list(hypotheses)))
         if evidence_refs:
             next_state.evidence_refs.extend(str(item) for item in evidence_refs)
         if event is not None:

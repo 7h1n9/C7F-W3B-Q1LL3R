@@ -6,24 +6,35 @@ from pydantic import BaseModel, ConfigDict, Field
 
 
 class BlackboardState(BaseModel):
-    """Minimal solver-control snapshot.
+    """Durable Solver control state, separate from Evidence Store records."""
 
-    This is deliberately not a replacement for the existing evidence or
-    security persistence models.  Evidence and artifact fields are references
-    or reduced facts only; raw records remain owned by their existing stores.
-    """
+    model_config = ConfigDict(extra="ignore")
 
-    model_config = ConfigDict(extra="forbid")
-
+    schema_version: int = 1
     run_id: str
     version: int = 0
     phase: str = "BASELINE"
-    allowed_actions: list[str] = Field(default_factory=list)
-    facts: list[dict[str, Any]] = Field(default_factory=list)
-    hypotheses: list[dict[str, Any]] = Field(default_factory=list)
-    evidence_refs: list[str] = Field(default_factory=list)
+    goal: str | dict[str, Any] = ""
+    knowledge: dict[str, Any] = Field(default_factory=dict)
+    control: dict[str, Any] = Field(default_factory=dict)
     history: list[dict[str, Any]] = Field(default_factory=list)
+    evidence_refs: list[str] = Field(default_factory=list)
+
+    @property
+    def facts(self) -> list[dict[str, Any]]:
+        """Phase 1.1 compatibility view over the knowledge summary."""
+        return list(self.knowledge.get("facts") or [])
+
+    @property
+    def hypotheses(self) -> list[dict[str, Any]]:
+        """Phase 1.1 compatibility view over the knowledge summary."""
+        return list(self.knowledge.get("hypotheses") or [])
+
+    @property
+    def allowed_actions(self) -> list[str]:
+        """Phase 1.1 compatibility view over the control summary."""
+        return [str(item) for item in (self.control.get("allowed_actions") or [])]
 
     def copy_for_read(self) -> "BlackboardState":
-        """Return a detached snapshot so callers cannot mutate the store."""
+        """Return a detached snapshot so callers cannot mutate stored state."""
         return self.model_copy(deep=True)
