@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .action import ActionIntent
-from .worker import WorkerResult
+from .worker.interface import WorkerResult
 
 
 @dataclass(frozen=True)
@@ -21,8 +21,8 @@ class SolverObservation:
     def from_worker_result(cls, intent: ActionIntent, result: WorkerResult) -> "SolverObservation":
         return cls(
             action_name=intent.action_name,
-            success=str(result.status or "").upper() in {"SUCCESS", "COMPLETED", "OK"},
-            raw_result=dict(result.observation),
+            success=result.success,
+            raw_result=dict(result.output),
             facts=list(result.facts),
             evidence_refs=list(result.evidence_refs),
         )

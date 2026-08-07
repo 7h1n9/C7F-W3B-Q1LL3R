@@ -9,7 +9,7 @@ from app.solver.loop import SolverLoop
 from app.solver.planner import DeterministicPlanner
 from app.solver.policy import ActionPolicyValidator
 from app.solver.state_machine import TaskStateMachine
-from app.solver.worker import MockWorker
+from app.solver.worker import MockWorker, WorkerManager
 
 
 class MemoryRepository:
@@ -54,10 +54,10 @@ def make_loop(state: BlackboardState, worker: MockWorker | None = None) -> tuple
     return (
         SolverLoop(
             MemoryRepository(state),
-            state_machine=TaskStateMachine(),
-            planner=DeterministicPlanner(),
-            policy=ActionPolicyValidator(),
-            worker=active_worker,
+        state_machine=TaskStateMachine(),
+        planner=DeterministicPlanner(),
+        policy=ActionPolicyValidator(),
+        worker_manager=WorkerManager(workers={"mock": active_worker}),
         ),
         active_worker,
     )
@@ -104,7 +104,7 @@ async def test_illegal_action_is_rejected_and_recorded_without_worker_call() -> 
         state_machine=TaskStateMachine(),
         planner=IllegalPlanner(),
         policy=ActionPolicyValidator(),
-        worker=worker,
+        worker_manager=WorkerManager(workers={"mock": worker}),
     )
 
     step = await loop.step("loop-test")
@@ -121,7 +121,7 @@ async def test_worker_observation_and_event_history_are_written() -> None:
     step = await loop.step("loop-test")
 
     assert step.result is not None
-    assert step.result.observation["response"] == "observed"
+    assert step.result.output["response"] == "observed"
     assert step.state.evidence_refs == []
     assert step.state.history[-1]["payload"]["status"] == "SUCCESS"
     assert "response" not in step.state.history[-1]["payload"]

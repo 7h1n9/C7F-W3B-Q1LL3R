@@ -12,7 +12,7 @@ from .planner import Planner
 from .policy import ActionPolicyValidator
 from .reducers import ObservationReducer, WebObservationReducer
 from .state_machine import TaskStateMachine
-from .worker import Worker, WorkerResult
+from .worker import WorkerManager, WorkerResult
 
 
 @dataclass(frozen=True)
@@ -38,7 +38,7 @@ class SolverLoop:
         state_machine: TaskStateMachine,
         planner: Planner,
         policy: ActionPolicyValidator,
-        worker: Worker,
+        worker_manager: WorkerManager,
         reducer: ObservationReducer | None = None,
         knowledge_store: KnowledgeStore | None = None,
     ) -> None:
@@ -46,7 +46,7 @@ class SolverLoop:
         self.state_machine = state_machine
         self.planner = planner
         self.policy = policy
-        self.worker = worker
+        self.worker_manager = worker_manager
         self.reducer = reducer or WebObservationReducer()
         self.knowledge_store = knowledge_store or KnowledgeStore()
 
@@ -95,7 +95,7 @@ class SolverLoop:
             )
             return SolverLoopStep("REJECTED", updated, event, intent=intent)
 
-        result = await self.worker.execute(intent)
+        result = await self.worker_manager.execute(intent)
         observation = SolverObservation.from_worker_result(intent, result)
         reduction = self.reducer.reduce(observation)
         projected = self.knowledge_store.apply(state, reduction)

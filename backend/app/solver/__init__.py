@@ -15,7 +15,16 @@ from .planner import DeterministicPlanner, NoopPlanner, Planner, SolverIntent
 from .policy import ActionPolicyValidator, PolicyDecision, PolicyResult
 from .reducers import KnowledgeUpdate, WebObservationReducer
 from .state_machine import SolverPhase, TaskStateMachine
-from .worker import MockWorker, NoopWorker, Worker, WorkerResult
+from .worker import (
+    MockWorker,
+    NoopWorker,
+    RunnerAdapter,
+    RunnerWorker,
+    Worker,
+    WorkerManager,
+    WorkerResult,
+    WorkerUnavailable,
+)
 
 __all__ = [
     "Coordinator",
@@ -30,6 +39,8 @@ __all__ = [
     "PolicyDecision",
     "PolicyResult",
     "NoopWorker",
+    "RunnerAdapter",
+    "RunnerWorker",
     "Planner",
     "SolverIntent",
     "SolverEvent",
@@ -39,6 +50,8 @@ __all__ = [
     "SolverPhase",
     "TaskStateMachine",
     "Worker",
+    "WorkerManager",
     "WorkerResult",
+    "WorkerUnavailable",
     "WebObservationReducer",
 ]
