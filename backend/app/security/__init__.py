@@ -1,24 +1,30 @@
 """Web security reasoning objects and compatibility services."""
 
-from app.security.schemas import (
-    ExploitResult,
-    ImpactAssessment,
-    InformationEvidence,
-    SecurityFinding,
-    ValidationResult,
-    ValidationEvidence,
-    ValidationEvidenceStatus,
-    VulnerabilityHypothesis,
-)
-from app.security.decision import SecurityDecision, SecurityDecisionEngine, security_decision_engine
 from app.security.action_authorizer import (
     ActionAuthorizer,
     ActionSecurityDecision,
     AllowAllActionAuthorizer,
     SecurityDecisionType,
 )
+from app.security.decision import SecurityDecision, SecurityDecisionEngine, security_decision_engine
+from app.security.default_action_authorizer import DefaultActionAuthorizer
 from app.security.lifecycle import VulnerabilityLifecycleEngine, vulnerability_lifecycle_engine
-from app.security.service import SecurityFindingService, ValidationEvidenceService, security_finding_service, validation_evidence_service
+from app.security.schemas import (
+    ExploitResult,
+    ImpactAssessment,
+    InformationEvidence,
+    SecurityFinding,
+    ValidationEvidence,
+    ValidationEvidenceStatus,
+    ValidationResult,
+    VulnerabilityHypothesis,
+)
+from app.security.service import (
+    SecurityFindingService,
+    ValidationEvidenceService,
+    security_finding_service,
+    validation_evidence_service,
+)
 
 __all__ = [
     "ExploitResult",
@@ -28,6 +34,7 @@ __all__ = [
     "ActionAuthorizer",
     "ActionSecurityDecision",
     "AllowAllActionAuthorizer",
+    "DefaultActionAuthorizer",
     "VulnerabilityLifecycleEngine",
     "ImpactAssessment",
     "InformationEvidence",

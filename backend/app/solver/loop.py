@@ -11,7 +11,7 @@ from app.security.action_authorizer import (
 from .action import ActionIntent
 from .blackboard import BlackboardState
 from .blackboard.repository import BlackboardRepository
-from .context import RunContext
+from .context import RunContext, RuntimeUsage
 from .events import SolverEvent
 from .knowledge import KnowledgeStore
 from .observation import SolverObservation
@@ -106,28 +106,36 @@ class SolverLoop:
             )
             return SolverLoopStep("REJECTED", updated, event, intent=intent)
 
-        security_decision = self.action_authorizer.authorize(intent, self.run_context)
+        usage = self._runtime_usage(state)
+        authorize_with_usage = getattr(self.action_authorizer, "authorize_with_usage", None)
+        if callable(authorize_with_usage):
+            security_decision = authorize_with_usage(intent, self.run_context, usage)
+        else:
+            security_decision = self.action_authorizer.authorize(intent, self.run_context)
         if security_decision.decision is SecurityDecisionType.ALLOW:
             result = await self.worker_manager.execute(intent)
             event_type = "ACTION_COMPLETED"
             step_status = "CONTINUE"
         else:
+            approval_required = security_decision.decision is SecurityDecisionType.REQUIRE_APPROVAL
+            result_status = "APPROVAL_REQUIRED" if approval_required else "DENIED"
             result = WorkerResult(
                 success=False,
                 action_name=intent.action_name,
                 output={
-                    "status": "DENIED",
+                    "status": result_status,
                     "reason": security_decision.reason,
                 },
                 metadata={
                     "backend": "security",
-                    "status": "DENIED",
+                    "status": result_status,
                     "policy_id": security_decision.policy_id,
                     "decision": security_decision.decision.value,
+                    "reason_code": security_decision.reason_code,
                 },
             )
-            event_type = "ACTION_DENIED"
-            step_status = "DENIED"
+            event_type = "ACTION_APPROVAL_REQUIRED" if approval_required else "ACTION_DENIED"
+            step_status = "APPROVAL_REQUIRED" if approval_required else "DENIED"
         observation = SolverObservation.from_worker_result(intent, result)
         reduction = self.reducer.reduce(observation)
         projected = self.knowledge_store.apply(state, reduction)
@@ -146,6 +154,7 @@ class SolverLoop:
                 "next_phase": next_phase,
                 "security_decision": security_decision.decision.value,
                 "security_reason": security_decision.reason,
+                "security_reason_code": security_decision.reason_code,
             },
         )
         updated = await self.blackboard.update(
@@ -160,3 +169,17 @@ class SolverLoop:
             expected_version=state.version,
         )
         return SolverLoopStep(step_status, updated, event, intent=intent, result=result)
+
+    @staticmethod
+    def _runtime_usage(state: BlackboardState) -> RuntimeUsage:
+        action_events = {
+            "ACTION_COMPLETED",
+            "ACTION_DENIED",
+            "ACTION_APPROVAL_REQUIRED",
+            "ACTION_REJECTED",
+        }
+        history_types = [str(item.get("type") or "") for item in state.history]
+        return RuntimeUsage(
+            agent_steps=sum(item in action_events for item in history_types),
+            tool_calls=history_types.count("ACTION_COMPLETED"),
+        )

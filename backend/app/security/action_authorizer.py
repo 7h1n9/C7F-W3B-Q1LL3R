@@ -26,6 +26,7 @@ class ActionSecurityDecision:
     decision: SecurityDecisionType
     reason: str | None = None
     policy_id: str | None = None
+    reason_code: str | None = None
 
     @property
     def allowed(self) -> bool:
@@ -55,4 +56,5 @@ class AllowAllActionAuthorizer:
             decision=SecurityDecisionType.ALLOW,
             reason="compatibility authorizer allows the action",
             policy_id=self.policy_id,
+            reason_code="ALLOW",
         )

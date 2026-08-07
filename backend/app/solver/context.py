@@ -110,6 +110,25 @@ class RunLimits:
 
 
 @dataclass(frozen=True)
+class RuntimeUsage:
+    """Ephemeral usage snapshot supplied to the authorization boundary.
+
+    The counters are derived from the durable Blackboard event history by the
+    Solver loop.  They are deliberately not a second persisted state model.
+    """
+
+    agent_steps: int = 0
+    tool_calls: int = 0
+    elapsed_seconds: float = 0.0
+
+    def __post_init__(self) -> None:
+        if self.agent_steps < 0 or self.tool_calls < 0:
+            raise ValueError("runtime counters must be non-negative")
+        if self.elapsed_seconds < 0:
+            raise ValueError("elapsed_seconds must be non-negative")
+
+
+@dataclass(frozen=True)
 class RunContext:
     """Immutable per-run context passed to the Security Boundary."""
 

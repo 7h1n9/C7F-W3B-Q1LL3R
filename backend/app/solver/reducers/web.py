@@ -43,6 +43,21 @@ class WebObservationReducer:
     """Reduce HTTP and Boolean observations to verified Solver knowledge."""
 
     def reduce(self, observation: SolverObservation) -> KnowledgeUpdate:
+        status = str(observation.raw_result.get("status") or "").upper()
+        if status == "APPROVAL_REQUIRED":
+            return KnowledgeUpdate(
+                hypotheses=[
+                    {
+                        "type": "ACTION_APPROVAL_REQUIRED",
+                        "action": observation.action_name,
+                        "reason": observation.raw_result.get("reason"),
+                    }
+                ],
+                control_updates={
+                    "last_action_authorization": "REQUIRE_APPROVAL",
+                    "last_action": observation.action_name,
+                },
+            )
         if observation.action_name == "http_request":
             return self._reduce_http(observation)
         if observation.action_name == "sql_boolean_compare":

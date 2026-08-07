@@ -6,7 +6,8 @@ out of scope until the skeleton is reviewed and verified.
 """
 
 from .action import ActionIntent
-from .context import ChallengeContext, RunContext, RunLimits, TargetContext
+from .context import ChallengeContext, RunContext, RunLimits, RuntimeUsage, TargetContext
+from .context_factory import RunContextFactory
 from .coordinator import Coordinator, CoordinatorStep
 from .events import SolverEvent
 from .knowledge import KnowledgeStore
@@ -34,6 +35,8 @@ __all__ = [
     "ChallengeContext",
     "RunContext",
     "RunLimits",
+    "RuntimeUsage",
+    "RunContextFactory",
     "TargetContext",
     "ActionPolicyValidator",
     "DeterministicPlanner",
