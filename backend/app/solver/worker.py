@@ -12,11 +12,13 @@ class WorkerResult:
         self,
         *,
         status: str,
+        observation: dict[str, Any] | None = None,
         facts: list[dict[str, Any]] | None = None,
         hypotheses: list[dict[str, Any]] | None = None,
         evidence_refs: list[str] | None = None,
     ) -> None:
         self.status = status
+        self.observation = dict(observation or {})
         self.facts = list(facts or [])
         self.hypotheses = list(hypotheses or [])
         self.evidence_refs = list(evidence_refs or [])
@@ -31,3 +33,18 @@ class NoopWorker:
 
     async def execute(self, intent: ActionIntent) -> WorkerResult:
         return WorkerResult(status="NOT_IMPLEMENTED")
+
+
+class MockWorker:
+    """Deterministic Worker used by Solver Loop tests only."""
+
+    def __init__(self, *, response: str = "xxx") -> None:
+        self.response = response
+        self.calls: list[ActionIntent] = []
+
+    async def execute(self, intent: ActionIntent) -> WorkerResult:
+        self.calls.append(intent)
+        return WorkerResult(
+            status="SUCCESS",
+            observation={"response": self.response, "action": intent.action_name},
+        )

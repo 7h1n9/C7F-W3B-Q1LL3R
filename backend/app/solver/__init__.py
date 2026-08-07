@@ -7,10 +7,12 @@ out of scope until the skeleton is reviewed and verified.
 
 from .action import ActionIntent
 from .coordinator import Coordinator, CoordinatorStep
+from .events import SolverEvent
+from .loop import SolverLoop, SolverLoopStep
 from .planner import DeterministicPlanner, NoopPlanner, Planner, SolverIntent
 from .policy import ActionPolicyValidator, PolicyDecision, PolicyResult
 from .state_machine import SolverPhase, TaskStateMachine
-from .worker import NoopWorker, Worker, WorkerResult
+from .worker import MockWorker, NoopWorker, Worker, WorkerResult
 
 __all__ = [
     "Coordinator",
@@ -18,12 +20,16 @@ __all__ = [
     "ActionIntent",
     "ActionPolicyValidator",
     "DeterministicPlanner",
+    "MockWorker",
     "NoopPlanner",
     "PolicyDecision",
     "PolicyResult",
     "NoopWorker",
     "Planner",
     "SolverIntent",
+    "SolverEvent",
+    "SolverLoop",
+    "SolverLoopStep",
     "SolverPhase",
     "TaskStateMachine",
     "Worker",

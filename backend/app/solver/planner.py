@@ -12,7 +12,7 @@ AllowedAction = str | Mapping[str, object]
 class Planner(Protocol):
     """Select one intent from StateMachine-provided actions only."""
 
-    def choose(
+    def plan(
         self,
         state: BlackboardState,
         allowed_actions: Sequence[AllowedAction],
@@ -22,7 +22,7 @@ class Planner(Protocol):
 class DeterministicPlanner:
     """Small local Planner Adapter; no model, tool, or runtime integration."""
 
-    def choose(
+    def plan(
         self,
         state: BlackboardState,
         allowed_actions: Sequence[AllowedAction],
@@ -59,16 +59,31 @@ class DeterministicPlanner:
             metadata={"phase": state.phase, "source": "deterministic_planner"},
         )
 
+    def choose(
+        self,
+        state: BlackboardState,
+        allowed_actions: Sequence[AllowedAction],
+    ) -> ActionIntent | None:
+        """Phase 1.1 compatibility alias for the new ``plan`` method."""
+        return self.plan(state, allowed_actions)
+
 
 class NoopPlanner:
     """Placeholder planner retained for the Coordinator skeleton."""
+
+    def plan(
+        self,
+        state: BlackboardState,
+        allowed_actions: Sequence[AllowedAction],
+    ) -> ActionIntent | None:
+        return None
 
     def choose(
         self,
         state: BlackboardState,
         allowed_actions: Sequence[AllowedAction],
     ) -> ActionIntent | None:
-        return None
+        return self.plan(state, allowed_actions)
 
 
 class SolverIntent(ActionIntent):

@@ -42,7 +42,8 @@ class Coordinator:
         self.blackboard.update(run_id, allowed_actions=allowed_actions)
         state = self.blackboard.read(run_id)
 
-        intent = self.planner.choose(state, allowed_actions)
+        plan = getattr(self.planner, "plan", None)
+        intent = plan(state, allowed_actions) if callable(plan) else self.planner.choose(state, allowed_actions)
         if intent is None:
             updated = self.blackboard.update(
                 run_id,

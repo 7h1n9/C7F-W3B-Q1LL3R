@@ -24,6 +24,14 @@ class TaskStateMachine:
         SolverPhase.REPORTING: ("report",),
     }
 
+    NEXT_PHASE: dict[SolverPhase, SolverPhase] = {
+        SolverPhase.BASELINE: SolverPhase.VALIDATION,
+        SolverPhase.VALIDATION: SolverPhase.EXPLOITATION,
+        SolverPhase.EXPLOITATION: SolverPhase.IMPACT,
+        SolverPhase.IMPACT: SolverPhase.REPORTING,
+        SolverPhase.REPORTING: SolverPhase.REPORTING,
+    }
+
     def allowed_actions(self, state: BlackboardState) -> list[str]:
         """Return actions admissible for the current phase.
 
@@ -39,3 +47,14 @@ class TaskStateMachine:
 
     def is_allowed(self, state: BlackboardState, action: str) -> bool:
         return action in self.allowed_actions(state)
+
+    def next_phase(self, state: BlackboardState, action: str, status: str) -> str:
+        """Advance only after a successful action from the current phase."""
+        if str(status or "").upper() not in {"SUCCESS", "COMPLETED", "OK"}:
+            return state.phase
+        if not self.is_allowed(state, action):
+            return state.phase
+        try:
+            return self.NEXT_PHASE[SolverPhase(state.phase)].value
+        except (KeyError, ValueError):
+            return state.phase
