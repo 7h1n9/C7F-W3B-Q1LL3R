@@ -11,6 +11,7 @@ from .context_factory import RunContextFactory
 from .coordinator import Coordinator, CoordinatorStep
 from .events import SolverEvent
 from .knowledge import KnowledgeStore
+from .lifecycle import LifecycleDecision, SolverLifecycleMapper, SolverLifecycleOutcome
 from .loop import SolverLoop, SolverLoopStep
 from .observation import SolverObservation
 from .planner import DeterministicPlanner, NoopPlanner, Planner, SolverIntent
@@ -42,6 +43,7 @@ __all__ = [
     "DeterministicPlanner",
     "MockWorker",
     "KnowledgeStore",
+    "LifecycleDecision",
     "KnowledgeUpdate",
     "NoopPlanner",
     "PolicyDecision",
@@ -54,6 +56,8 @@ __all__ = [
     "SolverEvent",
     "SolverLoop",
     "SolverLoopStep",
+    "SolverLifecycleMapper",
+    "SolverLifecycleOutcome",
     "SolverObservation",
     "SolverPhase",
     "TaskStateMachine",
