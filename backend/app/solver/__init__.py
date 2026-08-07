@@ -6,6 +6,13 @@ out of scope until the skeleton is reviewed and verified.
 """
 
 from .action import ActionIntent
+from .action_lifecycle import (
+    ActionExecutionRecord,
+    ActionExecutionState,
+    find_interrupted_action,
+    generate_fingerprint,
+    validate_retry_relationship,
+)
 from .context import ChallengeContext, RunContext, RunLimits, RuntimeUsage, TargetContext
 from .context_factory import RunContextFactory
 from .coordinator import Coordinator, CoordinatorStep
@@ -33,6 +40,8 @@ __all__ = [
     "Coordinator",
     "CoordinatorStep",
     "ActionIntent",
+    "ActionExecutionRecord",
+    "ActionExecutionState",
     "ChallengeContext",
     "RunContext",
     "RunLimits",
@@ -66,4 +75,7 @@ __all__ = [
     "WorkerResult",
     "WorkerUnavailable",
     "WebObservationReducer",
+    "find_interrupted_action",
+    "generate_fingerprint",
+    "validate_retry_relationship",
 ]

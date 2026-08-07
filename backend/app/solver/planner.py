@@ -94,6 +94,8 @@ class SolverIntent(ActionIntent):
         object.__setattr__(self, "reason", "legacy solver intent")
         object.__setattr__(self, "parameters", dict(arguments or {}))
         object.__setattr__(self, "metadata", {"source": "phase_1_1_compatibility"})
+        object.__setattr__(self, "action_id", None)
+        object.__setattr__(self, "retry_of", None)
 
     @property
     def arguments(self) -> dict:

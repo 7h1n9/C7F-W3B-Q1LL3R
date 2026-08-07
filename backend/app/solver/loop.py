@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+from collections.abc import Mapping
 from dataclasses import dataclass
 
 from app.security.action_authorizer import (
@@ -9,6 +11,11 @@ from app.security.action_authorizer import (
 )
 
 from .action import ActionIntent
+from .action_lifecycle import (
+    ActionExecutionRecord,
+    find_interrupted_action,
+    validate_retry_relationship,
+)
 from .blackboard import BlackboardState
 from .blackboard.repository import BlackboardRepository
 from .context import RunContext, RuntimeUsage
@@ -66,6 +73,10 @@ class SolverLoop:
         if state is None:
             raise KeyError(f"Blackboard not found for run {run_id!r}")
 
+        interrupted = find_interrupted_action(state)
+        if interrupted is not None:
+            return await self._recover_interrupted(run_id, state, interrupted)
+
         allowed_actions = self.state_machine.allowed_actions(state)
         state = await self.blackboard.update(
             run_id,
@@ -113,10 +124,70 @@ class SolverLoop:
         else:
             security_decision = self.action_authorizer.authorize(intent, self.run_context)
         if security_decision.decision is SecurityDecisionType.ALLOW:
-            result = await self.worker_manager.execute(intent)
-            event_type = "ACTION_COMPLETED"
+            execution = ActionExecutionRecord.pending(intent).started()
+            retry_error = self._retry_error(state, execution)
+            if retry_error is not None:
+                event = SolverEvent(
+                    event_type="ACTION_RETRY_REJECTED",
+                    action=intent.action_name,
+                    payload={
+                        "action_id": execution.action_id,
+                        "fingerprint": execution.fingerprint,
+                        "retry_of": execution.retry_of,
+                        "reason_code": retry_error,
+                        "recovery_required": True,
+                    },
+                )
+                updated = await self.blackboard.update(
+                    run_id,
+                    {"history_append": [event.to_dict()]},
+                    expected_version=state.version,
+                )
+                return SolverLoopStep("RECOVERY_REQUIRED", updated, event, intent=intent)
+
+            started_event = SolverEvent(
+                event_type="ACTION_STARTED",
+                action=intent.action_name,
+                payload={"execution": execution.to_dict()},
+            )
+            state = await self.blackboard.update(
+                run_id,
+                {
+                    "control_merge": {
+                        "active_action": execution.to_dict(),
+                        "recovery_feedback": None,
+                    },
+                    "history_append": [started_event.to_dict()],
+                },
+                expected_version=state.version,
+            )
+            try:
+                result = await self.worker_manager.execute(intent)
+            except asyncio.CancelledError:
+                await self._record_interrupted(
+                    run_id,
+                    state,
+                    execution,
+                    "WORKER_CANCELLED",
+                )
+                raise
+            except Exception as exc:
+                await self._record_interrupted(
+                    run_id,
+                    state,
+                    execution,
+                    type(exc).__name__,
+                )
+                raise
+            execution = (
+                execution.completed()
+                if result.success
+                else execution.failed(self._worker_failure_reason(result))
+            )
+            event_type = "ACTION_COMPLETED" if result.success else "ACTION_FAILED"
             step_status = "CONTINUE"
         else:
+            execution = None
             approval_required = security_decision.decision is SecurityDecisionType.REQUIRE_APPROVAL
             result_status = "APPROVAL_REQUIRED" if approval_required else "DENIED"
             result = WorkerResult(
@@ -157,18 +228,129 @@ class SolverLoop:
                 "security_reason_code": security_decision.reason_code,
             },
         )
+        if execution is not None:
+            event.payload["execution"] = execution.to_dict()
+        control_merge = {}
+        if execution is not None:
+            control_merge = {
+                "active_action": None,
+                "last_action_execution": execution.to_dict(),
+                "recovery_feedback": None,
+            }
         updated = await self.blackboard.update(
             run_id,
             {
                 "phase": next_phase,
                 "knowledge": projected.knowledge,
                 "control": projected.control,
+                "control_merge": control_merge,
                 "history_append": [event.to_dict()],
                 "evidence_refs_append": observation.evidence_refs,
             },
             expected_version=state.version,
         )
         return SolverLoopStep(step_status, updated, event, intent=intent, result=result)
+
+    async def _recover_interrupted(
+        self,
+        run_id: str,
+        state: BlackboardState,
+        interrupted: ActionExecutionRecord,
+    ) -> SolverLoopStep:
+        recovered = interrupted.interrupted("IN_FLIGHT_ACTION_DETECTED")
+        feedback = self._recovery_feedback(recovered)
+        event = SolverEvent(
+            event_type="ACTION_INTERRUPTED",
+            action=recovered.action_name,
+            payload={
+                "execution": recovered.to_dict(),
+                "recovery_feedback": feedback,
+            },
+        )
+        updated = await self.blackboard.update(
+            run_id,
+            {
+                "control_merge": {
+                    "active_action": None,
+                    "last_action_execution": recovered.to_dict(),
+                    "recovery_feedback": feedback,
+                },
+                "history_append": [event.to_dict()],
+            },
+            expected_version=state.version,
+        )
+        return SolverLoopStep("RECOVERY_REQUIRED", updated, event)
+
+    async def _record_interrupted(
+        self,
+        run_id: str,
+        state: BlackboardState,
+        execution: ActionExecutionRecord,
+        reason: str,
+    ) -> None:
+        interrupted = execution.interrupted(reason)
+        feedback = self._recovery_feedback(interrupted)
+        event = SolverEvent(
+            event_type="ACTION_INTERRUPTED",
+            action=interrupted.action_name,
+            payload={
+                "execution": interrupted.to_dict(),
+                "recovery_feedback": feedback,
+            },
+        )
+        await self.blackboard.update(
+            run_id,
+            {
+                "control_merge": {
+                    "active_action": None,
+                    "last_action_execution": interrupted.to_dict(),
+                    "recovery_feedback": feedback,
+                },
+                "history_append": [event.to_dict()],
+            },
+            expected_version=state.version,
+        )
+
+    @staticmethod
+    def _recovery_feedback(execution: ActionExecutionRecord) -> dict[str, object]:
+        return {
+            "status": "RECOVERY_REQUIRED",
+            "reason_code": "IN_FLIGHT_ACTION_DETECTED",
+            "action_id": execution.action_id,
+            "action_name": execution.action_name,
+            "fingerprint": execution.fingerprint,
+            "requires_explicit_retry": True,
+            "allowed_next_steps": ["retry", "skip", "change_strategy"],
+        }
+
+    @staticmethod
+    def _retry_error(
+        state: BlackboardState,
+        execution: ActionExecutionRecord,
+    ) -> str | None:
+        feedback = state.control.get("recovery_feedback")
+        if not isinstance(feedback, Mapping):
+            return "RETRY_TARGET_NOT_FOUND" if execution.retry_of else None
+
+        previous = ActionExecutionRecord.from_mapping(feedback)
+        same_action = execution.fingerprint == previous.fingerprint
+        if same_action and not validate_retry_relationship(execution, previous):
+            return "RETRY_OF_REQUIRED"
+        if execution.retry_of and not validate_retry_relationship(execution, previous):
+            return "RETRY_RELATION_INVALID"
+        if execution.retry_of == previous.action_id:
+            return "RETRY_ACTION_ID_REUSED" if execution.action_id == previous.action_id else None
+        return None
+
+    @staticmethod
+    def _worker_failure_reason(result: WorkerResult) -> str:
+        return str(
+            result.metadata.get("error_code")
+            or result.metadata.get("error")
+            or result.output.get("error_code")
+            or result.output.get("error")
+            or result.status
+        )
 
     @staticmethod
     def _runtime_usage(state: BlackboardState) -> RuntimeUsage:

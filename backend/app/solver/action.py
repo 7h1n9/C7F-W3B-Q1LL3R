@@ -12,6 +12,8 @@ class ActionIntent:
     reason: str
     parameters: dict[str, Any] = field(default_factory=dict)
     metadata: dict[str, Any] = field(default_factory=dict)
+    action_id: str | None = None
+    retry_of: str | None = None
 
     @property
     def action(self) -> str:
