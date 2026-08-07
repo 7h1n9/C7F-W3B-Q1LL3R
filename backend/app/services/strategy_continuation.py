@@ -24,6 +24,16 @@ DEFAULT_STRATEGIES = (
     "TIME_BASED",
 )
 
+_STRATEGY_ACTIONS = {
+    "BOOLEAN_AND_COMMENT_HASH": "BOOLEAN_COMMENT_HASH",
+    "BOOLEAN_AND_COMMENT_INLINE": "BOOLEAN_COMMENT_INLINE",
+    "BOOLEAN_AND_ENCODING": "BOOLEAN_ENCODING",
+    "BOOLEAN_OR": "BOOLEAN_OR",
+    "ERROR_BASED": "ERROR_BASED",
+    "UNION": "UNION_BASED",
+    "TIME_BASED": "TIME_BASED",
+}
+
 
 def _text(value: Any) -> str:
     return str(value or "").strip().upper().replace("-", "_")
@@ -170,6 +180,17 @@ def build_strategy_portfolio(
         "reason": transition_reason,
         "approved": bool(next_required),
     }
+    next_allowed_actions = [
+        _STRATEGY_ACTIONS.get(item, item)
+        for item in remaining[:4]
+    ]
+    required_transition = (
+        "CHANGE_BOOLEAN_VARIANT"
+        if next_required and current_strategy.startswith("BOOLEAN_") and next_required.startswith("BOOLEAN_")
+        else "CHANGE_ATTACK_FAMILY"
+        if next_required
+        else "SEARCH_EXHAUSTED"
+    )
     return {
         "vulnerability_type": _text(latest.get("vulnerability_type") or "SQL_INJECTION"),
         "hypothesis": latest.get("hypothesis") or latest.get("result_reason") or "",
@@ -178,6 +199,9 @@ def build_strategy_portfolio(
         "remaining_strategies": remaining,
         "next_candidates": remaining[:4],
         "next_required_strategy": next_required,
+        "next_allowed_actions": next_allowed_actions,
+        "allowed_actions": next_allowed_actions,
+        "required_transition": required_transition,
         "strategy_transition": transition,
         "current_strategy": current_strategy,
         "attempts": attempts,

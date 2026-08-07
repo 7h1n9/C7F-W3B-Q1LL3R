@@ -134,6 +134,10 @@ class RoleAgentRuntime:
             schema = {"proposal": PlannerProposalContract.model_json_schema()}
             instruction = "Output only PlannerProposalContract, either as the object itself or wrapped in {proposal: ...}. Do not output AgentTaskResult, status, new_facts, or proposed_next_action. allowed_tools must contain only exact names from the Controller catalog: http_request, content_discovery, sql_boolean_compare, oracle_probe_matrix, mysql_metadata_discovery, boolean_config_extract, script_run, http_compare."
             required_strategy = str((memory or {}).get("next_required_strategy") or "").upper()
+            attack_state = (memory or {}).get("attack_state") or {}
+            attack_actions = list(attack_state.get("available_actions") or (memory or {}).get("available_actions") or []) if isinstance(attack_state, dict) else list((memory or {}).get("available_actions") or [])
+            if attack_actions:
+                instruction += f" AttackState is the hard action-space boundary. You may select only one of available_actions={attack_actions!r}; do not invent a family, reuse a blocked strategy, or infer a different transition."
             if required_strategy:
                 if required_strategy.startswith("BOOLEAN_"):
                     strategy_family = "BOOLEAN"

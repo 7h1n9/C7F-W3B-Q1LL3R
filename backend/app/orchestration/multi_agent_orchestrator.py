@@ -83,6 +83,8 @@ from app.services.metadata_stage_decider import metadata_stage_decider
 from app.services.tool_catalog_reconciler import tool_catalog_reconciler
 from app.services.experiment_strategy_manager import experiment_strategy_manager
 from app.services.strategy_continuation import build_strategy_portfolio, normalize_strategy, strategy_continuation_service, strategy_identity, validate_strategy_selection
+from app.security.attack_state import AttackState
+from app.security.attack_state_engine import attack_state_engine, validate_attack_state_selection
 from app.services.execution_recovery import execution_recovery_guard
 from app.services.continuations import continuation_service
 from app.tools.gateway import tool_gateway
@@ -1164,6 +1166,7 @@ class MultiAgentOrchestrator:
                 raise DomainError("MODEL_OUTPUT_SCHEMA_INVALID", f"PlannerProposalContract is invalid: {error}", {"task_id": task.id}) from error
         metadata = challenge.metadata_json or {}
         strategy_portfolio: dict = {}
+        attack_state: dict = {}
         strategy_selection: str = ""
         if (
             self._asset_warranty_mysql(challenge)
@@ -1171,6 +1174,15 @@ class MultiAgentOrchestrator:
             state = await solver_state_service.load(session, run.id)
             ledger = state.capability_ledger_json if state else {}
             strategy_portfolio = dict((ledger or {}).get("strategy_portfolio") or {}) if state else {}
+            attack_state = dict((ledger or {}).get("attack_state") or {}) if state else {}
+            if not attack_state and strategy_portfolio.get("next_allowed_actions"):
+                attack_state = {
+                    "current_phase": "BOOLEAN_CALIBRATION",
+                    "available_actions": list(strategy_portfolio.get("next_allowed_actions") or []),
+                    "blocked_strategies": list(strategy_portfolio.get("tried_strategies") or []),
+                    "transition_reason": strategy_portfolio.get("required_transition") or "STRATEGY_PORTFOLIO",
+                    "required_transition": strategy_portfolio.get("required_transition"),
+                }
             lifecycle_required_phase = ""
             if state and (state.security_context_json or {}).get("validation_results"):
                 lifecycle_required_phase = str(
@@ -1305,7 +1317,7 @@ class MultiAgentOrchestrator:
         if (
             self._asset_warranty_mysql(challenge)
             and str(contract.current_stage or "").upper() == "BOOLEAN_ORACLE"
-            and strategy_portfolio.get("next_required_strategy")
+            and (strategy_portfolio.get("next_required_strategy") or attack_state.get("available_actions"))
         ):
             selection_result = validate_strategy_selection(strategy_portfolio, raw_strategy)
             required_strategy = selection_result.get("required_strategy")
@@ -1323,6 +1335,22 @@ class MultiAgentOrchestrator:
                     "STRATEGY_PROPOSAL_INVALID",
                     "Planner selected a strategy outside the durable transition.",
                     {**details, "reason": selection_result["reason"]},
+                    422,
+                )
+            attack_selection = validate_attack_state_selection(attack_state, raw_strategy)
+            if not attack_selection["valid"]:
+                details = {
+                    "task_id": task.id,
+                    "selected_strategy": attack_selection.get("selected_strategy"),
+                    "allowed_actions": attack_selection.get("allowed_actions") or [],
+                    "required_transition": attack_state.get("required_transition"),
+                    "transition_reason": attack_state.get("transition_reason"),
+                }
+                await self._controller_event(session, run.id, "planner.attack_state.rejected", {**details, "reason": attack_selection["reason"]})
+                raise DomainError(
+                    "ATTACK_STATE_ACTION_INVALID",
+                    "Planner selected an action outside the current AttackState.",
+                    {**details, "reason": attack_selection["reason"]},
                     422,
                 )
         # Generic vulnerability paths are governed by the current controller
@@ -1397,6 +1425,7 @@ class MultiAgentOrchestrator:
                 "strategy_variant": raw_strategy.get("strategy_variant") or "AND",
                 "next_required_strategy": strategy_portfolio.get("next_required_strategy"),
                 "strategy_transition": dict(strategy_portfolio.get("strategy_transition") or {}),
+                "attack_state": attack_state,
             }
         await self._controller_event(session, run.id, "planner.proposal.created", {"task_id": task.id, "proposal_id": row.proposal_id, "proposal_row_id": row.id, "current_stage": row.current_stage, **proposal_strategy})
         return row
@@ -2018,6 +2047,10 @@ class MultiAgentOrchestrator:
             "strategy_portfolio": dict((state.capability_ledger_json or {}).get("strategy_portfolio") or {}) if state else {},
             "next_required_strategy": ((state.capability_ledger_json or {}).get("strategy_portfolio") or {}).get("next_required_strategy") if state else None,
             "strategy_transition": dict(((state.capability_ledger_json or {}).get("strategy_portfolio") or {}).get("strategy_transition") or {}) if state else {},
+            "attack_state": dict((state.capability_ledger_json or {}).get("attack_state") or {}) if state else {},
+            "available_actions": list(((state.capability_ledger_json or {}).get("attack_state") or {}).get("available_actions") or []) if state else [],
+            "blocked_actions": list(((state.capability_ledger_json or {}).get("attack_state") or {}).get("blocked_strategies") or []) if state else [],
+            "transition_reason": ((state.capability_ledger_json or {}).get("attack_state") or {}).get("transition_reason") if state else None,
             "security_context": security_context,
             "vulnerability_lifecycle": vulnerability_lifecycle,
             "security_reasoning_rules": security_finding_service.planner_guidance(security_context),
@@ -3095,6 +3128,71 @@ class MultiAgentOrchestrator:
                     evidence={"fact_keys": sorted(required), "source": "controller_metadata_promotion"},
                 )
 
+    async def _update_attack_state(
+        self,
+        session,
+        run: SolveRun,
+        *,
+        diagnosis: dict | None = None,
+        challenge: Challenge | None = None,
+    ) -> AttackState | None:
+        """Recompute and persist the compact controller search state."""
+        state = await solver_state_service.load(session, run.id)
+        if state is None:
+            return None
+        ledger = dict(state.capability_ledger_json or {})
+        previous = dict(ledger.get("attack_state") or {})
+        target = {}
+        metadata = (challenge.metadata_json or {}) if challenge else {}
+        if isinstance(metadata, dict):
+            target = {
+                "url": metadata.get("endpoint") or (challenge.target_url if challenge else None),
+                "method": metadata.get("method"),
+                "parameter": metadata.get("test_field") or ((metadata.get("fields") or [None])[0] if isinstance(metadata.get("fields"), list) else None),
+            }
+        computed = attack_state_engine.evaluate(
+            state.security_context_json or {},
+            state.attack_strategy_history_json or [],
+            diagnosis,
+            target=target,
+            current_phase=run.current_phase or state.current_phase,
+        )
+        payload = computed.model_dump(mode="json")
+        state.capability_ledger_json = {**ledger, "attack_state": payload}
+        state.run_plan_json = {**(state.run_plan_json or {}), "attack_state": payload}
+        await session.flush()
+        if payload != previous:
+            await self._controller_event(
+                session,
+                run.id,
+                "attack.state.updated",
+                {
+                    "current_phase": payload.get("current_phase"),
+                    "current_strategy_family": payload.get("current_strategy_family"),
+                    "current_strategy_variant": payload.get("current_strategy_variant"),
+                    "available_actions": payload.get("available_actions") or [],
+                    "blocked_actions": payload.get("blocked_strategies") or [],
+                    "required_transition": payload.get("required_transition"),
+                    "transition_reason": payload.get("transition_reason"),
+                    "confidence": payload.get("confidence"),
+                },
+            )
+        previous_transition = (previous.get("required_transition"), previous.get("available_actions"))
+        current_transition = (payload.get("required_transition"), payload.get("available_actions"))
+        if payload.get("required_transition") and current_transition != previous_transition:
+            await self._controller_event(
+                session,
+                run.id,
+                "attack.transition.created",
+                {
+                    "from": previous.get("current_strategy_variant"),
+                    "to": payload.get("available_actions") or [],
+                    "reason": payload.get("transition_reason"),
+                    "required_transition": payload.get("required_transition"),
+                },
+            )
+        return computed
+
     async def _record_security_mapping(self, session, run: SolveRun, fact: VerifiedFact) -> None:
         """Materialize the security meaning of a newly verified legacy fact."""
         fact_value = fact.value_json if isinstance(fact.value_json, dict) else {}
@@ -3179,6 +3277,7 @@ class MultiAgentOrchestrator:
                     "item_count": len(context[collection]),
                 },
             )
+            await self._update_attack_state(session, run)
 
     async def run(self, session, run: SolveRun, challenge: Challenge, attempt: RunAttempt, lease: RunExecutionLease, *, engine: object | None = None) -> dict:
         # Lifecycle, event and dispatch boundaries commit this session. Keep
@@ -3366,6 +3465,34 @@ class MultiAgentOrchestrator:
                                 "reason": error.message,
                                 "required_strategy": details.get("required_strategy"),
                                 "selected_strategy": details.get("selected_strategy"),
+                            },
+                        )
+                        await self._memory(session, run, stage="STRATEGY_REVIEW", task=planner_task, working=context)
+                        await session.commit()
+                        await self._status(session, run, RunStatus.PLANNING)
+                        continue
+                    if error.code == "ATTACK_STATE_ACTION_INVALID":
+                        details = error.details or {}
+                        context = {
+                            "replan_reason": "ATTACK_STATE_ACTION_INVALID",
+                            "attack_state": {
+                                "available_actions": details.get("allowed_actions") or [],
+                                "required_transition": details.get("required_transition"),
+                                "transition_reason": details.get("transition_reason"),
+                            },
+                            "selected_strategy": details.get("selected_strategy"),
+                        }
+                        await self._controller_event(
+                            session,
+                            run.id,
+                            "planner.replan.dispatched",
+                            {
+                                "run_id": run.id,
+                                "source": "attack_state",
+                                "decision": "REVISE",
+                                "reason": error.message,
+                                "selected_strategy": details.get("selected_strategy"),
+                                "allowed_actions": details.get("allowed_actions") or [],
                             },
                         )
                         await self._memory(session, run, stage="STRATEGY_REVIEW", task=planner_task, working=context)
@@ -3701,13 +3828,24 @@ class MultiAgentOrchestrator:
                             "next_strategy": next_strategy,
                         },
                     )
+                    challenge_for_state = await session.get(Challenge, challenge_id)
                     portfolio = await strategy_continuation_service.update(
                         session,
                         run.id,
                         max_attempts=self._max_replan_cycles(
                             run,
-                            await session.get(Challenge, challenge_id),
+                            challenge_for_state,
                         ),
+                    )
+                    diagnosis_for_state = dict((run.recovery_checkpoint_json or {}).get("boolean_diagnosis") or {})
+                    diagnosis_for_state.setdefault("classification", feedback.get("result_classification"))
+                    diagnosis_for_state.setdefault("recommended_strategies", next_strategies)
+                    diagnosis_for_state.setdefault("strategy_family", family)
+                    await self._update_attack_state(
+                        session,
+                        run,
+                        diagnosis=diagnosis_for_state,
+                        challenge=challenge_for_state,
                     )
                     if portfolio.get("next_candidates") and not portfolio.get("search_exhausted"):
                         await self._phase(session, run, "STRATEGY_REVIEW")
