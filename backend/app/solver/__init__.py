@@ -6,6 +6,7 @@ out of scope until the skeleton is reviewed and verified.
 """
 
 from .action import ActionIntent
+from .context import ChallengeContext, RunContext, RunLimits, TargetContext
 from .coordinator import Coordinator, CoordinatorStep
 from .events import SolverEvent
 from .knowledge import KnowledgeStore
@@ -30,6 +31,10 @@ __all__ = [
     "Coordinator",
     "CoordinatorStep",
     "ActionIntent",
+    "ChallengeContext",
+    "RunContext",
+    "RunLimits",
+    "TargetContext",
     "ActionPolicyValidator",
     "DeterministicPlanner",
     "MockWorker",

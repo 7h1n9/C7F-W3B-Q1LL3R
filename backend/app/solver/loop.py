@@ -2,9 +2,16 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from app.security.action_authorizer import (
+    ActionAuthorizer,
+    AllowAllActionAuthorizer,
+    SecurityDecisionType,
+)
+
 from .action import ActionIntent
 from .blackboard import BlackboardState
 from .blackboard.repository import BlackboardRepository
+from .context import RunContext
 from .events import SolverEvent
 from .knowledge import KnowledgeStore
 from .observation import SolverObservation
@@ -39,6 +46,8 @@ class SolverLoop:
         planner: Planner,
         policy: ActionPolicyValidator,
         worker_manager: WorkerManager,
+        run_context: RunContext | None = None,
+        action_authorizer: ActionAuthorizer | None = None,
         reducer: ObservationReducer | None = None,
         knowledge_store: KnowledgeStore | None = None,
     ) -> None:
@@ -47,6 +56,8 @@ class SolverLoop:
         self.planner = planner
         self.policy = policy
         self.worker_manager = worker_manager
+        self.run_context = run_context
+        self.action_authorizer = action_authorizer or AllowAllActionAuthorizer()
         self.reducer = reducer or WebObservationReducer()
         self.knowledge_store = knowledge_store or KnowledgeStore()
 
@@ -95,7 +106,28 @@ class SolverLoop:
             )
             return SolverLoopStep("REJECTED", updated, event, intent=intent)
 
-        result = await self.worker_manager.execute(intent)
+        security_decision = self.action_authorizer.authorize(intent, self.run_context)
+        if security_decision.decision is SecurityDecisionType.ALLOW:
+            result = await self.worker_manager.execute(intent)
+            event_type = "ACTION_COMPLETED"
+            step_status = "CONTINUE"
+        else:
+            result = WorkerResult(
+                success=False,
+                action_name=intent.action_name,
+                output={
+                    "status": "DENIED",
+                    "reason": security_decision.reason,
+                },
+                metadata={
+                    "backend": "security",
+                    "status": "DENIED",
+                    "policy_id": security_decision.policy_id,
+                    "decision": security_decision.decision.value,
+                },
+            )
+            event_type = "ACTION_DENIED"
+            step_status = "DENIED"
         observation = SolverObservation.from_worker_result(intent, result)
         reduction = self.reducer.reduce(observation)
         projected = self.knowledge_store.apply(state, reduction)
@@ -105,13 +137,15 @@ class SolverLoop:
         projected = projected.model_copy(update={"phase": next_phase})
 
         event = SolverEvent(
-            event_type="ACTION_COMPLETED",
+            event_type=event_type,
             action=intent.action_name,
             payload={
                 "status": result.status,
                 "fact_types": [item.get("type") for item in reduction.verified_facts],
                 "hypothesis_types": [item.get("type") for item in reduction.hypotheses],
                 "next_phase": next_phase,
+                "security_decision": security_decision.decision.value,
+                "security_reason": security_decision.reason,
             },
         )
         updated = await self.blackboard.update(
@@ -125,4 +159,4 @@ class SolverLoop:
             },
             expected_version=state.version,
         )
-        return SolverLoopStep("CONTINUE", updated, event, intent=intent, result=result)
+        return SolverLoopStep(step_status, updated, event, intent=intent, result=result)
