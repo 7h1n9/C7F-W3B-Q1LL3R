@@ -44,7 +44,18 @@ class MockWorker:
 
     async def execute(self, intent: ActionIntent) -> WorkerResult:
         self.calls.append(intent)
+        if intent.action_name == "sql_boolean_compare":
+            observation = {
+                "true": True,
+                "false": False,
+                "action": intent.action_name,
+            }
+        else:
+            observation = {
+                "response": self.response,
+                "action": intent.action_name,
+            }
         return WorkerResult(
             status="SUCCESS",
-            observation={"response": self.response, "action": intent.action_name},
+            observation=observation,
         )

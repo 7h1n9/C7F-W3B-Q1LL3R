@@ -8,9 +8,12 @@ out of scope until the skeleton is reviewed and verified.
 from .action import ActionIntent
 from .coordinator import Coordinator, CoordinatorStep
 from .events import SolverEvent
+from .knowledge import KnowledgeStore
 from .loop import SolverLoop, SolverLoopStep
+from .observation import SolverObservation
 from .planner import DeterministicPlanner, NoopPlanner, Planner, SolverIntent
 from .policy import ActionPolicyValidator, PolicyDecision, PolicyResult
+from .reducers import KnowledgeUpdate, WebObservationReducer
 from .state_machine import SolverPhase, TaskStateMachine
 from .worker import MockWorker, NoopWorker, Worker, WorkerResult
 
@@ -21,6 +24,8 @@ __all__ = [
     "ActionPolicyValidator",
     "DeterministicPlanner",
     "MockWorker",
+    "KnowledgeStore",
+    "KnowledgeUpdate",
     "NoopPlanner",
     "PolicyDecision",
     "PolicyResult",
@@ -30,8 +35,10 @@ __all__ = [
     "SolverEvent",
     "SolverLoop",
     "SolverLoopStep",
+    "SolverObservation",
     "SolverPhase",
     "TaskStateMachine",
     "Worker",
     "WorkerResult",
+    "WebObservationReducer",
 ]

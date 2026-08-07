@@ -6,8 +6,11 @@ from .action import ActionIntent
 from .blackboard import BlackboardState
 from .blackboard.repository import BlackboardRepository
 from .events import SolverEvent
+from .knowledge import KnowledgeStore
+from .observation import SolverObservation
 from .planner import Planner
 from .policy import ActionPolicyValidator
+from .reducers import ObservationReducer, WebObservationReducer
 from .state_machine import TaskStateMachine
 from .worker import Worker, WorkerResult
 
@@ -36,12 +39,16 @@ class SolverLoop:
         planner: Planner,
         policy: ActionPolicyValidator,
         worker: Worker,
+        reducer: ObservationReducer | None = None,
+        knowledge_store: KnowledgeStore | None = None,
     ) -> None:
         self.blackboard = blackboard
         self.state_machine = state_machine
         self.planner = planner
         self.policy = policy
         self.worker = worker
+        self.reducer = reducer or WebObservationReducer()
+        self.knowledge_store = knowledge_store or KnowledgeStore()
 
     async def step(self, run_id: str) -> SolverLoopStep:
         state = await self.blackboard.load(run_id)
@@ -89,34 +96,32 @@ class SolverLoop:
             return SolverLoopStep("REJECTED", updated, event, intent=intent)
 
         result = await self.worker.execute(intent)
-        next_phase = self.state_machine.next_phase(state, intent.action_name, result.status)
-        knowledge = dict(state.knowledge)
-        observations = list(knowledge.get("observations") or [])
-        observations.append(
-            {
-                "action": intent.action_name,
-                "status": result.status,
-                "observation": dict(result.observation),
-            }
+        observation = SolverObservation.from_worker_result(intent, result)
+        reduction = self.reducer.reduce(observation)
+        projected = self.knowledge_store.apply(state, reduction)
+        next_phase = reduction.next_phase or self.state_machine.next_phase(
+            state, intent.action_name, result.status
         )
-        knowledge["observations"] = observations
-        if result.facts:
-            knowledge["facts"] = [*(knowledge.get("facts") or []), *result.facts]
-        if result.hypotheses:
-            knowledge["hypotheses"] = [*(knowledge.get("hypotheses") or []), *result.hypotheses]
+        projected = projected.model_copy(update={"phase": next_phase})
 
         event = SolverEvent(
             event_type="ACTION_COMPLETED",
             action=intent.action_name,
-            payload={"status": result.status, "observation": dict(result.observation)},
+            payload={
+                "status": result.status,
+                "fact_types": [item.get("type") for item in reduction.verified_facts],
+                "hypothesis_types": [item.get("type") for item in reduction.hypotheses],
+                "next_phase": next_phase,
+            },
         )
         updated = await self.blackboard.update(
             run_id,
             {
                 "phase": next_phase,
-                "knowledge": knowledge,
+                "knowledge": projected.knowledge,
+                "control": projected.control,
                 "history_append": [event.to_dict()],
-                "evidence_refs_append": result.evidence_refs,
+                "evidence_refs_append": observation.evidence_refs,
             },
             expected_version=state.version,
         )

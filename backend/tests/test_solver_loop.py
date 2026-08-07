@@ -73,7 +73,11 @@ async def test_baseline_selects_http_and_updates_to_validation() -> None:
     assert step.intent.action_name == "http_request"
     assert step.event.event_type == "ACTION_COMPLETED"
     assert step.state.phase == "VALIDATION"
-    assert step.state.knowledge["observations"][0]["observation"]["response"] == "xxx"
+    assert any(
+        fact["type"] == "HTTP_ENDPOINT_FOUND"
+        for fact in step.state.knowledge["verified_facts"]
+    )
+    assert "observations" not in step.state.knowledge
     assert len(worker.calls) == 1
 
 
@@ -120,6 +124,7 @@ async def test_worker_observation_and_event_history_are_written() -> None:
     assert step.result.observation["response"] == "observed"
     assert step.state.evidence_refs == []
     assert step.state.history[-1]["payload"]["status"] == "SUCCESS"
+    assert "response" not in step.state.history[-1]["payload"]
 
 
 async def test_two_steps_continue_from_baseline_to_validation_to_exploitation() -> None:
