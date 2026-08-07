@@ -84,7 +84,7 @@ async def test_unknown_backend_is_rejected_without_fallback() -> None:
         await manager.execute(action)
 
 
-async def test_runner_adapter_is_explicit_not_implemented() -> None:
+async def test_runner_adapter_requires_run_context_without_calling_runner() -> None:
     manager = WorkerManager(workers={"runner": RunnerWorker()})
     action = ActionIntent(
         action_name="http_request",
@@ -95,7 +95,8 @@ async def test_runner_adapter_is_explicit_not_implemented() -> None:
     result = await manager.execute(action)
 
     assert result.success is False
-    assert result.metadata["status"] == "NOT_IMPLEMENTED"
+    assert result.metadata["status"] == "INVALID_REQUEST"
+    assert result.metadata["error_code"] == "RUN_ID_REQUIRED"
 
 
 async def test_solver_loop_uses_worker_manager_and_reducer_chain() -> None:

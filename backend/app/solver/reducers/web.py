@@ -6,27 +6,36 @@ from ..observation import SolverObservation
 from .base import KnowledgeUpdate
 
 
+def _result_views(raw_result: dict[str, Any]) -> tuple[dict[str, Any], ...]:
+    structured = raw_result.get("structured_result")
+    if isinstance(structured, dict):
+        return raw_result, structured
+    return (raw_result,)
+
+
 def _status_code(raw_result: dict[str, Any]) -> int | None:
-    for key in ("status_code", "status", "http_status"):
-        value = raw_result.get(key)
-        try:
-            return int(value) if value is not None else None
-        except (TypeError, ValueError):
-            continue
+    for view in _result_views(raw_result):
+        for key in ("status_code", "status", "http_status"):
+            value = view.get(key)
+            try:
+                return int(value) if value is not None else None
+            except (TypeError, ValueError):
+                continue
     return None
 
 
 def _boolean_value(raw_result: dict[str, Any], *keys: str) -> bool | None:
-    for key in keys:
-        if key not in raw_result:
-            continue
-        value = raw_result[key]
-        if isinstance(value, dict):
-            value = value.get("value")
-        if isinstance(value, bool):
-            return value
-        if isinstance(value, str) and value.strip().lower() in {"true", "false"}:
-            return value.strip().lower() == "true"
+    for view in _result_views(raw_result):
+        for key in keys:
+            if key not in view:
+                continue
+            value = view[key]
+            if isinstance(value, dict):
+                value = value.get("value")
+            if isinstance(value, bool):
+                return value
+            if isinstance(value, str) and value.strip().lower() in {"true", "false"}:
+                return value.strip().lower() == "true"
     return None
 
 
@@ -69,8 +78,20 @@ class WebObservationReducer:
 
     @staticmethod
     def _reduce_boolean(observation: SolverObservation) -> KnowledgeUpdate:
-        true_value = _boolean_value(observation.raw_result, "true", "true_result", "true_signature")
-        false_value = _boolean_value(observation.raw_result, "false", "false_result", "false_signature")
+        true_value = _boolean_value(
+            observation.raw_result,
+            "true",
+            "true_result",
+            "true_signature",
+            "stable_true",
+        )
+        false_value = _boolean_value(
+            observation.raw_result,
+            "false",
+            "false_result",
+            "false_signature",
+            "stable_false",
+        )
         oracle_fact = {
             "type": "BOOLEAN_ORACLE",
             "true": true_value,
