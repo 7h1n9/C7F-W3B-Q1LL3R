@@ -7,6 +7,7 @@ import { Link } from "react-router-dom";
 import { RunStatusTag, runStatusLabel } from "../components/RunStatusTag";
 import { api } from "../services/api";
 import type { SolveRun } from "../types/api";
+import { solverModeLabel } from "../utils/run";
 
 const formatTime = (value?: string | null) =>
   value ? new Date(value).toLocaleString("zh-CN", { hour12: false }) : "—";
@@ -141,7 +142,7 @@ export function RunsPage() {
             {
               title: "架构",
               dataIndex: "solver_mode",
-              render: (mode: string) => mode === "solver_v2" ? "Solver v2" : mode === "multi_agent_v1" ? "Multi-Agent v1" : "Single-Agent",
+              render: (mode: SolveRun["solver_mode"]) => solverModeLabel(mode),
             },
             {
               title: "状态",

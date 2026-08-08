@@ -11,6 +11,7 @@ class EventType(StrEnum):
     DEAD_END = "dead_end"
     INTENT_PROPOSED = "intent_proposed"
     INTENT_CLAIMED = "intent_claimed"
+    INTENT_RELEASED = "intent_released"
     INTENT_CONCLUDED = "intent_concluded"
     FLAG_CANDIDATE = "flag_candidate"
     FLAG_FOUND = "flag_found"

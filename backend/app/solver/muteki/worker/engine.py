@@ -41,4 +41,20 @@ def intent_prompt(intent: Intent) -> str:
     return f"Intent: {intent.description}\n{details}".strip()
 
 
-__all__ = ["WorkerEngine", "WorkerResult", "intent_prompt"]
+def get_engine(engine_type: str, *, cli: bool = False) -> WorkerEngine:
+    """Create one of the supported engines without importing optional CLIs eagerly."""
+
+    from .engines import ClaudeEngine, CodexCliEngine, CodexEngine, CursorEngine
+
+    engines = {
+        "codex": CodexCliEngine if cli else CodexEngine,
+        "claude": ClaudeEngine,
+        "cursor": CursorEngine,
+    }
+    factory = engines.get(str(engine_type).casefold())
+    if factory is None:
+        raise ValueError(f"unsupported Muteki engine: {engine_type}")
+    return factory()
+
+
+__all__ = ["WorkerEngine", "WorkerResult", "get_engine", "intent_prompt"]

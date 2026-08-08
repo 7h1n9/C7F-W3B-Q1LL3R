@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
+from .container_exec import ContainerExecutor
+from .control import ControlReceiver
 from .core.stage_policy import StagePolicy
 from .events import EventType
 from .graph import MutekiGraph
@@ -10,6 +13,9 @@ from .phases import MutekiPhase
 from .reason import MutekiReason
 from .worker.review_worker import ReviewWorker
 from .workers import EngineProfile, MutekiWorkerPool, WorkerJob, WorkerOutcome
+
+if TYPE_CHECKING:
+    from .cli_driver import CLIDriver
 
 
 @dataclass(frozen=True, slots=True)
@@ -20,6 +26,8 @@ class CoordinatorConfig:
     max_ticks: int = 100
     review_interval: int = 3
     stage_policy: StagePolicy | dict | None = None
+    worker_backend: str = "callback"
+    worker_timeout_seconds: int = 900
 
 
 class MutekiCoordinator:
@@ -33,6 +41,9 @@ class MutekiCoordinator:
         engines: list[EngineProfile],
         *,
         config: CoordinatorConfig | dict | None = None,
+        cli_driver: "CLIDriver | None" = None,
+        container_executor: ContainerExecutor | None = None,
+        control_receiver: ControlReceiver | None = None,
     ) -> None:
         self.graph = graph
         self.reason = reason
@@ -40,8 +51,19 @@ class MutekiCoordinator:
         self.engines = engines
         self.config = CoordinatorConfig(**config) if isinstance(config, dict) else (config or CoordinatorConfig(max_workers=pool.max_workers))
         self.stage_policy = StagePolicy.from_config(self.config.stage_policy)
+        if self.config.worker_backend not in {"callback", "cli", "container"}:
+            raise ValueError(f"unsupported Muteki worker backend: {self.config.worker_backend}")
+        if self.config.worker_backend == "cli" and cli_driver is None:
+            from .cli_driver import CLIDriver
+
+            cli_driver = CLIDriver(timeout_seconds=self.config.worker_timeout_seconds)
+        self.cli_driver = cli_driver
+        self.container_executor = container_executor or (ContainerExecutor(timeout_seconds=self.config.worker_timeout_seconds) if self.config.worker_backend == "container" else None)
+        self.control_receiver = control_receiver
         if self.pool.review_handler is None:
             self.pool.review_handler = self._review_runner
+        if self.config.worker_backend != "callback":
+            self.pool.external_runner = self._external_worker_runner
         self.phase = MutekiPhase.PREPARE
         self._worker_number = 0
         self._last_revision = -1
@@ -136,8 +158,49 @@ class MutekiCoordinator:
         result = ReviewWorker(self.graph, worker_id=job.worker_id).run()
         return WorkerOutcome(job.worker_id, "COMPLETED", result=f"facts={len(result.suspicious_fact_ids)};branches={len(result.branch_intent_ids)}")
 
+    async def _external_worker_runner(self, job: WorkerJob) -> WorkerOutcome:
+        workspace = str(job.environment.get("MUTEKI_WORKSPACE") or self.graph.db_path.parent.parent)
+        if not job.intent_id:
+            return WorkerOutcome(job.worker_id, "FAILED", result="EXTERNAL_WORKER_REQUIRES_INTENT")
+        if self.config.worker_backend == "cli" and self.cli_driver is not None:
+            result = await self.cli_driver.run_worker(
+                intent_id=job.intent_id,
+                engine=job.engine_id,
+                workspace=workspace,
+                blackboard=str(self.graph.db_path),
+                worker_id=job.worker_id,
+                timeout_seconds=self.config.worker_timeout_seconds,
+            )
+        elif self.config.worker_backend == "container" and self.container_executor is not None:
+            result = await self.container_executor.run_worker_async(
+                job.intent_id,
+                workspace,
+                str(self.graph.db_path),
+                engine=job.engine_id,
+                timeout=self.config.worker_timeout_seconds,
+                worker_id=job.worker_id,
+                challenge_id=self.graph.challenge_id,
+            )
+        else:
+            return WorkerOutcome(job.worker_id, "FAILED", result="EXTERNAL_WORKER_NOT_CONFIGURED")
+        status = "COMPLETED" if result.returncode == 0 else "FAILED"
+        detail = result.stderr or result.stdout
+        return WorkerOutcome(job.worker_id, status, result=detail[-2000:])
+
     def request_stop(self) -> None:
         self._stop_requested = True
+
+    async def send_control(self, worker_id: str, command: str, payload: dict | None = None) -> None:
+        """Forward an operator command when a control transport is configured."""
+
+        if self.control_receiver is None:
+            raise RuntimeError("Muteki control receiver is not configured")
+        await self.control_receiver.send_command(worker_id, command, payload)
+
+    async def broadcast_control(self, command: str, payload: dict | None = None) -> None:
+        if self.control_receiver is None:
+            raise RuntimeError("Muteki control receiver is not configured")
+        await self.control_receiver.broadcast(command, payload)
 
     async def finalize(self, *, reason: str) -> None:
         if self._finalized:

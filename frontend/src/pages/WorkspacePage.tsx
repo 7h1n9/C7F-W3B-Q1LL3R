@@ -30,6 +30,7 @@ import { useParams } from "react-router-dom";
 import { RunStatusTag, runStatusLabel } from "../components/RunStatusTag";
 import { api } from "../services/api";
 import type { FlagCandidate, RunEvent } from "../types/api";
+import { isTerminalRunStatus, solverModeLabel } from "../utils/run";
 
 const eventLabels: Record<string, string> = {
   "run.created": "任务已创建",
@@ -79,6 +80,23 @@ const eventLabels: Record<string, string> = {
   "solver.run.completed": "Solver v2 已完成",
   "solver.run.failed": "Solver v2 失败",
   "solver.step.completed": "Solver 步骤已完成",
+  "muteki.run.started": "Muteki 运行已启动",
+  "muteki.run_finished": "Muteki 运行已结束",
+  "muteki.phase_changed": "Muteki 阶段变更",
+  "muteki.prepare.engine.checked": "Muteki 引擎检查完成",
+  "muteki.fact_added": "Muteki 写入事实",
+  "muteki.dead_end": "Muteki 记录死路",
+  "muteki.intent_proposed": "Muteki 提出意图",
+  "muteki.intent_claimed": "Muteki Worker 领取意图",
+  "muteki.intent_released": "Muteki 释放意图",
+  "muteki.intent_concluded": "Muteki 意图完成",
+  "muteki.flag_candidate": "Muteki 发现 Flag 候选",
+  "muteki.flag_found": "Muteki 找到 Flag",
+  "muteki.poc_saved": "Muteki 保存 PoC",
+  "muteki.resource_locked": "Muteki 锁定资源",
+  "muteki.resource_released": "Muteki 释放资源",
+  "muteki.worker_started": "Muteki Worker 已启动",
+  "muteki.worker_finished": "Muteki Worker 已结束",
 };
 
 function eventColor(type: string): string {
@@ -149,15 +167,19 @@ export function WorkspacePage() {
         : 2000;
     },
   });
-  const solverState = useQuery({ queryKey: ["solver-state", id], queryFn: () => api.getSolverState(id) });
+  const liveRun = Boolean(run.data && !isTerminalRunStatus(run.data.status));
+  const liveRefetchInterval = liveRun ? 2500 : false;
+  const solverState = useQuery({ queryKey: ["solver-state", id], queryFn: () => api.getSolverState(id), refetchInterval: liveRefetchInterval });
   const diagnostics = useQuery({
     queryKey: ["run-diagnostics", id],
     queryFn: () => api.getRunDiagnostics(id),
+    refetchInterval: liveRefetchInterval,
   });
-  const tools = useQuery({ queryKey: ["tool-calls", id], queryFn: () => api.getToolCalls(id) });
-  const observations = useQuery({ queryKey: ["observations", id], queryFn: () => api.getObservations(id) });
-  const artifacts = useQuery({ queryKey: ["artifacts", id], queryFn: () => api.getArtifacts(id) });
-  const flags = useQuery({ queryKey: ["flags", id], queryFn: () => api.getFlags(id) });
+  const health = useQuery({ queryKey: ["run-health", id], queryFn: () => api.getRunHealth(id), refetchInterval: liveRefetchInterval });
+  const tools = useQuery({ queryKey: ["tool-calls", id], queryFn: () => api.getToolCalls(id), refetchInterval: liveRefetchInterval });
+  const observations = useQuery({ queryKey: ["observations", id], queryFn: () => api.getObservations(id), refetchInterval: liveRefetchInterval });
+  const artifacts = useQuery({ queryKey: ["artifacts", id], queryFn: () => api.getArtifacts(id), refetchInterval: liveRefetchInterval });
+  const flags = useQuery({ queryKey: ["flags", id], queryFn: () => api.getFlags(id), refetchInterval: liveRefetchInterval });
   const report = useQuery({ queryKey: ["report", id], queryFn: () => api.getReport(id), retry: false });
 
   const start = useMutation({
@@ -207,7 +229,7 @@ export function WorkspacePage() {
     let refreshTimer: ReturnType<typeof setTimeout> | undefined;
     const pendingRefresh = new Set<string>();
     const scheduleDataRefresh = (eventType: string) => {
-      const liveDataEvent = eventType.startsWith("tool.") || eventType.startsWith("artifact.") || eventType.startsWith("flag.") || eventType.startsWith("solver.") || eventType === "agent.message";
+      const liveDataEvent = eventType.startsWith("tool.") || eventType.startsWith("artifact.") || eventType.startsWith("flag.") || eventType.startsWith("solver.") || eventType.startsWith("muteki.") || eventType === "agent.message";
       if (!liveDataEvent) return;
       pendingRefresh.add(eventType);
       if (refreshTimer !== undefined) return;
@@ -231,15 +253,20 @@ export function WorkspacePage() {
         if (eventTypes.includes("agent.message")) {
           void client.invalidateQueries({ queryKey: ["solver-state", id] });
         }
-        if (eventTypes.some((type) => type.startsWith("solver."))) {
+        if (eventTypes.some((type) => type.startsWith("solver.") || type.startsWith("muteki."))) {
           void client.invalidateQueries({ queryKey: ["solver-state", id] });
           void client.invalidateQueries({ queryKey: ["run-diagnostics", id] });
-          if (eventTypes.some((type) => type === "solver.tool.called" || type === "solver.observation.received" || type.startsWith("solver.action."))) {
+          void client.invalidateQueries({ queryKey: ["run-health", id] });
+          if (eventTypes.some((type) => type === "solver.tool.called" || type === "solver.observation.received" || type.startsWith("solver.action.") || type.startsWith("muteki."))) {
             void client.invalidateQueries({ queryKey: ["tool-calls", id] });
             void client.invalidateQueries({ queryKey: ["observations", id] });
           }
-          if (eventTypes.includes("solver.completion.evaluated") || eventTypes.includes("solver.run.completed")) {
+          if (eventTypes.includes("solver.completion.evaluated") || eventTypes.includes("solver.run.completed") || eventTypes.includes("muteki.run_finished") || eventTypes.includes("muteki.flag_found")) {
             void client.invalidateQueries({ queryKey: ["report", id] });
+          }
+          if (eventTypes.some((type) => type.startsWith("muteki."))) {
+            void client.invalidateQueries({ queryKey: ["run-health", id] });
+            void client.invalidateQueries({ queryKey: ["solver-state", id] });
           }
         }
       }, 250);
@@ -262,6 +289,7 @@ export function WorkspacePage() {
         (event) =>
           event.event_type.startsWith("tool.") ||
           event.event_type.startsWith("solver.") ||
+          event.event_type.startsWith("muteki.") ||
           event.event_type.startsWith("skill.") ||
           event.event_type.includes("hypothesis") ||
           event.event_type.includes("artifact") ||
@@ -344,7 +372,7 @@ export function WorkspacePage() {
             {
               key: "solver-mode",
               label: "解题架构",
-              children: run.data?.solver_mode === "solver_v2" ? "Solver v2" : run.data?.solver_mode === "multi_agent_v1" ? "Multi-Agent v1" : "Single-Agent 兼容模式",
+              children: solverModeLabel(run.data?.solver_mode),
             },
             { key: "model", label: "模型", children: run.data?.model_name ?? "—" },
             {
@@ -357,6 +385,21 @@ export function WorkspacePage() {
               label: "活跃技能",
               children: (run.data?.active_skill_names ?? []).length ? (run.data?.active_skill_names ?? []).join("、") : "—",
             },
+          ]}
+        />
+      </Card>
+
+      <Card className="panel-card" title="运行健康" style={{ marginTop: 18 }}>
+        <Descriptions
+          column={{ xs: 1, md: 2, xl: 4 }}
+          items={[
+            { key: "next-action", label: "下一步", children: health.data?.next_action ?? "—" },
+            { key: "lease", label: "执行租约", children: health.data?.runtime.active_lease ? "活动中" : "无活动租约" },
+            { key: "worker", label: "当前执行", children: health.data?.runtime.running_tool ? "工具执行中" : health.data?.runtime.running_task ? "Worker 执行中" : "空闲" },
+            { key: "last-tool", label: "最近工具", children: health.data?.progress.last_tool ? `${health.data.progress.last_tool} (${health.data.progress.last_tool_status ?? "未知"})` : "—" },
+            { key: "last-fact", label: "最近事实", children: health.data?.progress.last_fact ?? "—" },
+            { key: "no-progress", label: "连续无进展", children: health.data?.progress.no_progress_count ?? 0 },
+            { key: "error", label: "最近错误", children: health.data?.last_error_code ?? "—" },
           ]}
         />
       </Card>

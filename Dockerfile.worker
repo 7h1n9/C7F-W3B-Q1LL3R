@@ -1,0 +1,12 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+COPY backend/ /app/backend/
+COPY kali-runner/ /app/kali-runner/
+
+RUN pip install --no-cache-dir -e /app/backend
+
+ENV PYTHONPATH=/app/backend
+ENV PYTHONDONTWRITEBYTECODE=1
+
+ENTRYPOINT ["python", "-m", "app.solver.muteki.cli_driver"]

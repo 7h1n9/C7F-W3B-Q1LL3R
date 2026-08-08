@@ -47,12 +47,13 @@ ReviewHandler = Callable[[WorkerJob], Awaitable[WorkerOutcome]]
 class MutekiWorkerPool:
     """One-shot worker tasks with explicit capacity and cancellation."""
 
-    def __init__(self, graph: MutekiGraph, runner: WorkerRunner, *, max_workers: int = 10, review_handler: ReviewHandler | None = None, engine_pool: Any | None = None) -> None:
+    def __init__(self, graph: MutekiGraph, runner: WorkerRunner, *, max_workers: int = 10, review_handler: ReviewHandler | None = None, engine_pool: Any | None = None, external_runner: WorkerRunner | None = None) -> None:
         self.graph = graph
         self.runner = runner
         self.max_workers = max(1, max_workers)
         self.review_handler = review_handler
         self.engine_pool = engine_pool
+        self.external_runner = external_runner
         self._tasks: dict[str, asyncio.Task[WorkerOutcome]] = {}
         self._jobs: dict[str, WorkerJob] = {}
 
@@ -84,6 +85,8 @@ class MutekiWorkerPool:
         try:
             if job.role == "review" and self.review_handler is not None:
                 return await self.review_handler(job)
+            if self.external_runner is not None and job.intent_id:
+                return await self.external_runner(job)
             if self.engine_pool is not None:
                 intent = Intent(
                     job.intent_id or f"worker-{job.worker_id}",

@@ -6,6 +6,7 @@ from collections.abc import AsyncIterator
 
 from ...graph import Intent
 from ..engine import WorkerEngine, WorkerResult, intent_prompt
+from .cli import CliWorkerEngine
 
 
 class CodexEngine(WorkerEngine):
@@ -54,4 +55,17 @@ async def _as_async_iterator(value) -> AsyncIterator[object]:
             yield result
 
 
-__all__ = ["CodexEngine"]
+
+class CodexCliEngine(CliWorkerEngine):
+    """Headless Codex CLI adapter used by the standalone process driver."""
+
+    binary = "codex"
+
+    def engine_type(self) -> str:
+        return "codex"
+
+    def _command(self, prompt: str) -> list[str]:
+        return [self.executable, "exec", "--json", "--dangerously-bypass-approvals-and-sandbox", "--", prompt]
+
+
+__all__ = ["CodexCliEngine", "CodexEngine"]

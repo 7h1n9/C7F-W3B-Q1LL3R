@@ -141,6 +141,8 @@ class MutekiGraph:
                     self._db.execute("UPDATE intents SET status='claimed', claimed_by=?, lease_until=? WHERE intent_id=?", (row["actor"], payload.get("lease_until"), payload.get("intent_id")))
                 elif kind == EventType.INTENT_CONCLUDED:
                     self._db.execute("UPDATE intents SET status='done', lease_until=NULL WHERE intent_id=?", (payload.get("intent_id"),))
+                elif kind == EventType.INTENT_RELEASED:
+                    self._db.execute("UPDATE intents SET status='open', claimed_by=NULL, lease_until=NULL WHERE intent_id=?", (payload.get("intent_id"),))
                 elif kind in {EventType.FLAG_FOUND, EventType.FLAG_CANDIDATE}:
                     self._db.execute("INSERT OR IGNORE INTO flags VALUES (?, ?, ?, ?, ?)", (row["sequence"], payload.get("flag", ""), row["actor"], int(kind == EventType.FLAG_FOUND), row["timestamp"]))
                 elif kind == EventType.POC_SAVED:
@@ -301,6 +303,18 @@ class MutekiGraph:
                 self._db.rollback()
                 return False
             self._append(actor, EventType.INTENT_CONCLUDED, {"intent_id": intent_id, "result": result})
+            self._db.commit()
+            return True
+
+    def release_intent(self, *, worker: str, intent_id: str) -> bool:
+        """Return a claimed intent to the open queue for pause/recovery."""
+
+        with self._lock:
+            cursor = self._db.execute("UPDATE intents SET status='open', claimed_by=NULL, lease_until=NULL WHERE intent_id=? AND status='claimed' AND claimed_by=?", (intent_id, worker))
+            if cursor.rowcount != 1:
+                self._db.rollback()
+                return False
+            self._append(worker, EventType.INTENT_RELEASED, {"intent_id": intent_id})
             self._db.commit()
             return True
 

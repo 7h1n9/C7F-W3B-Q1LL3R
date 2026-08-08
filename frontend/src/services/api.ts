@@ -1,4 +1,4 @@
-import type { ApiEnvelope, Challenge, ChallengeConversation, ChallengeMessage, FlagCandidate, RunDiagnostics, RunEvent, Skill, SolveRun, SolverState } from "../types/api";
+import type { ApiEnvelope, Challenge, ChallengeConversation, ChallengeMessage, FlagCandidate, RunDiagnostics, RunEvent, RunHealth, Skill, SolveRun, SolverState } from "../types/api";
 
 const base = import.meta.env.VITE_API_BASE_URL ?? "/api/v1";
 const runEventTypes = [
@@ -14,6 +14,11 @@ const runEventTypes = [
   "solver.action.completed", "solver.action.failed", "solver.action.interrupted", "solver.action.recovered",
   "solver.tool.called", "solver.observation.received", "solver.completion.evaluated", "solver.run.completed",
   "solver.run.failed", "solver.step.completed",
+  "muteki.run.started", "muteki.run_finished", "muteki.phase_changed", "muteki.prepare.engine.checked",
+  "muteki.fact_added", "muteki.dead_end", "muteki.intent_proposed", "muteki.intent_claimed",
+  "muteki.intent_released", "muteki.intent_concluded", "muteki.flag_candidate", "muteki.flag_found",
+  "muteki.poc_saved", "muteki.resource_locked", "muteki.resource_released", "muteki.worker_started",
+  "muteki.worker_finished",
 ];
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   let response: Response;
@@ -63,6 +68,7 @@ export const api = {
   getRun: (id: string) => request<SolveRun>(`/runs/${id}`),
   getSolverState: (id: string) => request<SolverState>(`/runs/${id}/solver-state`),
   getRunDiagnostics: (id: string) => request<RunDiagnostics>(`/runs/${id}/diagnostics`),
+  getRunHealth: (id: string) => request<RunHealth>(`/runs/${id}/health`),
   listRunDiagnostics: (limit = 25) => request<Array<{ run_id: string } & RunDiagnostics>>(`/diagnostics/runs?limit=${limit}`),
   createRun: (challengeId: string, payload: Record<string, unknown>) => request<SolveRun>(`/challenges/${challengeId}/runs`, { method: "POST", body: JSON.stringify(payload) }),
   startRun: (id: string) => request<{ run_id: string; status: string }>(`/runs/${id}/start`, { method: "POST" }),
@@ -86,5 +92,19 @@ export const api = {
   getReport: (id: string) => request<{ content: string; path: string }>(`/runs/${id}/report`),
   continueRun: (id: string, message: string) => request<{ run_id: string }>(`/runs/${id}/continue`, { method: "POST", body: JSON.stringify({ message }) }),
   sendRunMessage: (id: string, content: string) => request<{ accepted: boolean; revision: number; status: string; message: string }>(`/runs/${id}/messages`, { method: "POST", body: JSON.stringify({ content }) }),
-  streamRunEvents: (id: string, onEvent: (event: RunEvent) => void) => { const source = new EventSource(`${base}/runs/${id}/events`); const handler = (message: MessageEvent<string>) => onEvent(JSON.parse(message.data) as RunEvent); source.onmessage = handler; runEventTypes.forEach((type) => source.addEventListener(type, handler)); return source; },
+  streamRunEvents: (id: string, onEvent: (event: RunEvent) => void) => {
+    const source = new EventSource(`${base}/runs/${id}/events`);
+    const handler = (message: MessageEvent<string>) => {
+      if (!message.data) return;
+      try {
+        onEvent(JSON.parse(message.data) as RunEvent);
+      } catch {
+        // Ignore malformed/heartbeat frames; the run-health poll remains the
+        // authoritative fallback for a temporarily degraded event stream.
+      }
+    };
+    source.onmessage = handler;
+    runEventTypes.forEach((type) => source.addEventListener(type, handler));
+    return source;
+  },
 };

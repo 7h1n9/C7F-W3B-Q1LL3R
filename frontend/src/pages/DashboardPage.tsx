@@ -5,6 +5,7 @@ import type { CSSProperties } from "react";
 import { Link } from "react-router-dom";
 import { RunStatusTag } from "../components/RunStatusTag";
 import { api } from "../services/api";
+import { isTerminalRunStatus } from "../utils/run";
 
 const readinessLevelLabels: Record<string, string> = {
   NOT_READY: "尚未就绪",
@@ -43,7 +44,7 @@ export function DashboardPage() {
   const runs = useQuery({ queryKey: ["runs"], queryFn: api.listRuns });
   const readiness = useQuery({ queryKey: ["range-readiness"], queryFn: api.getReadiness, refetchInterval: 30000 });
   const allRuns = runs.data ?? [];
-  const activeRuns = allRuns.filter((run) => !["CREATED", "CANCELLED"].includes(run.status) && !run.status.startsWith("COMPLETED") && !run.status.startsWith("FAILED"));
+  const activeRuns = allRuns.filter((run) => !["CREATED", "CANCELLED"].includes(run.status) && !isTerminalRunStatus(run.status));
   const checks = readiness.data?.checks ?? [];
   const healthyChecks = checks.filter((check) => check.ok).length;
   const readinessPercent = checks.length ? Math.round((healthyChecks / checks.length) * 100) : 0;
