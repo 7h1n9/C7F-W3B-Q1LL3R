@@ -345,9 +345,13 @@ async def create_run(
 
 @router.get("/runs")
 async def list_runs(session: AsyncSession = Depends(get_session)) -> dict:
-    items = list(
-        (await session.scalars(select(SolveRun).order_by(SolveRun.created_at.desc()))).all()
-    )
+    # ``SolveRun`` contains several JSON/Text columns.  Sorting the complete
+    # rows in MySQL can exhaust the server sort buffer after a long campaign;
+    # fetch by the primary-key scan and apply the presentation order in the
+    # API process instead.  This keeps the endpoint schema and response order
+    # unchanged without requiring a migration.
+    items = list((await session.scalars(select(SolveRun))).all())
+    items.sort(key=lambda item: item.created_at, reverse=True)
     payload = []
     for item in items:
         # The list view must stay lightweight.  Codex materialization and deep

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from typing import Protocol
+from typing import Any, Protocol
 from urllib.parse import urljoin
 
 from .action import ActionIntent
@@ -23,6 +23,32 @@ class Planner(Protocol):
 class DeterministicPlanner:
     """Small local Planner Adapter; no model, tool, or runtime integration."""
 
+    FAILURE_THRESHOLD = 3
+    STRATEGY_CHAINS: dict[str, tuple[str, ...]] = {
+        "SQLInjection": ("BASELINE", "VALIDATION", "EXPLOITATION", "EXTRACTION"),
+        "FileUpload": ("DISCOVERY", "BYPASS", "EXECUTION", "VERIFICATION"),
+        "XSS": ("INPUT_MAPPING", "CONTEXT_ANALYSIS", "PAYLOAD_DELIVERY", "VALIDATION"),
+        "SSRF": ("URL_DISCOVERY", "PROTOCOL_TEST", "INTERNAL_PROBE", "VERIFICATION"),
+        "CommandInjection": (
+            "PARAMETER_IDENTIFICATION",
+            "DELIMITER_TEST",
+            "EXECUTION",
+            "VERIFICATION",
+        ),
+        "PrivilegeBypass": ("ROLE_ANALYSIS", "BOUNDARY_TEST", "IDOR_CHECK", "VALIDATION"),
+        "JWT": ("TOKEN_DISCOVERY", "ALGORITHM_TEST", "SIGNATURE_TEST", "MODIFICATION"),
+        "InfoDisclosure": ("PATH_SENSING", "SOURCE_ACCESS", "DATA_EXTRACTION", "REPORT"),
+    }
+    STRATEGY_ACTIONS: dict[str, tuple[str, ...]] = {
+        "FileUpload": ("file_upload", "multipart_request", "content_discovery", "http_request"),
+        "XSS": ("reflection_test", "context_analysis", "payload_delivery", "http_request"),
+        "SSRF": ("url_discovery", "protocol_test", "internal_probe", "http_request"),
+        "CommandInjection": ("parameter_identification", "delimiter_test", "command_execute", "http_request"),
+        "PrivilegeBypass": ("role_analysis", "boundary_test", "idor_check", "http_request"),
+        "JWT": ("token_discovery", "algorithm_test", "signature_test", "token_modify"),
+        "InfoDisclosure": ("path_sensing", "source_access", "data_extraction", "http_request"),
+    }
+
     def plan(
         self,
         state: BlackboardState,
@@ -38,7 +64,9 @@ class DeterministicPlanner:
             return None
 
         descriptors = list(allowed_actions)
-        descriptor = self._select_descriptor(state, descriptors)
+        strategy = self._select_strategy(state)
+        strategy_descriptor = self._strategy_descriptor(state, descriptors, strategy)
+        descriptor = strategy_descriptor or self._select_descriptor(state, descriptors)
         if isinstance(descriptor, Mapping):
             action_name = str(descriptor.get("name") or "")
             purpose = str(descriptor.get("purpose") or action_name)
@@ -78,12 +106,138 @@ class DeterministicPlanner:
         elif action_name == "script_run":
             parameters.update(self._script_parameters(state))
 
+        metadata: dict[str, Any] = {"phase": state.phase, "source": "deterministic_planner"}
+        if strategy is not None:
+            chain = self.STRATEGY_CHAINS.get(strategy["type"], ())
+            metadata.update(
+                {
+                    "vulnerability_type": strategy["type"],
+                    "strategy_phase": strategy.get("phase") or (chain[0] if chain else "GENERIC"),
+                    "strategy_chain": list(chain),
+                    "strategy_index": strategy.get("index", 0),
+                }
+            )
         return ActionIntent(
             action_name=action_name,
             reason=f"select allowed action: {purpose}",
             parameters=parameters,
-            metadata={"phase": state.phase, "source": "deterministic_planner"},
+            metadata=metadata,
         )
+
+    def apply_feedback(
+        self,
+        state: BlackboardState,
+        *,
+        success: bool,
+        new_evidence: bool,
+    ) -> BlackboardState:
+        """Persist strategy failure accounting without executing or authorizing actions."""
+        hypotheses = [dict(item) for item in state.vulnerability_hypotheses]
+        strategy = self._select_strategy(state)
+        if not hypotheses or strategy is None or strategy["type"] == "GENERIC":
+            return state.copy_for_read()
+
+        active_type = str(strategy["type"])
+        current = next((item for item in hypotheses if item.get("type") == active_type), None)
+        if current is None:
+            return state.copy_for_read()
+        failures = int(current.get("failed_attempts") or 0)
+        if not success or not new_evidence:
+            failures += 1
+        current["failed_attempts"] = failures
+
+        control = dict(state.control)
+        control["strategy_attempts"] = failures
+        control["active_vulnerability_type"] = active_type
+        if success and new_evidence and active_type != "SQLInjection":
+            chain = self.STRATEGY_CHAINS.get(active_type, ())
+            current_phase = str(control.get("strategy_phase") or "")
+            current_index = chain.index(current_phase) if current_phase in chain else 0
+            if current_index + 1 < len(chain):
+                control.update(
+                    {
+                        "strategy_phase": chain[current_index + 1],
+                        "strategy_attempts": 0,
+                    }
+                )
+        if failures >= self.FAILURE_THRESHOLD:
+            current["tested"] = True
+            next_hypothesis = self._next_hypothesis(hypotheses, active_type)
+            if next_hypothesis is not None:
+                next_type = str(next_hypothesis["type"])
+                control.update(
+                    {
+                        "active_vulnerability_type": next_type,
+                        "strategy_phase": self.STRATEGY_CHAINS.get(next_type, ("GENERIC",))[0],
+                        "strategy_attempts": 0,
+                        "strategy_switch_count": int(control.get("strategy_switch_count") or 0) + 1,
+                        "strategy_switched_from": active_type,
+                    }
+                )
+            else:
+                control.update(
+                    {
+                        "active_vulnerability_type": None,
+                        "generic_fallback": True,
+                        "reassessment_requested": True,
+                    }
+                )
+        return state.model_copy(
+            update={"vulnerability_hypotheses": hypotheses, "control": control},
+            deep=True,
+        )
+
+    def _select_strategy(self, state: BlackboardState) -> dict[str, Any] | None:
+        if not state.vulnerability_hypotheses:
+            return None
+        active = str(state.control.get("active_vulnerability_type") or "")
+        candidates = [
+            item
+            for item in state.vulnerability_hypotheses
+            if isinstance(item, Mapping)
+            and float(item.get("confidence") or 0) > 0.3
+            and item.get("tested") is not True
+            and int(item.get("failed_attempts") or 0) < self.FAILURE_THRESHOLD
+        ]
+        candidates.sort(key=lambda item: (-float(item.get("confidence") or 0), str(item.get("type") or "")))
+        selected = next((item for item in candidates if str(item.get("type")) == active), None)
+        selected = selected or (candidates[0] if candidates else None)
+        if selected is None:
+            return {"type": "GENERIC", "phase": "GENERIC", "index": 0}
+        vulnerability_type = str(selected.get("type") or "GENERIC")
+        chain = self.STRATEGY_CHAINS.get(vulnerability_type, ("GENERIC",))
+        phase = str(state.control.get("strategy_phase") or "")
+        index = chain.index(phase) if phase in chain else 0
+        return {"type": vulnerability_type, "phase": chain[index], "index": index}
+
+    def _strategy_descriptor(
+        self,
+        state: BlackboardState,
+        descriptors: list[AllowedAction],
+        strategy: dict[str, Any] | None,
+    ) -> AllowedAction | None:
+        if strategy is None or strategy["type"] == "SQLInjection":
+            return None
+        names = [str(item.get("name") if isinstance(item, Mapping) else item) for item in descriptors]
+        preferred = self.STRATEGY_ACTIONS.get(strategy["type"], ("http_request",))
+        for action_name in preferred:
+            if action_name in names:
+                return descriptors[names.index(action_name)]
+        return descriptors[0] if descriptors else None
+
+    def _next_hypothesis(
+        self,
+        hypotheses: list[dict[str, Any]],
+        active_type: str,
+    ) -> dict[str, Any] | None:
+        candidates = [
+            item
+            for item in hypotheses
+            if str(item.get("type") or "") != active_type
+            and item.get("tested") is not True
+            and float(item.get("confidence") or 0) > 0.3
+        ]
+        return max(candidates, key=lambda item: float(item.get("confidence") or 0), default=None)
 
     @staticmethod
     def _select_descriptor(state: BlackboardState, descriptors: list[AllowedAction]) -> AllowedAction:

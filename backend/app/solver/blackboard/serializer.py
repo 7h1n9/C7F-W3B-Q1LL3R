@@ -30,6 +30,10 @@ def deserialize_state(payload: Mapping[str, Any]) -> BlackboardState:
     if "hypotheses" in data and "hypotheses" not in knowledge:
         knowledge["hypotheses"] = data["hypotheses"]
     data["knowledge"] = knowledge
+    if "vulnerability_hypotheses" not in data:
+        data["vulnerability_hypotheses"] = list(
+            knowledge.get("vulnerability_hypotheses") or []
+        )
 
     control = dict(data.get("control") or {})
     if "allowed_actions" in data and "allowed_actions" not in control:
@@ -39,5 +43,6 @@ def deserialize_state(payload: Mapping[str, Any]) -> BlackboardState:
     data.setdefault("goal", "")
     data.setdefault("history", [])
     data.setdefault("evidence_refs", [])
+    data.setdefault("vulnerability_hypotheses", [])
     data.setdefault("version", 0)
     return BlackboardState.model_validate(data)

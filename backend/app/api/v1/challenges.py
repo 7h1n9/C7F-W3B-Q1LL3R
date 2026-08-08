@@ -38,10 +38,10 @@ async def _challenge_summary(session: AsyncSession, challenge: Challenge) -> dic
             await session.scalars(
                 select(SolveRun)
                 .where(SolveRun.challenge_id == challenge.id)
-                .order_by(SolveRun.created_at.desc())
             )
         ).all()
     )
+    runs.sort(key=lambda item: item.created_at, reverse=True)
     latest = runs[0] if runs else None
     return {
         "run_count": len(runs),
@@ -54,9 +54,12 @@ async def _challenge_summary(session: AsyncSession, challenge: Challenge) -> dic
 
 @router.get("")
 async def list_challenges(session: AsyncSession = Depends(get_session)) -> dict:
-    items = list(
-        (await session.scalars(select(Challenge).order_by(Challenge.created_at.desc()))).all()
-    )
+    # Avoid sorting full JSON/Text rows inside MySQL.  Large challenge/run
+    # histories can exceed the server sort buffer even though the UI only
+    # needs the final order, so fetch the rows and sort the small ORM result
+    # in the application process.
+    items = list((await session.scalars(select(Challenge))).all())
+    items.sort(key=lambda item: item.created_at, reverse=True)
     payload = []
     for item in items:
         payload.append(ChallengeRead.model_validate({**read(item).model_dump(), **await _challenge_summary(session, item)}))

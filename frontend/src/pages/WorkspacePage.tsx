@@ -65,12 +65,26 @@ const eventLabels: Record<string, string> = {
   "report.completed": "报告生成完成",
   "run.completed": "任务完成",
   "run.failed": "任务失败",
+  "solver.run.started": "Solver v2 已启动",
+  "solver.action.planned": "Solver 已规划动作",
+  "solver.action.authorized": "动作已通过授权",
+  "solver.action.started": "Solver 动作已开始",
+  "solver.action.completed": "Solver 动作已完成",
+  "solver.action.failed": "Solver 动作失败",
+  "solver.action.interrupted": "Solver 动作中断",
+  "solver.action.recovered": "Solver 动作已恢复",
+  "solver.tool.called": "Solver 已调用工具",
+  "solver.observation.received": "Solver 已收到观察结果",
+  "solver.completion.evaluated": "完成门已评估",
+  "solver.run.completed": "Solver v2 已完成",
+  "solver.run.failed": "Solver v2 失败",
+  "solver.step.completed": "Solver 步骤已完成",
 };
 
 function eventColor(type: string): string {
   if (type.includes("failed")) return "red";
   if (type.includes("completed") || type.includes("verified")) return "green";
-  if (type.includes("tool") || type.includes("flag")) return "blue";
+  if (type.includes("tool") || type.includes("flag") || type.includes("authorized") || type.includes("started")) return "blue";
   if (type.includes("skill")) return "cyan";
   return "gray";
 }
@@ -193,7 +207,7 @@ export function WorkspacePage() {
     let refreshTimer: ReturnType<typeof setTimeout> | undefined;
     const pendingRefresh = new Set<string>();
     const scheduleDataRefresh = (eventType: string) => {
-      const liveDataEvent = eventType.startsWith("tool.") || eventType.startsWith("artifact.") || eventType.startsWith("flag.") || eventType === "agent.message";
+      const liveDataEvent = eventType.startsWith("tool.") || eventType.startsWith("artifact.") || eventType.startsWith("flag.") || eventType.startsWith("solver.") || eventType === "agent.message";
       if (!liveDataEvent) return;
       pendingRefresh.add(eventType);
       if (refreshTimer !== undefined) return;
@@ -217,6 +231,17 @@ export function WorkspacePage() {
         if (eventTypes.includes("agent.message")) {
           void client.invalidateQueries({ queryKey: ["solver-state", id] });
         }
+        if (eventTypes.some((type) => type.startsWith("solver."))) {
+          void client.invalidateQueries({ queryKey: ["solver-state", id] });
+          void client.invalidateQueries({ queryKey: ["run-diagnostics", id] });
+          if (eventTypes.some((type) => type === "solver.tool.called" || type === "solver.observation.received" || type.startsWith("solver.action."))) {
+            void client.invalidateQueries({ queryKey: ["tool-calls", id] });
+            void client.invalidateQueries({ queryKey: ["observations", id] });
+          }
+          if (eventTypes.includes("solver.completion.evaluated") || eventTypes.includes("solver.run.completed")) {
+            void client.invalidateQueries({ queryKey: ["report", id] });
+          }
+        }
       }, 250);
     };
     const source = api.streamRunEvents(id, (event) => {
@@ -236,6 +261,7 @@ export function WorkspacePage() {
       events.filter(
         (event) =>
           event.event_type.startsWith("tool.") ||
+          event.event_type.startsWith("solver.") ||
           event.event_type.startsWith("skill.") ||
           event.event_type.includes("hypothesis") ||
           event.event_type.includes("artifact") ||
@@ -318,7 +344,7 @@ export function WorkspacePage() {
             {
               key: "solver-mode",
               label: "解题架构",
-              children: run.data?.solver_mode === "multi_agent_v1" ? "Multi-Agent v1" : "Single-Agent 兼容模式",
+              children: run.data?.solver_mode === "solver_v2" ? "Solver v2" : run.data?.solver_mode === "multi_agent_v1" ? "Multi-Agent v1" : "Single-Agent 兼容模式",
             },
             { key: "model", label: "模型", children: run.data?.model_name ?? "—" },
             {

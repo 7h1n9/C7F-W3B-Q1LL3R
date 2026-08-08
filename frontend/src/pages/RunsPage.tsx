@@ -141,7 +141,7 @@ export function RunsPage() {
             {
               title: "架构",
               dataIndex: "solver_mode",
-              render: (mode: string) => (mode === "multi_agent_v1" ? "Multi-Agent v1" : "Single-Agent"),
+              render: (mode: string) => mode === "solver_v2" ? "Solver v2" : mode === "multi_agent_v1" ? "Multi-Agent v1" : "Single-Agent",
             },
             {
               title: "状态",

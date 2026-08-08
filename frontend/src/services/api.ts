@@ -1,7 +1,20 @@
 import type { ApiEnvelope, Challenge, ChallengeConversation, ChallengeMessage, FlagCandidate, RunDiagnostics, RunEvent, Skill, SolveRun, SolverState } from "../types/api";
 
 const base = import.meta.env.VITE_API_BASE_URL ?? "/api/v1";
-const runEventTypes = ["run.created", "run.started", "run.restarted", "run.status_changed", "phase.corrected", "agent.message", "agent.plan_created", "agent.hypothesis_created", "agent.hypothesis_updated", "agent.action_requested", "agent.action_rejected", "agent.action_completed", "agent.replan_required", "agent.progress_detected", "agent.no_progress", "skill.requested", "skill.snapshot_created", "skill.activated", "skill.deactivated", "skill.declined", "skill.recommended", "skill.activation_rejected", "tool.requested", "tool.started", "tool.output", "tool.completed", "tool.failed", "artifact.created", "flag.candidate_found", "flag.reviewed", "flag.verified", "report.started", "report.completed", "run.completed", "run.failed"];
+const runEventTypes = [
+  "run.created", "run.started", "run.restarted", "run.status_changed", "phase.corrected",
+  "agent.message", "agent.plan_created", "agent.hypothesis_created", "agent.hypothesis_updated",
+  "agent.action_requested", "agent.action_rejected", "agent.action_completed", "agent.replan_required",
+  "agent.progress_detected", "agent.no_progress", "skill.requested", "skill.snapshot_created",
+  "skill.activated", "skill.deactivated", "skill.declined", "skill.recommended", "skill.activation_rejected",
+  "tool.requested", "tool.started", "tool.output", "tool.completed", "tool.failed", "artifact.created",
+  "flag.candidate_found", "flag.reviewed", "flag.verified", "report.started", "report.completed",
+  "run.completed", "run.failed",
+  "solver.run.started", "solver.action.planned", "solver.action.authorized", "solver.action.started",
+  "solver.action.completed", "solver.action.failed", "solver.action.interrupted", "solver.action.recovered",
+  "solver.tool.called", "solver.observation.received", "solver.completion.evaluated", "solver.run.completed",
+  "solver.run.failed", "solver.step.completed",
+];
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   let response: Response;
   try {

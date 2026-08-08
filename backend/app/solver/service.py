@@ -30,6 +30,7 @@ from app.services.run_attempts import run_attempt_service
 
 from .action import ActionIntent
 from .blackboard import BlackboardState, SolveRunBlackboardStore
+from .classification import VulnerabilityClassifier
 from .completion import CompletionStatus, SolverCompletionEvaluator
 from .context import RunContext
 from .context_factory import RunContextFactory
@@ -176,6 +177,8 @@ class SolverRuntimeService:
                     run_context=context,
                     action_authorizer=authorizer,
                     reducer=WebObservationReducer(),
+                    classifier=VulnerabilityClassifier(),
+                    challenge_context=context.challenge,
                 )
             else:
                 loop = self.loop_factory(
@@ -187,6 +190,8 @@ class SolverRuntimeService:
                     run_context=context,
                     action_authorizer=authorizer,
                     reducer=WebObservationReducer(),
+                    classifier=VulnerabilityClassifier(),
+                    challenge_context=context.challenge,
                 )
 
             await self._prepare_run(session, run)

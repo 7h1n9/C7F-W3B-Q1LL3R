@@ -29,7 +29,15 @@ class BlackboardRepository(Protocol):
 def apply_patch(state: BlackboardState, patch: Mapping[str, Any]) -> BlackboardState:
     """Apply a narrow, typed patch without exposing ORM rows to callers."""
     data = state.model_dump(mode="python")
-    for field in ("phase", "goal", "knowledge", "control", "history", "evidence_refs"):
+    for field in (
+        "phase",
+        "goal",
+        "knowledge",
+        "control",
+        "history",
+        "evidence_refs",
+        "vulnerability_hypotheses",
+    ):
         if field in patch:
             data[field] = patch[field]
     if "knowledge_merge" in patch:

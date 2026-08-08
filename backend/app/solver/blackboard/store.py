@@ -43,6 +43,7 @@ class Blackboard:
         *,
         phase: str = "BASELINE",
         allowed_actions: list[str] | None = None,
+        vulnerability_hypotheses: list[Mapping[str, Any]] | None = None,
     ) -> BlackboardState:
         existing = self.store.load(run_id)
         if existing is not None:
@@ -52,6 +53,7 @@ class Blackboard:
             phase=phase,
             control={"allowed_actions": list(allowed_actions or [])},
             knowledge={"facts": [], "hypotheses": []},
+            vulnerability_hypotheses=deepcopy(list(vulnerability_hypotheses or [])),
         )
         return self.store.save(state)
 
@@ -69,6 +71,7 @@ class Blackboard:
         allowed_actions: list[str] | None = None,
         facts: list[Mapping[str, Any]] | None = None,
         hypotheses: list[Mapping[str, Any]] | None = None,
+        vulnerability_hypotheses: list[Mapping[str, Any]] | None = None,
         evidence_refs: list[str] | None = None,
         event: Mapping[str, Any] | None = None,
     ) -> BlackboardState:
@@ -83,6 +86,8 @@ class Blackboard:
             next_state.knowledge.setdefault("facts", []).extend(deepcopy(list(facts)))
         if hypotheses:
             next_state.knowledge.setdefault("hypotheses", []).extend(deepcopy(list(hypotheses)))
+        if vulnerability_hypotheses is not None:
+            next_state.vulnerability_hypotheses = deepcopy(list(vulnerability_hypotheses))
         if evidence_refs:
             next_state.evidence_refs.extend(str(item) for item in evidence_refs)
         if event is not None:

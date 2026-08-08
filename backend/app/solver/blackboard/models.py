@@ -19,6 +19,7 @@ class BlackboardState(BaseModel):
     control: dict[str, Any] = Field(default_factory=dict)
     history: list[dict[str, Any]] = Field(default_factory=list)
     evidence_refs: list[str] = Field(default_factory=list)
+    vulnerability_hypotheses: list[dict[str, Any]] = Field(default_factory=list)
 
     @property
     def facts(self) -> list[dict[str, Any]]:

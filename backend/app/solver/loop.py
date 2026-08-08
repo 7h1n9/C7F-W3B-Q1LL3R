@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
+from typing import Any
 
 from app.security.action_authorizer import (
     ActionAuthorizer,
@@ -18,6 +19,7 @@ from .action_lifecycle import (
 )
 from .blackboard import BlackboardState
 from .blackboard.repository import BlackboardRepository
+from .classification import VulnerabilityClassifier
 from .context import RunContext, RuntimeUsage
 from .events import SolverAuditEvent, SolverAuditEventType, SolverEvent
 from .knowledge import KnowledgeStore
@@ -58,6 +60,9 @@ class SolverLoop:
         action_authorizer: ActionAuthorizer | None = None,
         reducer: ObservationReducer | None = None,
         knowledge_store: KnowledgeStore | None = None,
+        classifier: VulnerabilityClassifier | None = None,
+        challenge_context: Any | None = None,
+        initial_response: Mapping[str, Any] | None = None,
     ) -> None:
         self.blackboard = blackboard
         self.state_machine = state_machine
@@ -68,11 +73,16 @@ class SolverLoop:
         self.action_authorizer = action_authorizer or AllowAllActionAuthorizer()
         self.reducer = reducer or WebObservationReducer()
         self.knowledge_store = knowledge_store or KnowledgeStore()
+        self.classifier = classifier
+        self.challenge_context = challenge_context
+        self.initial_response = dict(initial_response or {})
 
     async def step(self, run_id: str) -> SolverLoopStep:
         state = await self.blackboard.load(run_id)
         if state is None:
             raise KeyError(f"Blackboard not found for run {run_id!r}")
+
+        state = await self._ensure_classified(run_id, state)
 
         interrupted = find_interrupted_action(state)
         if interrupted is not None:
@@ -122,10 +132,7 @@ class SolverLoop:
         )
         state = await self.blackboard.update(
             run_id,
-            {
-                "control_merge": {"solver_step": step_number},
-                "history_append": [planned_event.to_dict()],
-            },
+            {"control_merge": {"solver_step": step_number, **self._strategy_control(intent)}, "history_append": [planned_event.to_dict()]},
             expected_version=state.version,
         )
 
@@ -288,6 +295,13 @@ class SolverLoop:
             state, intent.action_name, result.status
         )
         projected = projected.model_copy(update={"phase": next_phase})
+        feedback = getattr(self.planner, "apply_feedback", None)
+        if callable(feedback):
+            projected = feedback(
+                projected,
+                success=result.success,
+                new_evidence=bool(observation.evidence_refs or reduction.verified_facts),
+            )
 
         final_audit = None
         if execution is not None:
@@ -341,6 +355,7 @@ class SolverLoop:
                 "phase": next_phase,
                 "knowledge": projected.knowledge,
                 "control": projected.control,
+                "vulnerability_hypotheses": projected.vulnerability_hypotheses,
                 "control_merge": control_merge,
                 "history_append": [event.to_dict()],
                 "evidence_refs_append": observation.evidence_refs,
@@ -355,6 +370,73 @@ class SolverLoop:
             result=result,
             audit_event=final_audit or authorized_audit,
         )
+
+    async def _ensure_classified(
+        self,
+        run_id: str,
+        state: BlackboardState,
+    ) -> BlackboardState:
+        if self.classifier is None:
+            return state
+        control = state.control
+        reassess = bool(control.get("reassessment_requested"))
+        if state.vulnerability_hypotheses and not reassess:
+            return state
+        context = self.challenge_context
+        if context is None and self.run_context is not None:
+            context = self.run_context.challenge
+        if context is None:
+            return state
+        response = self.initial_response or dict(state.knowledge.get("initial_response") or {})
+        classified = self.classifier.classify(context, response)
+        existing = {
+            str(item.get("type")): dict(item)
+            for item in state.vulnerability_hypotheses
+            if isinstance(item, Mapping) and item.get("type")
+        }
+        merged = []
+        for item in classified:
+            previous = existing.get(str(item["type"]))
+            if previous is not None:
+                item = {
+                    **item,
+                    "failed_attempts": int(previous.get("failed_attempts") or 0),
+                    "tested": bool(previous.get("tested", False)),
+                }
+            merged.append(item)
+        attempts = int(control.get("classification_attempts") or 0) + 1
+        updated = await self.blackboard.update(
+            run_id,
+            {
+                "vulnerability_hypotheses": merged,
+                "control_merge": {
+                    "classification_complete": True,
+                    "classification_attempts": attempts,
+                    "reassessment_requested": False,
+                    "classification_source": "heuristic",
+                },
+                "history_append": [
+                    {
+                        "type": "VULNERABILITY_CLASSIFIED",
+                        "hypothesis_types": [item["type"] for item in merged],
+                        "hypothesis_count": len(merged),
+                    }
+                ],
+            },
+            expected_version=state.version,
+        )
+        return updated
+
+    @staticmethod
+    def _strategy_control(intent: ActionIntent) -> dict[str, object]:
+        vulnerability_type = intent.metadata.get("vulnerability_type")
+        if not vulnerability_type:
+            return {}
+        return {
+            "active_vulnerability_type": str(vulnerability_type),
+            "strategy_phase": str(intent.metadata.get("strategy_phase") or ""),
+            "strategy_chain": list(intent.metadata.get("strategy_chain") or []),
+        }
 
     async def _recover_interrupted(
         self,
