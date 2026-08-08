@@ -5,7 +5,7 @@ class RunCreate(BaseModel):
     engine_type: str = Field(default="mock", pattern="^(mock|openai_compatible|codex_sdk)$")
     # New Runs use the structured controller by default.  The legacy loop is
     # still available as an explicit compatibility choice.
-    solver_mode: str = Field(default="multi_agent_v1", pattern="^(single_agent|multi_agent_v1|solver_v2)$")
+    solver_mode: str = Field(default="multi_agent_v1", pattern="^(single_agent|multi_agent_v1|solver_v2|muteki)$")
     model_config_id: str | None = None
     max_agent_steps: int = Field(default=120, ge=1, le=300)
     max_tool_calls: int = Field(default=120, ge=0, le=300)

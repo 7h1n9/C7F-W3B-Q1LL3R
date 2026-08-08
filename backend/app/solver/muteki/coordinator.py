@@ -92,10 +92,10 @@ class MutekiCoordinator:
         profile = next((profile for profile in self.engines if profile.healthy), None)
         if profile is None:
             return
-        if await self._spawn(profile, role="explore", intent_id=item.intent_id, goal=item.description):
+        if await self._spawn(profile, role="explore", intent_id=item.intent_id, goal=item.description, payload=item.payload or {}):
             self._dispatched_intents.add(item.intent_id)
 
-    async def _spawn(self, profile: EngineProfile, *, role: str, intent_id: str | None = None, goal: str = "") -> bool:
+    async def _spawn(self, profile: EngineProfile, *, role: str, intent_id: str | None = None, goal: str = "", payload: dict | None = None) -> bool:
         self._worker_number += 1
         job = WorkerJob(
             worker_id=f"worker-{self._worker_number}",
@@ -105,6 +105,7 @@ class MutekiCoordinator:
             challenge_id=self.graph.challenge_id,
             intent_id=intent_id,
             goal=goal,
+            payload=dict(payload or {}),
             environment={"MUTEKI_BLACKBOARD_DB": str(self.graph.db_path), "MUTEKI_WORKER_ID": f"worker-{self._worker_number}", "MUTEKI_CHALLENGE_ID": self.graph.challenge_id, **dict(profile.environment)},
         )
         return await self.pool.spawn(job)

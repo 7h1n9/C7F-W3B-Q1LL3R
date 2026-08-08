@@ -27,6 +27,7 @@ class WorkerJob:
     intent_id: str | None = None
     goal: str = ""
     environment: Mapping[str, str] = field(default_factory=dict)
+    payload: Mapping[str, object] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)

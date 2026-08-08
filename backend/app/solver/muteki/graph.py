@@ -56,6 +56,7 @@ class Intent:
     claimed_by: str | None
     created_at: str
     lease_until: float | None = None
+    payload: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -135,7 +136,7 @@ class MutekiGraph:
                 elif kind == EventType.DEAD_END:
                     self._db.execute("INSERT OR IGNORE INTO dead_ends VALUES (?, ?, ?, ?)", (row["sequence"], payload.get("description", ""), row["actor"], row["timestamp"]))
                 elif kind == EventType.INTENT_PROPOSED:
-                    self._db.execute("INSERT OR IGNORE INTO intents VALUES (?, ?, 'open', NULL, NULL, ?)", (payload.get("intent_id", ""), payload.get("description", ""), row["timestamp"]))
+                    self._db.execute("INSERT OR IGNORE INTO intents VALUES (?, ?, 'open', NULL, NULL, ?, ?)", (payload.get("intent_id", ""), payload.get("description", ""), row["timestamp"], _dump(payload.get("payload", {}))))
                 elif kind == EventType.INTENT_CLAIMED:
                     self._db.execute("UPDATE intents SET status='claimed', claimed_by=?, lease_until=? WHERE intent_id=?", (row["actor"], payload.get("lease_until"), payload.get("intent_id")))
                 elif kind == EventType.INTENT_CONCLUDED:
@@ -200,6 +201,9 @@ class MutekiGraph:
             );
             """
         )
+        columns = {str(row[1]) for row in self._db.execute("PRAGMA table_info(intents)").fetchall()}
+        if "payload_json" not in columns:
+            self._db.execute("ALTER TABLE intents ADD COLUMN payload_json TEXT NOT NULL DEFAULT '{}'" )
         self._db.commit()
 
     def _append(
@@ -266,7 +270,7 @@ class MutekiGraph:
         intent_id = intent_id or f"intent_{uuid.uuid4().hex}"
         with self._lock:
             event = self._append(actor, EventType.INTENT_PROPOSED, {"intent_id": intent_id, "description": description, "payload": payload or {}})
-            self._db.execute("INSERT INTO intents VALUES (?, ?, 'open', NULL, NULL, ?)", (intent_id, description, event.timestamp))
+            self._db.execute("INSERT INTO intents VALUES (?, ?, 'open', NULL, NULL, ?, ?)", (intent_id, description, event.timestamp, _dump(payload or {})))
             self._db.commit()
         return intent_id
 
@@ -351,7 +355,7 @@ class MutekiGraph:
             query += " WHERE status=?"
             params = (status,)
         rows = self._db.execute(query + " ORDER BY created_at", params).fetchall()
-        return [Intent(row["intent_id"], row["description"], row["status"], row["claimed_by"], row["created_at"], row["lease_until"]) for row in rows]
+        return [Intent(row["intent_id"], row["description"], row["status"], row["claimed_by"], row["created_at"], row["lease_until"], _load(row["payload_json"], {})) for row in rows]
 
     def flags(self, *, verified_only: bool = False) -> list[Flag]:
         query = "SELECT * FROM flags"

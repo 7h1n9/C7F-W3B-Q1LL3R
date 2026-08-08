@@ -26,12 +26,13 @@ class MutekiWorkspace:
         *,
         attachments: Iterable[str | Path] = (),
         engines: Iterable[EngineProfile] = (),
+        event_subscriber=None,
     ) -> "MutekiWorkspace":
         workspace = Path(root) / challenge_id
         graph_dir = workspace / "graph"
         (workspace / "attachments").mkdir(parents=True, exist_ok=True)
         (workspace / "tmp").mkdir(parents=True, exist_ok=True)
-        graph = MutekiGraph(graph_dir / "shared_graph.db", challenge_id=challenge_id)
+        graph = MutekiGraph(graph_dir / "shared_graph.db", challenge_id=challenge_id, event_subscriber=event_subscriber)
         for source in attachments:
             path = Path(source)
             if path.is_file():

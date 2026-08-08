@@ -405,6 +405,8 @@ class RunSupervisor:
         # legacy supervisor/orchestrator path compatible for existing runs
         # and route only the new mode to SolverRuntimeService.
         selected = await session.get(SolveRun, run_id)
+        if selected is not None and selected.solver_mode == "muteki":
+            return await self._run_muteki(session, selected)
         if selected is not None and selected.solver_mode == "solver_v2":
             from app.solver.service import solver_runtime_service
 
@@ -571,6 +573,58 @@ class RunSupervisor:
         if (run.recovery_checkpoint_json or {}).get("resume_reason") == "USER_INPUT_RECEIVED":
             return await self._mark_user_input_no_progress(session, run, {"reason": "NO_PROGRESS_LOOP"})
         await run_finalizer.finish_unsolved_with_wp(session, run, "NO_PROGRESS_LOOP")
+        return await self._outcome(session, run)
+
+    async def _run_muteki(self, session, run: SolveRun) -> RunOutcome:
+        """Run the canonical Muteki engine as an explicit opt-in mode."""
+        from app.models.challenge import Challenge
+        from app.orchestration.state_machine import RunStatus, transition
+        from app.solver.muteki.runtime import MutekiRuntime
+
+        challenge = await session.get(Challenge, run.challenge_id)
+        if challenge is None:
+            raise ValueError("CHALLENGE_NOT_FOUND")
+        if str(run.status) == RunStatus.CREATED.value:
+            transition(run, RunStatus.RUNNING)
+            await session.commit()
+        attempt = lease = None
+        try:
+            attempt, lease = await run_attempt_service.begin(session, run)
+            from app.services.tool_manifest import refresh_runtime_tool_manifest
+
+            await refresh_runtime_tool_manifest(session, run, attempt, challenge, mcp_tools=[])
+            await session.commit()
+            result = await MutekiRuntime(session, run, challenge).run_once(
+                max_rounds=min(100, max(1, int(run.max_agent_steps or 10))),
+                max_workers=10,
+            )
+            await session.refresh(run)
+            if result.status == RunStatus.COMPLETED_SOLVED.value:
+                transition(run, RunStatus.REPORTING)
+                transition(run, RunStatus.COMPLETED_SOLVED)
+            elif result.status == RunStatus.COMPLETED_UNSOLVED.value:
+                transition(run, RunStatus.REPORTING)
+                transition(run, RunStatus.COMPLETED_UNSOLVED)
+            else:
+                transition(run, RunStatus.FAILED_ENGINE)
+                run.last_error_code = result.reason or "MUTEKI_RUNTIME_ERROR"
+            await session.commit()
+        except Exception as error:
+            await session.rollback()
+            run = await session.get(SolveRun, run.id)
+            if run is None:
+                raise
+            if RunStatus(run.status) not in {RunStatus.COMPLETED_SOLVED, RunStatus.COMPLETED_UNSOLVED}:
+                if RunStatus(run.status) != RunStatus.FAILED_ENGINE:
+                    transition(run, RunStatus.FAILED_ENGINE)
+                run.last_error_code = "MUTEKI_RUNTIME_ERROR"
+                run.last_error_message = str(error)[:4000]
+                await session.commit()
+            result = type("MutekiFailure", (), {"status": RunStatus.FAILED_ENGINE.value, "reason": "MUTEKI_RUNTIME_ERROR", "flag_found": False})()
+        finally:
+            if attempt is not None or lease is not None:
+                await run_attempt_service.finish(session, run, attempt, lease)
+        await event_service.append(session, run.id, "run.completed" if result.status.startswith("COMPLETED") else "run.failed", {"engine": "muteki", "status": run.status, "reason": result.reason, "flag_verified": result.flag_found})
         return await self._outcome(session, run)
 
     async def run_background(self, run_id: str, user_message: str | None = None) -> RunOutcome:
