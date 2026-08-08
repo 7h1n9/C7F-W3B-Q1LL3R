@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import inspect
 from collections.abc import Mapping, Sequence
 from typing import Any, Protocol
 from urllib.parse import urljoin
 
 from .action import ActionIntent
 from .blackboard.models import BlackboardState
+from .classification import LLMVulnerabilityClassifier, VulnerabilityClassifier
 
 AllowedAction = str | Mapping[str, object]
 
@@ -22,6 +24,17 @@ class Planner(Protocol):
 
 class DeterministicPlanner:
     """Small local Planner Adapter; no model, tool, or runtime integration."""
+
+    def __init__(
+        self,
+        *,
+        classifier: VulnerabilityClassifier | None = None,
+        llm_classifier: LLMVulnerabilityClassifier | Any | None = None,
+    ) -> None:
+        self.classifier = classifier or VulnerabilityClassifier()
+        self.llm_classifier = llm_classifier or LLMVulnerabilityClassifier(
+            heuristic_classifier=self.classifier
+        )
 
     FAILURE_THRESHOLD = 3
     STRATEGY_CHAINS: dict[str, tuple[str, ...]] = {
@@ -123,6 +136,24 @@ class DeterministicPlanner:
             parameters=parameters,
             metadata=metadata,
         )
+
+    async def _classify_task(
+        self,
+        challenge_context: Any,
+        initial_response: Mapping[str, Any] | None,
+    ) -> list[dict[str, Any]]:
+        """Prefer the configured LLM classifier, then use local heuristics."""
+        try:
+            result = self.llm_classifier.classify(challenge_context, initial_response or {})
+            if inspect.isawaitable(result):
+                result = await result
+            if result:
+                return list(result)
+        except Exception:
+            # Classification is advisory. The deterministic fallback keeps
+            # the Solver loop available when a provider is unavailable.
+            pass
+        return self.classifier.classify(challenge_context, initial_response or {})
 
     def apply_feedback(
         self,

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from typing import Any
@@ -376,8 +377,6 @@ class SolverLoop:
         run_id: str,
         state: BlackboardState,
     ) -> BlackboardState:
-        if self.classifier is None:
-            return state
         control = state.control
         reassess = bool(control.get("reassessment_requested"))
         if state.vulnerability_hypotheses and not reassess:
@@ -388,7 +387,15 @@ class SolverLoop:
         if context is None:
             return state
         response = self.initial_response or dict(state.knowledge.get("initial_response") or {})
-        classified = self.classifier.classify(context, response)
+        if self.classifier is not None:
+            classified = self.classifier.classify(context, response)
+        else:
+            classify_task = getattr(self.planner, "_classify_task", None)
+            if not callable(classify_task):
+                return state
+            classified = classify_task(context, response)
+        if inspect.isawaitable(classified):
+            classified = await classified
         existing = {
             str(item.get("type")): dict(item)
             for item in state.vulnerability_hypotheses

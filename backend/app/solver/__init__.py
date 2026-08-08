@@ -13,7 +13,12 @@ from .action_lifecycle import (
     generate_fingerprint,
     validate_retry_relationship,
 )
-from .classification import VulnerabilityClassifier
+from .classification import (
+    LLMClassifierConfig,
+    LLMClassifierError,
+    LLMVulnerabilityClassifier,
+    VulnerabilityClassifier,
+)
 from .context import ChallengeContext, RunContext, RunLimits, RuntimeUsage, TargetContext
 from .context_factory import RunContextFactory
 from .coordinator import Coordinator, CoordinatorStep
@@ -48,6 +53,9 @@ __all__ = [
     "RunLimits",
     "RuntimeUsage",
     "VulnerabilityClassifier",
+    "LLMClassifierConfig",
+    "LLMClassifierError",
+    "LLMVulnerabilityClassifier",
     "RunContextFactory",
     "TargetContext",
     "ActionPolicyValidator",
