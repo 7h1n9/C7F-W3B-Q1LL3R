@@ -66,8 +66,23 @@ def _init(db: sqlite3.Connection) -> None:
             source_worker_id TEXT NOT NULL, verified_by_gate INTEGER NOT NULL,
             created_at TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS pocs (
+            poc_id TEXT PRIMARY KEY, content TEXT NOT NULL,
+            source_worker_id TEXT NOT NULL, created_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS resources (
+            resource_id TEXT PRIMARY KEY, claimed_by TEXT,
+            lease_until REAL
+        );
         """
     )
+    # The application graph keeps an intent payload column for coordinator
+    # routing.  Add it when this stdlib-only skill is pointed at an older
+    # standalone blackboard, while remaining compatible with an existing
+    # canonical graph database.
+    columns = {str(row[1]) for row in db.execute("PRAGMA table_info(intents)").fetchall()}
+    if "payload_json" not in columns:
+        db.execute("ALTER TABLE intents ADD COLUMN payload_json TEXT NOT NULL DEFAULT '{}'")
 
 
 def _actor() -> str:
@@ -120,6 +135,19 @@ def main() -> int:
     list_intents.add_argument("--status", default=None)
     claim = sub.add_parser("claim")
     claim.add_argument("intent_id")
+    sub.add_parser("read-resource-locks")
+    claim_resource = sub.add_parser("claim-resource")
+    claim_resource.add_argument("resource_id")
+    claim_resource.add_argument("--risk-class", default="exclusive")
+    release_resource = sub.add_parser("release-resource")
+    release_resource.add_argument("resource_id")
+    write_poc = sub.add_parser("write-poc")
+    write_poc.add_argument("poc_id")
+    write_poc.add_argument("content")
+    read_pocs = sub.add_parser("read-pocs")
+    read_pocs.add_argument("--category", default=None)
+    read_poc = sub.add_parser("read-poc")
+    read_poc.add_argument("poc_id")
     flag = sub.add_parser("write-flag")
     flag.add_argument("flag")
     flag.add_argument("--real-output", required=True)
@@ -141,7 +169,10 @@ def main() -> int:
         elif args.command == "propose-intent":
             intent_id = f"intent_{uuid.uuid4().hex}"
             _append(db, "intent_proposed", {"intent_id": intent_id, "description": args.description})
-            db.execute("INSERT INTO intents VALUES (?, ?, 'open', NULL, NULL, ?)", (intent_id, args.description, datetime.now(UTC).isoformat()))
+            db.execute(
+                "INSERT INTO intents(intent_id, description, status, claimed_by, lease_until, created_at, payload_json) VALUES (?, ?, 'open', NULL, NULL, ?, '{}')",
+                (intent_id, args.description, datetime.now(UTC).isoformat()),
+            )
             db.commit()
             result = intent_id
         elif args.command == "list-intents":
@@ -161,6 +192,40 @@ def main() -> int:
             else:
                 db.rollback()
                 result = "LOST"
+        elif args.command == "read-resource-locks":
+            now = datetime.now(UTC).timestamp()
+            result = [dict(row) for row in db.execute("SELECT * FROM resources WHERE claimed_by IS NOT NULL AND (lease_until IS NULL OR lease_until>?) ORDER BY resource_id", (now,)).fetchall()]
+        elif args.command == "claim-resource":
+            until = datetime.now(UTC).timestamp() + 600
+            db.execute("INSERT OR IGNORE INTO resources(resource_id) VALUES (?)", (args.resource_id,))
+            cursor = db.execute("UPDATE resources SET claimed_by=?, lease_until=? WHERE resource_id=? AND (claimed_by IS NULL OR lease_until<?)", (_actor(), until, args.resource_id, datetime.now(UTC).timestamp()))
+            if cursor.rowcount:
+                _append(db, "resource_locked", {"resource_id": args.resource_id, "risk_class": args.risk_class, "lease_until": until})
+                db.commit()
+                result = "WON"
+            else:
+                db.rollback()
+                result = "LOST"
+        elif args.command == "release-resource":
+            cursor = db.execute("UPDATE resources SET claimed_by=NULL, lease_until=NULL WHERE resource_id=? AND claimed_by=?", (args.resource_id, _actor()))
+            if cursor.rowcount:
+                _append(db, "resource_released", {"resource_id": args.resource_id})
+                db.commit()
+                result = "RELEASED"
+            else:
+                db.rollback()
+                result = "NOT_OWNER"
+        elif args.command == "write-poc":
+            _append(db, "poc_saved", {"poc_id": args.poc_id, "content": args.content})
+            db.execute("INSERT OR REPLACE INTO pocs VALUES (?, ?, ?, ?)", (args.poc_id, args.content, _actor(), datetime.now(UTC).isoformat()))
+            db.commit()
+            result = args.poc_id
+        elif args.command == "read-pocs":
+            rows = db.execute("SELECT * FROM pocs ORDER BY created_at").fetchall()
+            result = [dict(row) for row in rows if not args.category or args.category.casefold() in str(row["content"]).casefold()]
+        elif args.command == "read-poc":
+            row = db.execute("SELECT * FROM pocs WHERE poc_id=?", (args.poc_id,)).fetchone()
+            result = dict(row) if row else None
         else:
             accepted, reason = _flag_ok(args.flag, args.real_output)
             sequence = _append(db, "flag_found" if accepted else "flag_candidate", {"flag": args.flag, "reason": reason}, verified=accepted)

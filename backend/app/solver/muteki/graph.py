@@ -126,7 +126,7 @@ class MutekiGraph:
     def rebuild_projections(self) -> None:
         """Rebuild query tables from the immutable event log."""
         with self._lock:
-            self._db.executescript("DELETE FROM facts; DELETE FROM dead_ends; DELETE FROM intents; DELETE FROM flags;")
+            self._db.executescript("DELETE FROM facts; DELETE FROM dead_ends; DELETE FROM intents; DELETE FROM flags; DELETE FROM pocs; DELETE FROM resources;")
             rows = self._db.execute("SELECT * FROM events ORDER BY sequence").fetchall()
             for row in rows:
                 payload = _load(row["payload_json"], {})
@@ -143,6 +143,12 @@ class MutekiGraph:
                     self._db.execute("UPDATE intents SET status='done', lease_until=NULL WHERE intent_id=?", (payload.get("intent_id"),))
                 elif kind in {EventType.FLAG_FOUND, EventType.FLAG_CANDIDATE}:
                     self._db.execute("INSERT OR IGNORE INTO flags VALUES (?, ?, ?, ?, ?)", (row["sequence"], payload.get("flag", ""), row["actor"], int(kind == EventType.FLAG_FOUND), row["timestamp"]))
+                elif kind == EventType.POC_SAVED:
+                    self._db.execute("INSERT OR REPLACE INTO pocs VALUES (?, ?, ?, ?)", (payload.get("poc_id", ""), payload.get("content", ""), row["actor"], row["timestamp"]))
+                elif kind == EventType.RESOURCE_LOCKED:
+                    self._db.execute("INSERT OR REPLACE INTO resources VALUES (?, ?, ?)", (payload.get("resource_id", ""), row["actor"], payload.get("lease_until")))
+                elif kind == EventType.RESOURCE_RELEASED:
+                    self._db.execute("UPDATE resources SET claimed_by=NULL, lease_until=NULL WHERE resource_id=?", (payload.get("resource_id"),))
             self._db.commit()
 
     def _initialize(self) -> None:
@@ -314,6 +320,24 @@ class MutekiGraph:
             self._db.commit()
         return poc_id
 
+    def list_pocs(self, category: str | None = None) -> list[PoC]:
+        """Return persisted PoCs, optionally filtered by a content category hint."""
+
+        rows = self._db.execute("SELECT * FROM pocs ORDER BY created_at").fetchall()
+        items = [PoC(str(row["poc_id"]), str(row["content"]), str(row["source_worker_id"]), str(row["created_at"])) for row in rows]
+        if not category:
+            return items
+        needle = str(category).casefold()
+        return [item for item in items if needle in item.content.casefold()]
+
+    def get_poc(self, poc_id: str) -> PoC | None:
+        """Read one PoC without exposing a second in-memory state authority."""
+
+        row = self._db.execute("SELECT * FROM pocs WHERE poc_id=?", (str(poc_id),)).fetchone()
+        if row is None:
+            return None
+        return PoC(str(row["poc_id"]), str(row["content"]), str(row["source_worker_id"]), str(row["created_at"]))
+
     def claim_resource(self, *, worker: str, resource_id: str, lease_s: float = 600.0) -> bool:
         until = datetime.now(UTC).timestamp() + max(1.0, float(lease_s))
         with self._lock:
@@ -335,6 +359,16 @@ class MutekiGraph:
             self._append(worker, EventType.RESOURCE_RELEASED, {"resource_id": resource_id})
             self._db.commit()
             return True
+
+    def resource_claims(self) -> list[ResourceClaim]:
+        now = datetime.now(UTC).timestamp()
+        rows = self._db.execute("SELECT * FROM resources WHERE claimed_by IS NOT NULL AND (lease_until IS NULL OR lease_until>?) ORDER BY resource_id", (now,)).fetchall()
+        return [ResourceClaim(str(row["resource_id"]), str(row["claimed_by"]), float(row["lease_until"]) if row["lease_until"] is not None else None) for row in rows]
+
+    def list_resources(self) -> list[str]:
+        """Return active resource ids; expired leases are not considered held."""
+
+        return [item.resource_id for item in self.resource_claims()]
 
     def facts(self, *, verified_only: bool = False) -> list[Fact]:
         query = "SELECT * FROM facts"
@@ -380,4 +414,6 @@ class MutekiGraph:
             "dead_ends": [{"dead_end_id": item.dead_end_id, "description": item.description, "source_worker_id": item.source_worker_id} for item in self.dead_ends()],
             "intents": [{"intent_id": item.intent_id, "description": item.description, "status": item.status, "claimed_by": item.claimed_by} for item in self.intents()],
             "flags": [{"flag_id": item.flag_id, "flag_value": item.flag_value, "verified_by_gate": item.verified_by_gate} for item in self.flags()],
+            "pocs": [{"id": item.poc_id, "content": item.content, "source_worker_id": item.source_worker_id} for item in self.list_pocs()],
+            "resources": [{"resource_id": item.resource_id, "claimed_by": item.claimed_by, "lease_until": item.lease_until} for item in self.resource_claims()],
         }

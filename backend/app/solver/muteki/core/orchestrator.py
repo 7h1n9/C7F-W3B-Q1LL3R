@@ -36,11 +36,12 @@ class MutekiOrchestrator:
         engines: list[EngineProfile] | None = None,
         max_workers: int = 10,
         interval_seconds: float = 0.0,
+        engine_pool=None,
     ) -> None:
         self.graph = graph
         self.reason = reason
         self.engines = list(engines or [EngineProfile("gateway-runner")])
-        self.pool = MutekiWorkerPool(graph, worker_runner, max_workers=max_workers)
+        self.pool = MutekiWorkerPool(graph, worker_runner, max_workers=max_workers, engine_pool=engine_pool)
         self.coordinator = MutekiCoordinator(
             graph,
             reason,

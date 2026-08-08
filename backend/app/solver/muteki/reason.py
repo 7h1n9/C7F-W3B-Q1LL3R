@@ -121,7 +121,7 @@ class MutekiReason:
             if len(proposals) >= self.max_intents:
                 break
         if not proposals:
-            fallback = _fallback_intent(classification)
+            fallback = _fallback_intent(classification, snapshot.get("pocs", ()))
             if fallback.goal.casefold() in known_goals:
                 return ReasonResult(False, ())
             proposals.append(fallback)
@@ -150,7 +150,7 @@ def _blocked_before_classification(tool_name: str | None, normalized_goal: str) 
     return any(tool in normalized_goal for tool in SQL_TOOLS)
 
 
-def _fallback_intent(classification: ClassificationResult | None) -> IntentProposal:
+def _fallback_intent(classification: ClassificationResult | None, pocs: Sequence[Mapping[str, Any]] = ()) -> IntentProposal:
     if classification is None:
         return IntentProposal(
             "CLASSIFY_CHALLENGE",
@@ -164,6 +164,14 @@ def _fallback_intent(classification: ClassificationResult | None) -> IntentPropo
             worker_class="exploit",
             rationale="SQLI is explicitly or evidentially classified.",
             payload={"tool_name": "sql_boolean_compare"},
+        )
+    if pocs:
+        poc_id = str(pocs[-1].get("id") or pocs[-1].get("poc_id") or "")
+        return IntentProposal(
+            "EXPLOIT_WITH_POC",
+            worker_class="exploit",
+            rationale="Reuse a graph-backed PoC only after the challenge has a high-confidence classification.",
+            payload={"poc_id": poc_id, "classification": classification.classification},
         )
     allowed = TOOL_DOMAINS.get(classification.classification, TOOL_DOMAINS["GENERIC_WEB"])
     tool = TOOL_PREFERENCE.get(classification.classification) or sorted(allowed)[0]
