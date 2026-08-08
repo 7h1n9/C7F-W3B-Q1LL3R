@@ -15,6 +15,9 @@ class WorkerJob:
     role: WorkerRole
     intent_id: str | None = None
     description: str = ""
+    allowed_tools: tuple[str, ...] = ()
+    timeout_seconds: int = 60
+    max_http_requests: int | None = None
 
 
 WorkerRunner = Callable[[WorkerJob], Awaitable[Any]]
@@ -60,7 +63,10 @@ class OneShotWorkerPool:
 
     async def _run(self, job: WorkerJob) -> Any:
         try:
-            return await self.runner(job)
+            execution = self.runner(job)
+            if job.timeout_seconds > 0:
+                return await asyncio.wait_for(execution, timeout=job.timeout_seconds)
+            return await execution
         finally:
             self._emit("WORKER_FINISHED", worker_id=job.worker_id, role=job.role.value, intent_id=job.intent_id)
 

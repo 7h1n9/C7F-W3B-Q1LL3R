@@ -33,7 +33,7 @@ from .planner import DeterministicPlanner, NoopPlanner, Planner, SolverIntent
 from .policy import ActionPolicyValidator, PolicyDecision, PolicyResult
 from .reason import ReasonIntent, ReasonPlanner
 from .reducers import KnowledgeUpdate, WebObservationReducer
-from .shared_graph import SharedGraph, SolverEventBus
+from .shared_graph import ChallengeClassification, ClassificationFact, SharedGraph, SolverEventBus
 from .state_machine import SolverPhase, TaskStateMachine
 from .worker import (
     MockWorker,
@@ -45,6 +45,7 @@ from .worker import (
     WorkerResult,
     WorkerUnavailable,
 )
+from .worker.classification import ClassificationWorker
 
 __all__ = [
     "Coordinator",
@@ -81,6 +82,8 @@ __all__ = [
     "GateDecision",
     "SharedGraph",
     "SolverEventBus",
+    "ChallengeClassification",
+    "ClassificationFact",
     "ReasonIntent",
     "ReasonPlanner",
     "CoordinationPhase",
@@ -96,6 +99,7 @@ __all__ = [
     "WorkerManager",
     "WorkerResult",
     "WorkerUnavailable",
+    "ClassificationWorker",
     "WebObservationReducer",
     "find_interrupted_action",
     "generate_fingerprint",

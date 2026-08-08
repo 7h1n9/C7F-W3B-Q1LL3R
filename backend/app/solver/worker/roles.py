@@ -6,6 +6,7 @@ from enum import StrEnum
 class WorkerRole(StrEnum):
     RACE = "race"
     BOOTSTRAP = "bootstrap"
+    CLASSIFIER = "classifier"
     EXPLORE = "explore"
     REVIEW = "review"
 

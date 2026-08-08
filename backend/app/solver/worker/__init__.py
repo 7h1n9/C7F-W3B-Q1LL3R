@@ -1,5 +1,6 @@
 from .adapters.gateway import GatewayWorker
 from .adapters.runner import RunnerAdapter, RunnerWorker
+from .classification import ClassificationWorker
 from .interface import Worker, WorkerResult
 from .manager import WorkerManager, WorkerUnavailable
 from .mock import MockWorker, NoopWorker
@@ -18,4 +19,5 @@ __all__ = [
     "OneShotWorkerPool",
     "WorkerJob",
     "WorkerRole",
+    "ClassificationWorker",
 ]

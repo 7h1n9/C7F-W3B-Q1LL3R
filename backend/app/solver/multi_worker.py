@@ -4,7 +4,7 @@ import asyncio
 from enum import StrEnum
 from typing import Any
 
-from .reason import ReasonPlanner
+from .reason import CLASSIFICATION_INTENT, TOOL_DOMAINS, ReasonIntent, ReasonPlanner
 from .shared_graph import SharedGraph, SolverEventBus
 from .worker.pool import OneShotWorkerPool, WorkerJob, WorkerRole
 
@@ -54,9 +54,15 @@ class MultiWorkerCoordinator:
             await self.finalize()
             return False
         if self.phase is CoordinationPhase.PREPARE:
-            self._change_phase(CoordinationPhase.RACE)
-            for _ in range(self.bootstrap_workers):
-                await self._spawn(WorkerRole.BOOTSTRAP, None, "bootstrap target analysis")
+            snapshot = self.graph.snapshot()
+            if self._classification_ready():
+                self._change_phase(CoordinationPhase.RACE)
+                for _ in range(self.bootstrap_workers):
+                    await self._spawn(WorkerRole.BOOTSTRAP, None, "bootstrap target analysis")
+            else:
+                self._change_phase(CoordinationPhase.COORDINATOR)
+                proposals = await self._gated_plan(snapshot)
+                await self._schedule(proposals)
             self._last_revision = self.graph.revision()
             return True
         revision = self.graph.revision()
@@ -64,7 +70,30 @@ class MultiWorkerCoordinator:
             return False
         self._change_phase(CoordinationPhase.COORDINATOR)
         snapshot = self.graph.snapshot()
+        proposals = await self._gated_plan(snapshot)
+        await self._schedule(proposals)
+        self._last_revision = self.graph.revision()
+        return True
+
+    async def _gated_plan(self, snapshot: dict[str, Any]) -> list[ReasonIntent]:
         proposals = await self.planner.plan(snapshot)
+        classification = self.graph.read_classification()
+        if classification is None or not classification.ready:
+            return [
+                proposal
+                for proposal in proposals
+                if proposal.tool_name == "CLASSIFY_CHALLENGE"
+            ][:1] or [
+                ReasonIntent(
+                    CLASSIFICATION_INTENT,
+                    tool_name="CLASSIFY_CHALLENGE",
+                    allowed_tools=("http_request", "http_extract", "file_read"),
+                )
+            ]
+        allowed = TOOL_DOMAINS[classification.classification]
+        return [proposal for proposal in proposals if proposal.tool_name in allowed][: self.planner.max_intents]
+
+    async def _schedule(self, proposals: list[ReasonIntent]) -> None:
         intent_ids = [
             self.graph.propose_intent(proposal.description, source_worker_id="coordinator")
             for proposal in proposals
@@ -72,9 +101,15 @@ class MultiWorkerCoordinator:
         if proposals and self.pool.active_count < self.pool.max_workers:
             proposal = proposals[0]
             intent_id = intent_ids[0]
-            await self._spawn(WorkerRole.EXPLORE, intent_id, proposal.description)
-        self._last_revision = self.graph.revision()
-        return True
+            role = WorkerRole.CLASSIFIER if proposal.tool_name == "CLASSIFY_CHALLENGE" else WorkerRole.EXPLORE
+            await self._spawn(
+                role,
+                intent_id,
+                proposal.description,
+                allowed_tools=proposal.allowed_tools,
+                timeout_seconds=60 if role is WorkerRole.CLASSIFIER else 0,
+                max_http_requests=3 if role is WorkerRole.CLASSIFIER else None,
+            )
 
     async def run(self, *, max_ticks: int = 1) -> None:
         for _ in range(max(0, max_ticks)):
@@ -94,9 +129,30 @@ class MultiWorkerCoordinator:
         self._finished = True
         self._emit("RUN_FINISHED", status="solved" if self.graph.read_flags(verified_only=True) else "stopped")
 
-    async def _spawn(self, role: WorkerRole, intent_id: str | None, description: str) -> bool:
+    def _classification_ready(self) -> bool:
+        classification = self.graph.read_classification()
+        return classification is not None and classification.ready
+
+    async def _spawn(
+        self,
+        role: WorkerRole,
+        intent_id: str | None,
+        description: str,
+        *,
+        allowed_tools: tuple[str, ...] = (),
+        timeout_seconds: int = 0,
+        max_http_requests: int | None = None,
+    ) -> bool:
         self._worker_sequence += 1
-        job = WorkerJob(f"worker-{self._worker_sequence}", role, intent_id, description)
+        job = WorkerJob(
+            f"worker-{self._worker_sequence}",
+            role,
+            intent_id,
+            description,
+            allowed_tools,
+            timeout_seconds,
+            max_http_requests,
+        )
         return await self.pool.spawn(job)
 
     def _change_phase(self, phase: CoordinationPhase) -> None:

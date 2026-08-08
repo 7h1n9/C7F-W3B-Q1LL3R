@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 import threading
 import uuid
@@ -9,11 +10,25 @@ from pathlib import Path
 from typing import Any
 
 from .bus import SolverEventBus
+from .classification import ChallengeClassification, ClassificationFact
 from .gate import FlagGate
 
 
 def _now() -> str:
     return datetime.now(UTC).isoformat()
+
+
+def _json(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
+
+
+def _loads(value: str | None) -> Any:
+    if not value:
+        return None
+    try:
+        return json.loads(value)
+    except json.JSONDecodeError:
+        return None
 
 
 @dataclass(frozen=True, slots=True)
@@ -23,6 +38,9 @@ class Fact:
     source_worker_id: str
     verified: bool
     created_at: str
+    fact_type: str = "OBSERVATION"
+    value: Any = None
+    evidence_refs: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -106,7 +124,8 @@ class SharedGraph:
                 CREATE TABLE IF NOT EXISTS facts (
                     id TEXT PRIMARY KEY, content TEXT NOT NULL,
                     source_worker_id TEXT NOT NULL, verified INTEGER NOT NULL,
-                    created_at TEXT NOT NULL
+                    created_at TEXT NOT NULL, fact_type TEXT NOT NULL DEFAULT 'OBSERVATION',
+                    value_json TEXT, evidence_refs_json TEXT
                 );
                 CREATE TABLE IF NOT EXISTS dead_ends (
                     id TEXT PRIMARY KEY, description TEXT NOT NULL,
@@ -130,6 +149,13 @@ class SharedGraph:
                 );
                 """
             )
+            columns = {row["name"] for row in db.execute("PRAGMA table_info(facts)").fetchall()}
+            if "fact_type" not in columns:
+                db.execute("ALTER TABLE facts ADD COLUMN fact_type TEXT NOT NULL DEFAULT 'OBSERVATION'")
+            if "value_json" not in columns:
+                db.execute("ALTER TABLE facts ADD COLUMN value_json TEXT")
+            if "evidence_refs_json" not in columns:
+                db.execute("ALTER TABLE facts ADD COLUMN evidence_refs_json TEXT")
 
     def _worker(self, source_worker_id: str | None) -> str:
         value = source_worker_id or self.worker_id
@@ -147,15 +173,18 @@ class SharedGraph:
         verified: bool = False,
         *,
         source_worker_id: str | None = None,
+        fact_type: str = "OBSERVATION",
+        value: Any = None,
+        evidence_refs: list[str] | tuple[str, ...] = (),
     ) -> str:
         worker = self._worker(source_worker_id)
         fact_id = f"fact_{uuid.uuid4().hex}"
         with self._lock, self._connect() as db:
             db.execute(
-                "INSERT INTO facts VALUES (?, ?, ?, ?, ?)",
-                (fact_id, str(content), worker, int(verified), _now()),
+                "INSERT INTO facts(id, content, source_worker_id, verified, created_at, fact_type, value_json, evidence_refs_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (fact_id, str(content), worker, int(verified), _now(), str(fact_type), _json(value), _json(list(evidence_refs))),
             )
-        self._emit("FACT_WRITTEN", fact_id=fact_id, source_worker_id=worker, verified=bool(verified))
+        self._emit("FACT_WRITTEN", fact_id=fact_id, source_worker_id=worker, verified=bool(verified), fact_type=str(fact_type))
         return fact_id
 
     def read_facts(self, limit: int = 50) -> list[Fact]:
@@ -164,7 +193,57 @@ class SharedGraph:
             rows = db.execute(
                 "SELECT * FROM facts ORDER BY created_at DESC LIMIT ?", (bounded,)
             ).fetchall()
-        return [Fact(row["id"], row["content"], row["source_worker_id"], bool(row["verified"]), row["created_at"]) for row in rows]
+        return [self._fact_from_row(row) for row in rows]
+
+    @staticmethod
+    def _fact_from_row(row: sqlite3.Row) -> Fact:
+        return Fact(
+            row["id"],
+            row["content"],
+            row["source_worker_id"],
+            bool(row["verified"]),
+            row["created_at"],
+            row["fact_type"] or "OBSERVATION",
+            _loads(row["value_json"]),
+            tuple(_loads(row["evidence_refs_json"]) or ()),
+        )
+
+    def write_classification(
+        self,
+        classification: ChallengeClassification | str,
+        *,
+        confidence: int,
+        evidence_refs: list[str] | tuple[str, ...] = (),
+        source_worker_id: str | None = None,
+    ) -> str:
+        value = ChallengeClassification(str(classification).upper())
+        score = int(confidence)
+        if not 0 <= score <= 100:
+            raise ValueError("classification confidence must be between 0 and 100")
+        return self.write_fact(
+            f"CHALLENGE_CLASSIFICATION={value.value}",
+            verified=score >= 70,
+            source_worker_id=source_worker_id,
+            fact_type="CHALLENGE_CLASSIFICATION",
+            value={"classification": value.value, "confidence": score},
+            evidence_refs=evidence_refs,
+        )
+
+    def read_classification(self) -> ClassificationFact | None:
+        with self._connect() as db:
+            row = db.execute(
+                "SELECT * FROM facts WHERE fact_type='CHALLENGE_CLASSIFICATION' ORDER BY created_at DESC LIMIT 1"
+            ).fetchone()
+        if row is None:
+            return None
+        fact = self._fact_from_row(row)
+        value = fact.value if isinstance(fact.value, dict) else {}
+        try:
+            classification = ChallengeClassification(str(value["classification"]).upper())
+            confidence = int(value["confidence"])
+        except (KeyError, TypeError, ValueError):
+            return None
+        return ClassificationFact(classification, confidence, fact.evidence_refs, fact.id, fact.source_worker_id)
 
     def mark_deadend(self, description: str, *, source_worker_id: str | None = None) -> str:
         worker = self._worker(source_worker_id)
@@ -286,9 +365,20 @@ class SharedGraph:
     def snapshot(self, *, limit: int = 50) -> dict[str, Any]:
         return {
             "revision": self.revision(),
-            "facts": [fact.__dict__ if hasattr(fact, "__dict__") else {"id": fact.id, "content": fact.content, "source_worker_id": fact.source_worker_id, "verified": fact.verified, "created_at": fact.created_at} for fact in self.read_facts(limit)],
+            "facts": [self._fact_dict(fact) for fact in self.read_facts(limit)],
+            "challenge_classification": self._classification_dict(self.read_classification()),
             "deadends": [{"id": item.id, "description": item.description, "source_worker_id": item.source_worker_id, "created_at": item.created_at} for item in self.read_deadends()],
             "flags": [{"id": item.id, "flag_value": item.flag_value, "source_worker_id": item.source_worker_id, "verified_by_gate": item.verified_by_gate, "created_at": item.created_at} for item in self.read_flags()],
             "pocs": [{"id": item.id, "content": item.content, "source_worker_id": item.source_worker_id, "created_at": item.created_at} for item in self.read_pocs()],
             "intents": [{"id": item.id, "description": item.description, "status": item.status, "claimed_by": item.claimed_by, "created_at": item.created_at} for item in self.list_intents("proposed")],
         }
+
+    @staticmethod
+    def _fact_dict(fact: Fact) -> dict[str, Any]:
+        return {"id": fact.id, "content": fact.content, "source_worker_id": fact.source_worker_id, "verified": fact.verified, "created_at": fact.created_at, "fact_type": fact.fact_type, "value": fact.value, "evidence_refs": list(fact.evidence_refs)}
+
+    @staticmethod
+    def _classification_dict(value: ClassificationFact | None) -> dict[str, Any] | None:
+        if value is None:
+            return None
+        return {"classification": value.classification.value, "confidence": value.confidence, "evidence_refs": list(value.evidence_refs), "fact_id": value.fact_id, "source_worker_id": value.source_worker_id}

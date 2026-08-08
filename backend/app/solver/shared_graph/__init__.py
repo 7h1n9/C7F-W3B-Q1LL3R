@@ -16,10 +16,13 @@ from .blackboard import (
     SharedGraph,
 )
 from .bus import EVENT_TYPES, EventEnvelope, InsightBus, SolverEventBus
+from .classification import ChallengeClassification, ClassificationFact
 from .gate import FlagGate, GateDecision
 
 __all__ = [
     "DeadEnd",
+    "ChallengeClassification",
+    "ClassificationFact",
     "EVENT_TYPES",
     "EventEnvelope",
     "Fact",
