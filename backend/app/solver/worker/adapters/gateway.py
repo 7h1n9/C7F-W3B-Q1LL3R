@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import uuid
 from collections.abc import Mapping
 from pathlib import Path
@@ -36,6 +37,8 @@ _PROVENANCE_ACTIONS = {
     "sqlmap_run",
     "sqlite_metadata_discovery",
 }
+
+logger = logging.getLogger(__name__)
 
 
 def _agent_role(action_name: str) -> tuple[str, str]:
@@ -289,13 +292,22 @@ class GatewayWorker(Worker):
                 evidence_refs=evidence_refs,
             )
         except Exception as error:
-            await self._finish_agent_task(
-                task,
-                success=False,
-                evidence_refs=[],
-                summary="Solver tool execution failed",
-                error=str(error),
-            )
+            logger.exception("Solver GatewayWorker execution failed", extra={"action_name": action.action_name})
+            # ToolGateway may have committed the REQUESTED row and then hit a
+            # persistence error while appending its dispatch event.  Clear
+            # that failed transaction before touching the task again; an
+            # expired ORM task cannot be updated safely while the async
+            # session is in rollback-only state.
+            await self.session.rollback()
+            stored_task = await self.session.get(AgentTask, task.id)
+            if stored_task is not None:
+                await self._finish_agent_task(
+                    stored_task,
+                    success=False,
+                    evidence_refs=[],
+                    summary="Solver tool execution failed",
+                    error=str(error),
+                )
             return WorkerResult(
                 success=False,
                 action_name=action.action_name,

@@ -1,6 +1,6 @@
 # Phase 2.4 Execution Log
 
-Status: COMPLETED_WITH_LIMITS
+Status: LIVE_VALIDATED_WITH_LIMITS
 
 ## 2026-08-08
 
@@ -29,7 +29,7 @@ Status: COMPLETED_WITH_LIMITS
 
 ### Real target sample
 
-Target: `http://192.168.236.1:28346/`
+Target: `http://192.168.236.1:28656/`
 
 Measured sample: 13 runs, 11 solved and 2 controlled unsolved under concurrent load. The two unsolved runs were `f35fad5f-e437-4fa3-9007-610c8020e123` and `fd7fc60e-cff3-44a6-a5ad-47e36d1ed613`; both stopped with `SOLVER_NO_ACTION` after a script returned only 7 requests and 1 transient error. The sequential recovery run `da0da023-8a0d-41fb-9bb9-6b8d2f76b5ac` and final post-validation run `b69fad11-b97a-4ff3-9351-7a9e1844d1c1` both solved and passed fresh reproduction.
 
@@ -39,7 +39,7 @@ Measured sample: 13 runs, 11 solved and 2 controlled unsolved under concurrent l
 - API path: `POST /api/v1/challenges/{challenge_id}/runs` followed by
   `POST /api/v1/runs/{run_id}/start`
 - Solver mode: `solver_v2`
-- Target: `http://192.168.236.1:28346/`
+- Target: `http://192.168.236.1:28656/`
 - Result: `COMPLETED_SOLVED`, 30 Tool Calls, Reporting phase
 - Audit: solver start/action/tool/observation/completion events persisted
 - Fresh reproduction: `executed=true`, `verified=true`,
@@ -59,3 +59,19 @@ Each entry must include:
 - evidence references
 - completion decision
 - failure and recovery result
+
+## 2026-08-09 — Muteki live validation
+
+- Run ID: `234d17a5-0c48-4cd0-94ea-11109607706e`.
+- API: create Run with `solver_mode=muteki`, then start it through the public
+  Run API.
+- Target: `http://192.168.236.1:28656/`.
+- Result: `COMPLETED_SOLVED`; 16 completed ToolCalls; 16 Evidence refs.
+- Events: phase changes for `prepare`, `race`, `coordinator`, `finalize`,
+  plus `muteki.run_finished` and outer `run.completed`.
+- Frontend: browser workspace displayed terminal `FINALIZE`, Muteki facts,
+  Worker/tool timeline and audit events through SSE.
+- Validation: 40 focused backend tests passed; compileall, Ruff and diff
+  checks passed; frontend `npm run build` passed; backend, bridge, frontend,
+  Runner and host engine health checks passed where applicable.
+- Remaining: ten-run pressure and container model execution are pending.

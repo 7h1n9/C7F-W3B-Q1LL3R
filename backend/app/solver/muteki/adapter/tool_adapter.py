@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
@@ -66,11 +68,17 @@ class ToolAdapter:
         )
 
     @staticmethod
-    def to_fact(tool_result: ToolResult, *, source_worker_id: str = "muteki-worker") -> Fact:
+    def to_fact(tool_result: ToolResult, *, source_worker_id: str = "muteki-worker", request: Mapping[str, Any] | None = None) -> Fact:
         """Project a gateway result into a graph fact without raw response data."""
         summary = tool_result.output.get("summary") if isinstance(tool_result.output, Mapping) else None
         status = tool_result.output.get("status") if isinstance(tool_result.output, Mapping) else None
         content = f"tool={tool_result.tool_name}; success={tool_result.success}; status={status or ('SUCCESS' if tool_result.success else 'FAILED')}"
+        request = request if isinstance(request, Mapping) else {}
+        if request.get("method") or request.get("url"):
+            content += f"; request_method={str(request.get('method') or 'GET').upper()}; request_url={str(request.get('url') or '')[:500]}"
+        details = _safe_result_details(tool_result.output)
+        if details:
+            content += "; observed=" + json.dumps(details, ensure_ascii=False, sort_keys=True)
         if summary:
             content += f"; summary={str(summary)[:500]}"
         return Fact(
@@ -81,6 +89,31 @@ class ToolAdapter:
             created_at="",
             evidence_refs=tool_result.evidence_refs,
         )
+
+
+def _safe_result_details(output: Mapping[str, Any]) -> dict[str, Any]:
+    """Keep navigation metadata while excluding response bodies and secrets."""
+
+    keys = ("status_code", "final_url", "links", "form_actions", "parameter_names", "json_keys")
+    details = {key: output.get(key) for key in keys if output.get(key) not in (None, [], {})}
+    excerpt = output.get("body_excerpt") or output.get("content_excerpt")
+    if isinstance(excerpt, str):
+        try:
+            parsed = json.loads(excerpt)
+        except (TypeError, ValueError):
+            parsed = None
+        if isinstance(parsed, Mapping):
+            report = parsed.get("diagnostic_report")
+            if isinstance(report, Mapping) and report.get("download_url"):
+                details["download_url"] = str(report["download_url"])[:500]
+            for key in ("ticket_no", "title"):
+                if parsed.get(key):
+                    details[key] = str(parsed[key])[:200]
+    links = details.get("links") or []
+    ticket_links = [str(item) for item in links if re.search(r"/tickets/WO-[A-Za-z0-9-]+", str(item), re.I)]
+    if ticket_links:
+        details["ticket_links"] = ticket_links[:20]
+    return details
 
 
 __all__ = ["ToolAdapter", "ToolResult"]

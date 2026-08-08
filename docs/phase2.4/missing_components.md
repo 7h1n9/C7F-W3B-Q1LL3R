@@ -1,6 +1,6 @@
 # Phase 2.4 Missing Components
 
-Status: COMPLETED_WITH_LIMITS
+Status: LIVE_VALIDATED_WITH_LIMITS
 
 ## Rules
 
@@ -45,3 +45,14 @@ The listed gaps were closed for the explicit Solver v2 route without changing th
 - Strict Solver audit events are projected to central RunEvents.
 
 The remaining issue is operational: concurrent Runner load can make a bounded script inconclusive. Higher concurrency requires Runner/database capacity tuning outside this scoped refactor.
+
+## Muteki validation status (2026-08-09)
+
+The canonical Muteki production adapter is live-validated against the
+configured Challenge target on port `28656`. It uses the canonical graph as
+its completion authority and persists a sanitized `SolveRun.report_json`; it
+does not manufacture legacy `FlagCandidate` rows or route through the legacy
+formal report barrier. Host Codex health passed. Container health remains
+fail-closed until a proprietary engine CLI and credentials are intentionally
+installed in the worker image. The one fresh Run proves the chain; the
+ten-run pressure campaign remains pending.

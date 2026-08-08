@@ -1,8 +1,8 @@
 # Phase 2.4 Architecture Audit
 
-Status: COMPLETED_WITH_LIMITS
+Status: LIVE_VALIDATED_WITH_LIMITS
 
-Target: Asset Warranty Verification Platform at `http://192.168.236.1:28346/`
+Target: 设备报修工单平台 at `http://192.168.236.1:28656/` (authoritative configured target)
 
 ## Required chain
 
@@ -78,7 +78,7 @@ evidence.
 
 ### Real target observation
 
-- `http://192.168.236.1:28346/` responded with HTTP 200 and title
+- `http://192.168.236.1:28656/` responded with HTTP 200 and title
   `资产保修核验平台`.
 - The page exposes `/help`, `/history`, and a JavaScript POST contract at
   `/api/warranty/check` with `asset_no` and `department` fields.
@@ -102,3 +102,19 @@ Evidence authorities.
 ## Remaining operational limit
 
 Eight concurrent real runs produced six solved outcomes and two controlled `COMPLETED_UNSOLVED/SOLVER_NO_ACTION` outcomes after transient Runner errors. The reducer now permits one persisted script retry before terminal stop; a sequential retry succeeded. This is recorded as a load/recovery limitation, not as a solved result.
+
+## Muteki live validation override (2026-08-09)
+
+The earlier Solver v2 sections are historical context. The authoritative
+Muteki validation is Run `234d17a5-0c48-4cd0-94ea-11109607706e`:
+
+- Result: `COMPLETED_SOLVED` against the configured target on port `28656`.
+- Flow: Task -> RunSupervisor -> MutekiRuntime -> MutekiGraph -> GatewayWorker
+  -> ToolGateway -> Runner -> target -> Evidence -> canonical flag gate.
+- Race wrote endpoint/auth/session facts and an `IDOR` classification with
+  confidence 85. The bounded trace completed 16 tool calls.
+- The graph contains a verified flag record and `SolveRun.report_json` has
+  `flag_verified=true`, 16 Evidence references, the graph path, and all four
+  completed stages. The flag value is intentionally omitted here.
+- The prompt's `:28346` URL was stale; the Challenge configuration and live
+  requests used `http://192.168.236.1:28656/`.

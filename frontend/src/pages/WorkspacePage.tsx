@@ -107,6 +107,30 @@ function eventColor(type: string): string {
   return "gray";
 }
 
+type MutekiProjection = {
+  phase?: string;
+  facts: string[];
+  lastFact?: string;
+};
+
+function projectMutekiEvents(events: RunEvent[]): MutekiProjection {
+  let phase: string | undefined;
+  const facts: string[] = [];
+  for (const event of events) {
+    if (!event.event_type.startsWith("muteki.")) continue;
+    const envelope = event.payload_json as { muteki_event_type?: string; payload?: Record<string, unknown> };
+    const type = envelope.muteki_event_type ?? event.event_type.slice("muteki.".length);
+    const payload = envelope.payload ?? {};
+    if (type === "phase_changed" && typeof payload.phase === "string") {
+      phase = payload.phase.toUpperCase();
+    }
+    if (type === "fact_added" && typeof payload.content === "string") {
+      facts.push(payload.content);
+    }
+  }
+  return { phase, facts, lastFact: facts.length ? facts[facts.length - 1] : undefined };
+}
+
 function flagStatusMeta(state?: FlagCandidate["review_state"]) {
   if (state === "VALID") return { color: "green", text: "正确" };
   if (state === "INVALID") return { color: "red", text: "错误" };
@@ -303,6 +327,7 @@ export function WorkspacePage() {
     const start = (timelinePage - 1) * timelinePageSize;
     return events.slice(start, start + timelinePageSize);
   }, [events, timelinePage]);
+  const mutekiProjection = useMemo(() => projectMutekiEvents(events), [events]);
 
   useEffect(() => {
     const maxPage = Math.max(1, Math.ceil(events.length / timelinePageSize));
@@ -378,7 +403,7 @@ export function WorkspacePage() {
             {
               key: "phase",
               label: "当前阶段",
-              children: run.data ? runStatusLabel(run.data.current_phase) : "—",
+              children: mutekiProjection.phase ?? (run.data ? runStatusLabel(run.data.current_phase) : "—"),
             },
             {
               key: "skills",
@@ -397,7 +422,7 @@ export function WorkspacePage() {
             { key: "lease", label: "执行租约", children: health.data?.runtime.active_lease ? "活动中" : "无活动租约" },
             { key: "worker", label: "当前执行", children: health.data?.runtime.running_tool ? "工具执行中" : health.data?.runtime.running_task ? "Worker 执行中" : "空闲" },
             { key: "last-tool", label: "最近工具", children: health.data?.progress.last_tool ? `${health.data.progress.last_tool} (${health.data.progress.last_tool_status ?? "未知"})` : "—" },
-            { key: "last-fact", label: "最近事实", children: health.data?.progress.last_fact ?? "—" },
+            { key: "last-fact", label: "最近事实", children: mutekiProjection.lastFact ?? health.data?.progress.last_fact ?? "—" },
             { key: "no-progress", label: "连续无进展", children: health.data?.progress.no_progress_count ?? 0 },
             { key: "error", label: "最近错误", children: health.data?.last_error_code ?? "—" },
           ]}
@@ -407,7 +432,7 @@ export function WorkspacePage() {
       <Card className="panel-card" title="方法论状态" style={{ marginTop: 18 }}>
         <Row gutter={[12, 12]}>
           <Col xs={24} md={8}>
-            <Statistic title="当前阶段" value={solverState.data?.current_phase ?? run.data?.current_phase ?? "—"} />
+            <Statistic title="当前阶段" value={mutekiProjection.phase ?? solverState.data?.current_phase ?? run.data?.current_phase ?? "—"} />
           </Col>
           <Col xs={24} md={8}>
             <Statistic title="未取得进展次数" value={solverState.data?.no_progress_count ?? 0} />
@@ -420,7 +445,11 @@ export function WorkspacePage() {
           <Col xs={24} md={12}>
             <Card size="small" title="已确认事实" bordered={false}>
               <Space wrap>
-                {(solverState.data?.confirmed_facts_json ?? []).length
+                {mutekiProjection.facts.length || (solverState.data?.confirmed_facts_json ?? []).length
+                  ? mutekiProjection.facts.map((fact, index) => (
+                      <Tag key={`muteki-${index}-${fact}`}>{fact.slice(0, 100)}</Tag>
+                    ))
+                  : (solverState.data?.confirmed_facts_json ?? []).length
                   ? (solverState.data?.confirmed_facts_json ?? []).map((item, index) => (
                       <Tag key={`${index}-${String(item.source ?? "fact")}`}>{String(item.source ?? "fact")}</Tag>
                     ))

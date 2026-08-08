@@ -29,6 +29,7 @@ class ReconReport:
     session_cookie_names: tuple[str, ...]
     frameworks: tuple[str, ...]
     evidence_refs: tuple[str, ...] = field(default_factory=tuple)
+    public_credentials: tuple[str, str] | None = None
 
 
 class BreadthScanner:
@@ -52,8 +53,10 @@ class BreadthScanner:
         observations: list[ReconObservation] = []
         seen: set[str] = set()
         evidence_refs: list[str] = []
+        public_credentials: tuple[str, str] | None = None
 
         async def request(url: str) -> None:
+            nonlocal public_credentials
             if len(observations) >= self.max_requests:
                 return
             normalized = urljoin(base_url.rstrip("/") + "/", url)
@@ -69,6 +72,12 @@ class BreadthScanner:
             output = dict(getattr(result, "output", {}) or {})
             status = _int(output.get("status_code") or _nested(output, "structured_result", "status_code"))
             body = str(output.get("body_excerpt") or output.get("body") or output.get("summary") or "")
+            discovered_credentials = _public_demo_credentials(body)
+            if discovered_credentials:
+                public_credentials = discovered_credentials
+            extracted = output.get("extracted_facts") if isinstance(output.get("extracted_facts"), dict) else {}
+            form_actions = extracted.get("form_actions") or output.get("form_actions") or []
+            parameter_names = extracted.get("parameter_names") or output.get("parameter_names") or []
             headers = output.get("headers") if isinstance(output.get("headers"), dict) else {}
             cookie_names = _cookie_names(output)
             location = str(headers.get("location") or headers.get("Location") or "")
@@ -79,7 +88,8 @@ class BreadthScanner:
             links = tuple(_links(body, normalized))
             refs = tuple(str(item) for item in getattr(result, "evidence_refs", ()) or ())
             evidence_refs.extend(refs)
-            observations.append(ReconObservation(normalized, status, _summary(body, status), cookie_names, redirected_to_login, framework, jwt_detected, links, refs))
+            auth_hint = _auth_hint(body, form_actions, parameter_names)
+            observations.append(ReconObservation(normalized, status, _summary(body, status), cookie_names, redirected_to_login or auth_hint, framework, jwt_detected, links, refs))
 
         # Session creation is not counted as a target request.
         await self.execute_tool("http_session_request", {"operation": "create", "session_name": session_name}, workspace_id, run_id)
@@ -100,7 +110,7 @@ class BreadthScanner:
             or any(marker in item.summary.casefold() for marker in ("login", "sign in", "unauthorized"))
             for item in observations
         )
-        return ReconReport(tuple(observations), endpoints, auth_required, cookies, frameworks, tuple(dict.fromkeys(evidence_refs)))
+        return ReconReport(tuple(observations), endpoints, auth_required, cookies, frameworks, tuple(dict.fromkeys(evidence_refs)), public_credentials)
 
 
 def _nested(value: dict[str, Any], key: str, child: str) -> Any:
@@ -154,6 +164,24 @@ def _summary(body: str, status: int | None) -> str:
     # or cookie/token-looking material in the graph fact.
     cleaned = BreadthScanner._FLAG_RE.sub("<flag-candidate>", body)
     return f"HTTP {status if status is not None else 'unknown'}: {cleaned[:200]}"
+
+
+def _auth_hint(body: str, form_actions: Any, parameter_names: Any) -> bool:
+    """Recognize a public login form without persisting credentials."""
+
+    text = body.casefold()
+    forms = " ".join(str(item) for item in form_actions or ()).casefold()
+    names = " ".join(str(item) for item in parameter_names or ()).casefold()
+    return "password" in text or "/login" in forms or {"username", "password"}.issubset(set(names.split()))
+
+
+def _public_demo_credentials(body: str) -> tuple[str, str] | None:
+    """Extract only credentials explicitly exposed by the public challenge page."""
+
+    folded = body.casefold()
+    if "demo" in folded and "demo-pass" in folded:
+        return "demo", "demo-pass"
+    return None
 
 
 __all__ = ["BreadthScanner", "ReconObservation", "ReconReport"]

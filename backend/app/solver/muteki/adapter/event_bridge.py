@@ -4,7 +4,7 @@ import asyncio
 from collections.abc import Callable
 from typing import Any
 
-from app.services.events import EventService, event_service
+from app.services.events import EventService
 
 from ..events import EventEnvelope
 
@@ -14,7 +14,12 @@ class EventBridge:
 
     def __init__(self, session: Any, *, service: EventService | None = None, run_id: str | None = None) -> None:
         self._session = session
-        self._service = service or event_service
+        # Muteki graph callbacks are ordered by this bridge. Keep their
+        # asyncio lock separate from ToolGateway's EventService lock: a
+        # worker can emit a tool event while the preceding Muteki audit event
+        # is still being flushed. Both services persist to the same durable
+        # RunEvent table, and EventService already retries sequence races.
+        self._service = service or EventService()
         self._run_id = run_id
         self._seen: set[tuple[str, int]] = set()
         self._tail: asyncio.Task[Any] | None = None

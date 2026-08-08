@@ -85,16 +85,33 @@ class MutekiCoordinator:
                     break
                 revision = self.graph.revision()
                 if revision == self._last_revision:
-                    if self.config.interval_seconds:
-                        await asyncio.sleep(self.config.interval_seconds)
+                    # Always yield when no new graph revision is available.
+                    # With interval_seconds=0 a tight loop could consume all
+                    # ticks before a just-spawned worker gets a scheduling
+                    # turn, causing finalize() to cancel it as an apparent
+                    # no-progress run.
+                    await asyncio.sleep(max(0.0, self.config.interval_seconds))
                     continue
+                # Consume this snapshot before dispatching.  Worker facts
+                # written during this turn must remain a new revision for the
+                # following turn; assigning the post-worker revision here
+                # would skip the next Reason pass entirely.
+                self._last_revision = revision
                 result = await self.reason.reason(self.graph)
                 self.reason.write_intents(self.graph, result)
                 await self._dispatch_open_intent()
+                if self.pool.active_count:
+                    try:
+                        await asyncio.wait_for(
+                            self.pool.wait(),
+                            timeout=max(1.0, float(self.config.worker_timeout_seconds)),
+                        )
+                    except asyncio.TimeoutError:
+                        self.graph.add_dead_end(actor="coordinator", description="WORKER_TIMEOUT")
+                        self.request_stop()
                 if self.config.review_interval > 0 and (tick + 1) % self.config.review_interval == 0:
                     await self._dispatch_review()
                 await asyncio.sleep(0)
-                self._last_revision = self.graph.revision()
                 if self.config.interval_seconds:
                     await asyncio.sleep(self.config.interval_seconds)
         finally:

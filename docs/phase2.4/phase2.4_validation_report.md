@@ -1,10 +1,10 @@
 # Phase 2.4 Validation Report
 
-Status: COMPLETED_WITH_LIMITS
+Status: LIVE_VALIDATED_WITH_LIMITS
 
-Date: 2026-08-08
+Date: 2026-08-09
 
-Target: `资产保修核验平台` — `http://192.168.236.1:28346/`
+Target: `设备报修工单平台` — `http://192.168.236.1:28656/`
 
 ## Result
 
@@ -132,3 +132,42 @@ completed successfully. Token consumption is not exposed by the current
   operations, outside this refactor scope.
 - The current bridge does not expose token counts.
 - Legacy orchestrator remains intact and is not replaced by this validation.
+
+## Authoritative Muteki live run (2026-08-09)
+
+Run ID: `234d17a5-0c48-4cd0-94ea-11109607706e`
+
+- Mode: `muteki`; result: `SUCCESS` / `COMPLETED_SOLVED`.
+- Target: `http://192.168.236.1:28656/` (the configured Challenge target;
+  the prompt's port `28346` was stale).
+- Execution: 16 completed ToolCalls through the existing ToolGateway and
+  remote Runner adapter, with 16 Evidence references.
+- Race: bounded endpoint reconnaissance, same-session authentication and
+  ticket/API exploration produced `IDOR` classification with confidence 85.
+- Lifecycle: `prepare -> race -> coordinator -> finalize`, followed by
+  `muteki.run_finished` and outer `run.completed`.
+- Completion: canonical graph flag record verified; durable `report_json`
+  contains `flag_verified=true`, Evidence references, graph path, and stage
+  list. The flag value is intentionally redacted from this report.
+- Frontend: browser validation showed Muteki mode, status `已解出`, phase
+  `FINALIZE`, Muteki facts, and the live audit timeline.
+
+## Attempts and fixes
+
+- EventBridge ordering/isolation and Gateway rollback handling fixed the
+  initial Race transaction overlap.
+- Coordinator revision handling restored the Reason pass after Worker facts.
+- An immutable Challenge snapshot removed the post-commit `MissingGreenlet`
+  failure.
+- Bounded adjacent-ID exploration and whitespace-tolerant report URL parsing
+  completed the authorized IDOR path.
+- Muteki terminal detail reads now skip the legacy Codex report barrier;
+  RunSupervisor persists the Muteki report JSON instead.
+
+## Limits
+
+- The ten-run pressure requirement has not been completed in this checkpoint;
+  no aggregate success rate is claimed.
+- Host Codex CLI health passed. Container health remains unavailable for model
+  execution because the worker image has no proprietary Codex/Claude/Cursor
+  CLI or credentials.

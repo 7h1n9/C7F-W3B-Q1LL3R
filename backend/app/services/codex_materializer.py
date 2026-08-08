@@ -176,7 +176,14 @@ class CodexMaterializer:
             # is also an online compaction boundary for Codex SDK Runs.
             compaction_scheduler.enqueue(run.id)
 
-            if RunStatus(run.status) in {RunStatus.COMPLETED_SOLVED, RunStatus.COMPLETED_UNSOLVED}:
+            if run.solver_mode == "muteki":
+                # Muteki owns its completion evidence in the canonical graph
+                # and persists a sanitized report_json from RunSupervisor.
+                # Do not route it through the legacy Codex report barrier,
+                # which requires FlagCandidate rows that Muteki deliberately
+                # does not create.
+                pass
+            elif RunStatus(run.status) in {RunStatus.COMPLETED_SOLVED, RunStatus.COMPLETED_UNSOLVED}:
                 report = await session.scalar(select(Artifact).where(Artifact.run_id == run.id, Artifact.artifact_type == "report", Artifact.status == "ACTIVE"))
                 if report is None:
                     await report_service.generate(

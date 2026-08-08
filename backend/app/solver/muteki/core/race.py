@@ -26,6 +26,7 @@ class RaceWorker:
         self.metadata = dict(metadata or {})
         self.workspace_id = workspace_id
         self.run_id = run_id
+        self.public_credentials: tuple[str, str] | None = None
 
     async def run(self, worker_id: str = "race-worker") -> RaceResult:
         explicit = classify_challenge(self.metadata)
@@ -38,6 +39,7 @@ class RaceWorker:
             workspace_id=self.workspace_id,
             run_id=self.run_id,
         )
+        self.public_credentials = report.public_credentials
         for observation in report.observations:
             self._fact(worker_id, {
                 "type": "ENDPOINT_OBSERVED",

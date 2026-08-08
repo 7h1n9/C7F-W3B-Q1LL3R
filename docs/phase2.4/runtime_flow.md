@@ -1,6 +1,6 @@
 # Phase 2.4 Runtime Flow
 
-Status: COMPLETED_WITH_LIMITS
+Status: LIVE_VALIDATED_WITH_LIMITS
 
 ## Intended flow
 
@@ -71,4 +71,25 @@ Task/Run API
   -> fresh HTTP reproduction -> report.completed
 ```
 
-Observed target: `http://192.168.236.1:28346/`.
+Observed target: `http://192.168.236.1:28656/`.
+
+## Muteki live flow (2026-08-09)
+
+```text
+POST challenge/{id}/runs (solver_mode=muteki)
+  -> POST runs/{id}/start
+  -> RunSupervisor._run_muteki
+  -> MutekiRuntime / MutekiOrchestrator
+  -> Prepare -> Race breadth scan
+  -> SharedGraph facts + IDOR classification
+  -> Coordinator Reason -> bounded session/API actions
+  -> GatewayWorker -> ToolGateway -> remote Runner
+  -> protected Artifacts/Observations/EvidenceLedger
+  -> canonical graph verified flag
+  -> COMPLETED_SOLVED + report_json
+  -> Muteki EventBridge -> durable RunEvent/SSE -> WorkspacePage
+```
+
+The frontend now derives the displayed Muteki phase from `muteki.phase_changed`
+events. The legacy Run `current_phase` column remains `INTAKE` for this opt-in
+path, while the terminal workspace correctly displays `FINALIZE`.

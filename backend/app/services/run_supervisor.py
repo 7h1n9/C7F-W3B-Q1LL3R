@@ -10,7 +10,7 @@ from sqlalchemy import func, select
 
 from app.core.database import SessionLocal
 from app.models.challenge import Challenge
-from app.models.multi_agent import AgentTask, PlannerProposal, VerifiedFact
+from app.models.multi_agent import AgentTask, EvidenceLedger, PlannerProposal, VerifiedFact
 from app.models.run import (
     FlagCandidate,
     RunAttempt,
@@ -608,6 +608,28 @@ class RunSupervisor:
             else:
                 transition(run, RunStatus.FAILED_ENGINE)
                 run.last_error_code = result.reason or "MUTEKI_RUNTIME_ERROR"
+            evidence_refs = list(
+                (
+                    await session.scalars(
+                        select(EvidenceLedger.id)
+                        .where(EvidenceLedger.run_id == run.id)
+                        .order_by(EvidenceLedger.created_at)
+                    )
+                ).all()
+            )
+            run.report_json = {
+                "generated": True,
+                "engine": "muteki",
+                "status": result.status,
+                "reason": result.reason,
+                "flag": result.flag if result.flag_found else None,
+                "flag_verified": bool(result.flag_found),
+                "evidence_refs": [str(item) for item in evidence_refs],
+                "evidence_count": len(evidence_refs),
+                "graph_path": result.graph_path,
+                "completed_stages": ["prepare", "race", "coordinator", "finalize"],
+                "tool_call_count": int(run.tool_call_count or 0),
+            }
             await session.commit()
         except Exception as error:
             await session.rollback()

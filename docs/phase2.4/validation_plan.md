@@ -1,6 +1,6 @@
 # Phase 2.4 Validation Plan
 
-Status: COMPLETED_WITH_LIMITS
+Status: LIVE_VALIDATED_WITH_LIMITS
 
 ## Code validation
 
@@ -16,7 +16,7 @@ Status: COMPLETED_WITH_LIMITS
 
 ## Real target validation
 
-Target: `http://192.168.236.1:28346/`
+Target: `http://192.168.236.1:28656/`
 
 The initial task supplied to the system must contain only the target name,
 target URL, and the request to perform authorized security testing and return
@@ -38,3 +38,16 @@ The genuine run gate was satisfied by `4b9236c2-1b27-4afc-8b0b-9a7b522eb5b2`; fr
 ## Current audit gate
 
 The explicit `solver_v2` route is now eligible and measured. The sample contains 13 real runs: 11 `COMPLETED_SOLVED` and 2 controlled `COMPLETED_UNSOLVED/SOLVER_NO_ACTION` outcomes during eight-way concurrent load. Both unsolved runs lacked a verified Finding and did not cross the Completion Gate; subsequent sequential and final post-validation runs succeeded with fresh reproduction.
+
+## Muteki live validation gate (2026-08-09)
+
+- Fresh authorized Run: `234d17a5-0c48-4cd0-94ea-11109607706e`.
+- Result: `COMPLETED_SOLVED`, 16 completed ToolCalls, 16 Evidence references.
+- Race classification: `IDOR`, confidence 85.
+- Lifecycle events: `prepare`, `race`, `coordinator`, `finalize`, and
+  `muteki.run_finished` are present in durable RunEvent history.
+- Browser validation: WorkspacePage showed Muteki mode, terminal `FINALIZE`,
+  Muteki facts, and the audit timeline from SSE.
+- The requested ten-run pressure campaign was not executed in this checkpoint;
+  no ten-run success rate is claimed. Container model execution is also
+  pending because the test image intentionally lacks proprietary CLIs.
