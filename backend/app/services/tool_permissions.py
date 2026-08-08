@@ -22,6 +22,19 @@ async def effective_tools_for(session: AsyncSession, run: SolveRun, challenge: C
                 effective.discard("sqlite_metadata_discovery")
                 if "mysql_metadata_discovery" in set(manifest.backend_registry_tools or []) and "mysql_metadata_discovery" in set(manifest.runner_capability_tools or []):
                     effective.add("mysql_metadata_discovery")
+                if (
+                    getattr(run, "solver_mode", "multi_agent_v1") == "solver_v2"
+                    and "sqlite_metadata_discovery" in set(manifest.backend_registry_tools or [])
+                    and "sqlite_metadata_discovery" in set(manifest.runner_capability_tools or [])
+                ):
+                    effective.add("sqlite_metadata_discovery")
+                if (
+                    getattr(run, "solver_mode", "multi_agent_v1") == "solver_v2"
+                    and "script_run" in set(manifest.backend_registry_tools or [])
+                    and "script_run" in set(manifest.runner_capability_tools or [])
+                    and "script_run" in set((run.role_snapshot_json or {}).get("tools") or [])
+                ):
+                    effective.add("script_run")
             return effective - await forbidden_tools_for(session, run.id)
     allowed = set(allowed_tools_for(challenge.challenge_type, challenge.metadata_json or {}))
     role_tools = set((run.role_snapshot_json or {}).get("tools") or [])
@@ -30,6 +43,13 @@ async def effective_tools_for(session: AsyncSession, run: SolveRun, challenge: C
         role_tools.add("mysql_metadata_discovery")
     if role_tools:
         allowed &= role_tools
+    if (
+        getattr(run, "solver_mode", "multi_agent_v1") == "solver_v2"
+        and "sqlite_metadata_discovery" in allowed_tools_for(challenge.challenge_type, {})
+    ):
+        allowed.add("sqlite_metadata_discovery")
+    if getattr(run, "solver_mode", "multi_agent_v1") == "solver_v2" and "script_run" in role_tools:
+        allowed.add("script_run")
     try:
         from app.services.runner_client import runner_client
 

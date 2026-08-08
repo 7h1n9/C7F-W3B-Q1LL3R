@@ -29,13 +29,22 @@ class FreshReproductionExecutor:
             .order_by(FlagCandidate.created_at.desc())
         )
         if valid_candidate is not None:
-            request_spec = dict(checkpoint.get("request_spec") or {})
+            solver_reproduction = checkpoint.get("solver_reproduction")
+            request_spec = dict(
+                (solver_reproduction or {}).get("request")
+                or checkpoint.get("request_spec")
+                or {}
+            ) if isinstance(solver_reproduction, dict) else dict(checkpoint.get("request_spec") or {})
             extraction_call = await session.scalar(
                 select(ToolCall)
                 .where(ToolCall.run_id == run.id, ToolCall.tool_name == "boolean_config_extract")
                 .order_by(ToolCall.created_at.desc())
             )
-            extraction_args = dict(extraction_call.arguments_json or {}) if extraction_call else {}
+            extraction_args = (
+                dict(solver_reproduction)
+                if isinstance(solver_reproduction, dict)
+                else dict(extraction_call.arguments_json or {}) if extraction_call else {}
+            )
             expression = str(
                 extraction_args.get("target_expression")
                 or checkpoint.get("target_expression")
@@ -51,10 +60,21 @@ class FreshReproductionExecutor:
             request_spec = json.loads(json.dumps(request_spec))
             container = "json" if isinstance(request_spec.get("json"), dict) else "form" if isinstance(request_spec.get("form"), dict) else "query"
             request_spec.setdefault(container, {})[field] = baseline + suffix.format(condition=condition)
-            for key, value in (checkpoint.get("control_fields") or {}).items():
+            control_fields = (
+                extraction_args.get("control_fields")
+                if isinstance(extraction_args.get("control_fields"), dict)
+                else checkpoint.get("control_fields")
+            ) or {}
+            for key, value in control_fields.items():
                 request_spec.setdefault(container, {})[str(key)] = value
             request_spec["final_verification"] = True
-            selected = [{"tool_name": "http_request", "normalized_arguments": request_spec}]
+            if isinstance(solver_reproduction, dict):
+                selected = [{
+                    "tool_name": "http_request",
+                    "normalized_arguments": request_spec,
+                }]
+            else:
+                selected = [{"tool_name": "http_request", "normalized_arguments": request_spec}]
         log: list[dict] = []
         commands: list[str] = []
         success = True
@@ -67,7 +87,7 @@ class FreshReproductionExecutor:
             else:
                 tool = getattr(step, "tool_name", None)
                 args = getattr(step, "normalized_arguments", None) or {}
-            if tool == "boolean_config_extract":
+            if tool == "boolean_config_extract" and not isinstance(checkpoint.get("solver_reproduction"), dict):
                 args = {
                     **(checkpoint.get("request_spec") or {}),
                     "request": checkpoint.get("request_spec") or {},

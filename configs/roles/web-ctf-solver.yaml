@@ -4,12 +4,11 @@ version: 5
 description: Solver for explicitly authorized CTF Web challenges.
 challenge_types: [WEB_TARGET]
 enabled: true
-# These optional binaries are present on some Runner images but are not
-# implemented by the authoritative VM backend.  Keeping them out of the
-# default Web role prevents a false manifest-drift block at Run intake.
-# sqlmap is intentionally not in the default role until the VM self-test
-# proves its executable environment; bounded SQL probes remain available.
-tools: [http_request, http_session_request, http_extract, request_capture, file_read, file_search, python_run, script_run, sandbox_exec, jwt_inspect, js_asset_analyze, source_map_analyze, content_discovery, file_type, strings_extract, archive_list, sql_injection_probe, sql_boolean_compare, sql_union_probe, oracle_probe_matrix, boolean_config_extract, oracle_expression_calibration, mysql_metadata_discovery, nmap_service_probe, nikto_scan]
+# The authoritative Runner capability check still gates these tools at Run
+# intake.  The role must declare them so a verified SQL fallback can reach the
+# existing request-capture/SQLMap execution path when metadata enumeration has
+# no distinguishable fact.
+tools: [http_request, http_session_request, http_extract, request_capture, file_read, file_search, python_run, script_run, sandbox_exec, jwt_inspect, js_asset_analyze, source_map_analyze, content_discovery, file_type, strings_extract, archive_list, sql_injection_probe, sql_boolean_compare, sql_union_probe, oracle_probe_matrix, boolean_config_extract, oracle_expression_calibration, mysql_metadata_discovery, sqlmap_detect, sqlmap_run, nmap_service_probe, nikto_scan]
 skills: [ctf-solver-core, web-ctf-methodology]
 limits:
   max_tool_calls: 40

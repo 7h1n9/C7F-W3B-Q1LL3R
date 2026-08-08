@@ -29,6 +29,7 @@ from app.models.run import (
 )
 from app.schemas.tool import ToolArtifactRef, ToolExecutionResult, ToolModelView
 from app.services.assistance import assistance_level
+from app.services.boolean_oracle_quality import score_boolean_oracle
 from app.services.compaction_scheduler import compaction_scheduler
 from app.services.effective_logical_tool_calls import effective_logical_tool_call_service
 from app.services.events import event_service
@@ -37,14 +38,13 @@ from app.services.infrastructure import clear_failure, record_failure
 from app.services.run_budget_guard import run_budget_guard
 from app.services.runner_client import normalize_runner_job_id, runner_client
 from app.services.solver_state import solver_state_service
-from app.services.boolean_oracle_quality import score_boolean_oracle
 from app.services.sql_provenance import validate_sql_expression_provenance
 from app.services.tool_argument_adapter import adapt_arguments
 from app.services.tool_invocation_coordinator import tool_invocation_coordinator
 from app.services.tool_permissions import effective_tools_for
 from app.services.workspace_sync import workspace_sync_service
 from app.tools.policy import enforce_tool_policy
-
+from app.tools.registry import load_tool_definitions
 
 _TOOL_SUCCESS_STATUSES = {"COMPLETED", "SUCCESS", "CACHED"}
 _TOOL_EXECUTION_COMPLETED_STATUSES = _TOOL_SUCCESS_STATUSES | {"NO_FACT"}
@@ -70,8 +70,6 @@ def _metadata_result_has_required_fact(arguments: dict, result: dict) -> bool:
         return False
     values = {key: extracted.get(key, structured.get(key)) for key in required}
     return all(bool(value) for value in values.values())
-from app.tools.registry import load_tool_definitions
-
 _SECRET_KEYS = {"token", "password", "passwd", "secret", "api_key", "authorization", "cookie", "set-cookie"}
 
 
@@ -223,7 +221,12 @@ class ToolGateway:
         lease = coordinated["lease"]
         permitted_tools = await effective_tools_for(session, run, challenge)
         metadata = challenge.metadata_json or {}
-        if metadata.get("adapter") == "asset_warranty" and str(metadata.get("dbms") or "").lower() == "mysql" and name == "sqlite_metadata_discovery":
+        if (
+            metadata.get("adapter") == "asset_warranty"
+            and str(metadata.get("dbms") or "").lower() == "mysql"
+            and name == "sqlite_metadata_discovery"
+            and getattr(run, "solver_mode", "multi_agent_v1") != "solver_v2"
+        ):
             raise DomainError(
                 "TOOL_NOT_ALLOWED_FOR_DBMS",
                 "SQLite metadata discovery is disabled for the MySQL asset-warranty challenge.",
@@ -456,20 +459,6 @@ class ToolGateway:
                     session, run.id, "tool.result.collect.failed", {"tool_call_id": call.id, "logical_tool_call_id": call.logical_tool_call_id, "tool": name, "runner_job_id": job_id, "error_code": result.get("error_code"), "summary": result.get("summary")}
                 )
             contract_status = _result_contract_status(result)
-            # Compatibility path for a pre-contract Runner: an empty
-            # COMPLETED metadata response is a durable NO_FACT outcome, not a
-            # RESULT_CONTRACT/FAILED outcome.
-            if name == "mysql_metadata_discovery" and contract_status in {"COMPLETED", "SUCCESS"} and not _metadata_result_has_required_fact(arguments, result):
-                result = {
-                    **result,
-                    "status": "NO_FACT",
-                    "result_status": "NO_FACT",
-                    "error_code": "MYSQL_METADATA_EMPTY_RESULT",
-                    "summary": "mysql_metadata_discovery completed without a distinguishable metadata fact.",
-                    "stage": str(arguments.get("stage") or result.get("stage") or "metadata").lower(),
-                    "tool_execution_completed": True,
-                    "retryable": True,
-                }
             # HTTP/SQL jobs already return an explicit artifact_path.  A full
             # workspace manifest sync here can enumerate unrelated files and
             # delay result persistence after the Runner is already complete.
@@ -664,6 +653,21 @@ class ToolGateway:
             failed_code = str(result.get("error_code") or result.get("summary") or "SCRIPT_EXECUTION_FAILED")
             lifecycle = "BLOCKED_DEPLOYMENT" if failed_code in {"TARGET_NETWORK_ENFORCEMENT_UNAVAILABLE", "SCRIPT_TARGET_NETWORK_UNAVAILABLE"} else "PARTIAL" if result.get("status") == "PARTIAL" else "FAILED"
             await self._set_script_record_status(session, run, script_record, lifecycle, execution_error=None if lifecycle == "PARTIAL" else failed_code)
+        result = self._merge_artifact_structured_result(name, result, target)
+        # Compatibility path for a pre-contract Runner: check the semantic
+        # result only after the downloaded Artifact has had a chance to fill
+        # an abbreviated API envelope.
+        if name == "mysql_metadata_discovery" and _result_contract_status(result) in {"COMPLETED", "SUCCESS"} and not _metadata_result_has_required_fact(arguments, result):
+            result = {
+                **result,
+                "status": "NO_FACT",
+                "result_status": "NO_FACT",
+                "error_code": "MYSQL_METADATA_EMPTY_RESULT",
+                "summary": "mysql_metadata_discovery completed without a distinguishable metadata fact.",
+                "stage": str(arguments.get("stage") or result.get("stage") or "metadata").lower(),
+                "tool_execution_completed": True,
+                "retryable": True,
+            }
         unified = self._unified_result(name, result, artifact, permitted_tools)
         # Persist the first durable observation immediately after the Runner
         # result and Artifact have been committed.  Metadata/review reducers
@@ -835,6 +839,42 @@ class ToolGateway:
         value = re.sub(r"(?i)(authorization|cookie|set-cookie|token|api[_-]?key|password)(\s*[:=]\s*)([^;\s,]+)", r"\1\2<redacted>", value)
         return value
 
+    @staticmethod
+    def _merge_artifact_structured_result(name: str, result: dict, target: Path) -> dict:
+        """Recover semantic Runner fields when the API envelope is abbreviated.
+
+        The Runner API may return a compact model view while its downloaded
+        artifact contains the complete bounded tool result.  Solver v2 needs
+        the semantic Boolean/metadata fields to advance Blackboard state, but
+        it must not persist the artifact body in the Blackboard itself.
+        """
+        if name not in {
+            "sql_boolean_compare",
+            "mysql_metadata_discovery",
+            "boolean_config_extract",
+            "oracle_expression_calibration",
+            "request_capture",
+            "sqlmap_detect",
+            "sqlmap_run",
+        }:
+            return result
+        current = result.get("structured_result")
+        if not isinstance(current, dict) or any(
+            key in current for key in ("true_results", "false_results", "tables", "columns", "extracted_value")
+        ):
+            return result
+        if not target.is_file():
+            return result
+        try:
+            artifact_payload = json.loads(target.read_text(encoding="utf-8"))
+        except (OSError, ValueError, UnicodeError):
+            return result
+        artifact_structured = artifact_payload.get("structured_result") if isinstance(artifact_payload, dict) else None
+        if not isinstance(artifact_structured, dict):
+            return result
+        merged = {**artifact_structured, **current}
+        return {**result, "structured_result": merged}
+
     def _unified_result(
         self, name: str, result: dict, artifact: Artifact | None, permitted_tools: set[str]
     ) -> ToolExecutionResult:
@@ -843,15 +883,24 @@ class ToolGateway:
             status = "FAILED"
         structured = result.get("structured_result") if isinstance(result.get("structured_result"), dict) else result
         if name == "sql_boolean_compare":
-            quality = score_boolean_oracle(structured)
-            if quality["confidence"] < 0.8 and (structured.get("true_results") or structured.get("false_results") or structured.get("true_profile") or structured.get("false_profile")):
-                status = "LOW_SIGNAL"
+            quality_input = dict(structured)
+            true_rows = quality_input.get("true_results") or []
+            false_rows = quality_input.get("false_results") or []
+            if "true_signature" not in quality_input and true_rows and isinstance(true_rows[0], dict):
+                quality_input["true_signature"] = true_rows[0].get("signature") or {}
+            if "false_signature" not in quality_input and false_rows and isinstance(false_rows[0], dict):
+                quality_input["false_signature"] = false_rows[0].get("signature") or {}
+            quality = score_boolean_oracle(quality_input)
+            if quality["confidence"] < 0.8 and (true_rows or false_rows or structured.get("true_profile") or structured.get("false_profile")):
+                # LOW_SIGNAL is a diagnostic, not a ToolExecutionResult
+                # lifecycle status.  Keep the tool result COMPLETED so the
+                # reducer can record the inconclusive hypothesis and select a
+                # different field/strategy without corrupting the contract.
                 result["confidence"] = quality["confidence"]
                 result["signal_features"] = quality["signal_features"]
                 result["noise_features"] = quality["noise_features"]
                 result["recommended_strategy"] = quality["recommended_strategy"]
-                result["error_code"] = "LOW_SIGNAL"
-                result["result_status"] = "LOW_SIGNAL"
+                result["diagnostic_code"] = "LOW_SIGNAL"
         facts = dict(structured.get("extracted_facts") or result.get("extracted_facts") or result.get("facts") or {})
         if name == "sql_boolean_compare":
             # Boolean Oracle fields are semantic evidence, not generic HTTP
@@ -875,7 +924,7 @@ class ToolGateway:
             baseline = structured.get("baseline")
             if isinstance(baseline, dict) and isinstance(baseline.get("signature"), dict):
                 facts["baseline_signature"] = baseline["signature"]
-        for key in ("status_code", "final_url", "redirect_history", "content_type", "selected_headers", "cookie_names", "body_length", "html_title", "html_comments", "forms", "form_actions", "parameter_names", "links", "script_urls", "json_keys", "suspected_credentials", "suspected_flags", "path", "start_line", "end_line", "content_sha256", "matching_paths", "match_snippets", "line_numbers", "generated_files", "stdout_excerpt", "stderr_excerpt", "network_targets", "runtime_ms", "injectable", "parameter", "technique", "dbms", "databases", "tables", "columns", "dumped_rows", "flag_candidates", "raw_output_path", "sqlmap_extraction_completed"):
+        for key in ("status_code", "final_url", "redirect_history", "content_type", "selected_headers", "cookie_names", "body_length", "html_title", "html_comments", "forms", "form_actions", "parameter_names", "links", "script_urls", "json_keys", "suspected_credentials", "suspected_flags", "path", "start_line", "end_line", "content_sha256", "matching_paths", "match_snippets", "line_numbers", "generated_files", "stdout_excerpt", "stderr_excerpt", "network_targets", "runtime_ms", "injectable", "parameter", "technique", "dbms", "databases", "tables", "columns", "dumped_rows", "flag_candidates", "raw_output_path", "sqlmap_extraction_completed", "extracted_value", "oracle_verified", "length", "target_expression", "database_engine", "stage", "candidate_table", "candidate_column", "extraction_mode", "requests_sent", "errors", "verified_oracle", "provenance", "adaptive_extraction_profile", "capabilities", "calibration_matrix", "predicate_template", "requests", "request_file", "action"):
             if key in structured and key not in facts:
                 facts[key] = structured[key]
         excerpt = structured.get("body_excerpt") or structured.get("content_excerpt") or structured.get("content") or structured.get("output")

@@ -77,6 +77,24 @@ async def refresh_runtime_tool_manifest(
         if item.get("name")
     }
     effective = role & challenge_tools & backend & runner
+    # Solver v2 may select a bounded DBMS fallback after observing that the
+    # declared adapter produces no distinguishable metadata fact.  Keep the
+    # legacy role/challenge intersection unchanged, but make the existing
+    # SQLite metadata tool available to this explicit Solver path when the
+    # Runner capability probe proves it is installed.
+    if (
+        getattr(run, "solver_mode", "multi_agent_v1") == "solver_v2"
+        and "sqlite_metadata_discovery" in backend
+        and "sqlite_metadata_discovery" in runner
+    ):
+        effective.add("sqlite_metadata_discovery")
+    if (
+        getattr(run, "solver_mode", "multi_agent_v1") == "solver_v2"
+        and "script_run" in role
+        and "script_run" in backend
+        and "script_run" in runner
+    ):
+        effective.add("script_run")
     expected = role & challenge_tools & backend
     missing = sorted(expected - effective)
     runner_tool_rows = {str(item.get("name")): item for item in (capability_payload.get("tools") or []) if isinstance(item, dict)}

@@ -214,7 +214,7 @@ class CodexMaterializer:
         # from payloads that do not carry the original arguments can mutate
         # the argument digest and raise LOGICAL_TOOL_ID_COLLISION on every
         # subsequent Run detail poll.
-        if str(payload.get("execution_layer") or "") == "multi_agent" or "agent-task:" in str(payload.get("logical_tool_call_id") or ""):
+        if str(payload.get("execution_layer") or "") in {"multi_agent", "solver_v2"} or "agent-task:" in str(payload.get("logical_tool_call_id") or ""):
             return
         if (
             normalized_tool in self._FORBIDDEN_DIRECT_TOOLS

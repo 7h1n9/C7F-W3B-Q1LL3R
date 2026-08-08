@@ -4,7 +4,7 @@ import json
 import random
 
 from sqlalchemy import func, select
-from sqlalchemy.exc import OperationalError
+from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.run import RunEvent
@@ -36,30 +36,35 @@ class EventService:
             # ``solve_runs.event_sequence`` is a legacy compatibility field;
             # it is no longer updated for every event.  Ordering is owned by
             # RunEvent.event_id, while sequence remains a per-run API cursor.
-            sequence = int(
-                await session.scalar(select(func.max(RunEvent.sequence)).where(RunEvent.run_id == run_id)) or 0
-            ) + 1
-            event = RunEvent(
-                run_id=run_id,
-                sequence=sequence,
-                event_type=event_type,
-                payload_json=body,
-                payload_size=len(encoded_body),
-                payload_digest=hashlib.sha256(encoded_body).hexdigest(),
-            )
-            session.add(event)
-            await session.flush()
-            for retry in range(3):
+            event = None
+            for retry in range(5):
                 try:
+                    sequence = int(
+                        await session.scalar(select(func.max(RunEvent.sequence)).where(RunEvent.run_id == run_id)) or 0
+                    ) + 1
+                    event = RunEvent(
+                        run_id=run_id,
+                        sequence=sequence,
+                        event_type=event_type,
+                        payload_json=body,
+                        payload_size=len(encoded_body),
+                        payload_digest=hashlib.sha256(encoded_body).hexdigest(),
+                    )
+                    session.add(event)
+                    await session.flush()
                     await session.commit()
+                    await session.refresh(event)
                     break
-                except OperationalError as error:
+                except (IntegrityError, OperationalError) as error:
                     code = error.orig.args[0] if getattr(error, "orig", None) and error.orig.args else None
-                    if code not in {1205, 1213} or retry == 2:
-                        raise
+                    duplicate_sequence = isinstance(error, IntegrityError) and "uq_run_event_sequence" in str(error)
+                    retryable = duplicate_sequence or code in {1205, 1213}
                     await session.rollback()
+                    if not retryable or retry == 4:
+                        raise
                     await asyncio.sleep(0.03 * (2**retry) + random.random() * 0.02)
-            await session.refresh(event)
+            if event is None:
+                raise RuntimeError("RUN_EVENT_APPEND_FAILED")
         await event_bus.publish(run_id, self.serialize(event))
         return event
 

@@ -444,11 +444,13 @@ async def test_metadata_empty_stage_pauses_after_two_consecutive_attempts(sessio
         await session.flush()
         orchestrator = MultiAgentOrchestrator()
         assert await orchestrator._handle_mysql_metadata_empty_result(session, run, challenge, action, task) is False
-        assert await orchestrator._handle_mysql_metadata_empty_result(session, run, challenge, action, task) is True
-        assert run.status == RunStatus.WAITING_USER.value
-        assert run.last_error_code == "MYSQL_METADATA_STAGE_EMPTY_RESULT"
-        assert run.recovery_checkpoint_json["attempts"] == 2
-        assert run.recovery_checkpoint_json["target_expression"] == "VERSION()"
+        # Version is an optional diagnostic stage.  Two empty results block
+        # that stage and continue the essential current-database chain.
+        assert await orchestrator._handle_mysql_metadata_empty_result(session, run, challenge, action, task) is False
+        assert run.status == RunStatus.PLANNING.value
+        assert run.last_error_code == "MYSQL_METADATA_OPTIONAL_STAGE_BLOCKED"
+        assert run.recovery_checkpoint_json["metadata_attempts"]["version"] == 2
+        assert run.recovery_checkpoint_json["metadata_stage_blocked"] == "version"
 
 
 @pytest.mark.asyncio

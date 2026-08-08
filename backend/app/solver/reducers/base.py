@@ -12,6 +12,7 @@ class KnowledgeUpdate:
 
     verified_facts: list[dict] = field(default_factory=list)
     hypotheses: list[dict] = field(default_factory=list)
+    findings: list[dict] = field(default_factory=list)
     next_phase: str | None = None
     control_updates: dict = field(default_factory=dict)
 

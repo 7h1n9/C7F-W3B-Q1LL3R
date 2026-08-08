@@ -10,14 +10,28 @@ from datetime import UTC, datetime
 
 from sqlalchemy import delete, func, select
 
-from app.models.multi_agent import AgentTask, AgentTaskResult, ApprovedAction, EvidenceLedger, PlannerProposal, SolutionChainNode, VerifiedFact
-from app.models.run import RunAttempt, RunExecutionLease, RunUserInput, SolveRun, ToolCall, ToolInvocationTicket
+from app.models.multi_agent import (
+    AgentTask,
+    AgentTaskResult,
+    ApprovedAction,
+    EvidenceLedger,
+    PlannerProposal,
+    SolutionChainNode,
+    VerifiedFact,
+)
+from app.models.run import (
+    RunAttempt,
+    RunExecutionLease,
+    RunUserInput,
+    SolveRun,
+    ToolCall,
+    ToolInvocationTicket,
+)
 from app.models.solver_state import SolverState
 from app.schemas.multi_agent import AgentTaskStatus
 from app.services.events import event_service
 from app.services.solver_self_review import solver_self_review
 from app.services.user_input_resume_guard import check_user_input_resume
-
 
 TERMINAL_RUN_STATUSES = {
     "COMPLETED_SOLVED", "COMPLETED_UNSOLVED", "FAILED_ENGINE", "FAILED_TOOL",
@@ -44,6 +58,27 @@ class RunFinalizer:
         if not facts and state:
             facts = list(state.confirmed_facts_json or [])
         checkpoint = dict(run.recovery_checkpoint_json or {})
+        solver_blackboard = checkpoint.get("solver_blackboard") if isinstance(checkpoint.get("solver_blackboard"), dict) else {}
+        solver_knowledge = solver_blackboard.get("knowledge") if isinstance(solver_blackboard.get("knowledge"), dict) else {}
+        solver_findings = solver_knowledge.get("findings") if isinstance(solver_knowledge.get("findings"), list) else []
+        solver_v2_solved = run.solver_mode == "solver_v2" and run.status == "COMPLETED_SOLVED"
+        if run.solver_mode == "solver_v2":
+            facts.extend(
+                {
+                    "fact_key": "solver_v2.verified_finding",
+                    "fact_type": str(finding.get("type") or "FINDING"),
+                    "confidence": 100 if finding.get("verified") is True else 0,
+                    "value": {
+                        "title": finding.get("title"),
+                        "table": finding.get("table"),
+                        "column": finding.get("column"),
+                        "result": finding.get("result"),
+                    },
+                    "evidence_ids": list(finding.get("evidence_refs") or []),
+                }
+                for finding in solver_findings
+                if isinstance(finding, dict)
+            )
         calls = list((await session.scalars(select(ToolCall).where(
             ToolCall.run_id == run.id, ToolCall.status == "COMPLETED"
         ).order_by(ToolCall.created_at))).all())
@@ -96,7 +131,7 @@ class RunFinalizer:
             for item in repeated_failures
             if item.get("tool_name")
         })
-        next_steps = ["Inspect the failed stage output and Runner capability.", "Resume after correcting the input or extraction strategy."]
+        next_steps = [] if solver_v2_solved else ["Inspect the failed stage output and Runner capability.", "Resume after correcting the input or extraction strategy."]
         strategy_history = list(checkpoint.get("payload_strategy_history") or (ledger.get("payload_strategy_history") or []))
         return {
             "generated": True,
@@ -109,7 +144,7 @@ class RunFinalizer:
                 *[fact_stage_map[fact["fact_key"]] for fact in facts if isinstance(fact, dict) and fact.get("fact_key") in fact_stage_map],
             }),
             "evidence_summary": {
-                "confirmed_fact_count": len(durable_facts),
+                "confirmed_fact_count": len(facts),
                 "evidence_ledger_count": int(await session.scalar(select(func.count()).select_from(EvidenceLedger).where(EvidenceLedger.run_id == run.id)) or 0),
             },
             "user_inputs": [{
@@ -130,15 +165,15 @@ class RunFinalizer:
             "task_failure_classifications": [result.failure_classification_json for result in task_results if result.failure_classification_json],
             "tested_fields": tested_fields,
             "completed_tool_calls": [{"id": call.id, "tool": call.tool_name} for call in calls[-50:]],
-            "failed_stage": run.current_phase,
-            "current_blocker": run.last_error_code or reason,
-            "likely_cause": reason,
+            "failed_stage": "COMPLETED" if solver_v2_solved else run.current_phase,
+            "current_blocker": None if solver_v2_solved else run.last_error_code or reason,
+            "likely_cause": None if solver_v2_solved else reason,
             "checkpoint_details": checkpoint,
             "next_manual_steps": next_steps,
             "next_steps": next_steps,
             "attempted_payloads": strategy_history,
-            "remaining_possible_paths": ["untried payload family", "repair Runner contract", "resume after user guidance"],
-            "failure_reasons": failure_history or [reason],
+            "remaining_possible_paths": [] if solver_v2_solved else ["untried payload family", "repair Runner contract", "resume after user guidance"],
+            "failure_reasons": failure_history if solver_v2_solved else failure_history or [reason],
         }
 
     async def finish_unsolved_with_wp(self, session, run: SolveRun, reason: str) -> dict:

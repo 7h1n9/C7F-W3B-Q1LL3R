@@ -154,6 +154,8 @@ async def test_verified_generic_validation_updates_security_context_and_events(s
         assert [event.event_type for event in events] == [
             "validation.created",
             "security.context.updated",
+            "attack.state.updated",
+            "attack.transition.created",
         ]
 
 

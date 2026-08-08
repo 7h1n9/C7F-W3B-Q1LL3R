@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from app.security.action_authorizer import (
     ActionAuthorizer,
@@ -19,7 +19,7 @@ from .action_lifecycle import (
 from .blackboard import BlackboardState
 from .blackboard.repository import BlackboardRepository
 from .context import RunContext, RuntimeUsage
-from .events import SolverEvent
+from .events import SolverAuditEvent, SolverAuditEventType, SolverEvent
 from .knowledge import KnowledgeStore
 from .observation import SolverObservation
 from .planner import Planner
@@ -36,6 +36,7 @@ class SolverLoopStep:
     event: SolverEvent
     intent: ActionIntent | None = None
     result: WorkerResult | None = None
+    audit_event: SolverAuditEvent | None = None
 
     @property
     def finished(self) -> bool:
@@ -98,6 +99,36 @@ class SolverLoop:
             )
             return SolverLoopStep("WAITING", updated, event)
 
+        planned_execution = ActionExecutionRecord.pending(intent)
+        intent = replace(intent, action_id=planned_execution.action_id)
+        step_number = self._next_step(state)
+        planned_audit = self._audit(
+            event_type=SolverAuditEventType.ACTION_PLANNED,
+            run_id=run_id,
+            step=step_number,
+            phase=state.phase,
+            action_name=intent.action_name,
+            action_id=planned_execution.action_id,
+            fingerprint=planned_execution.fingerprint,
+            status="PLANNED",
+            reason_code="PLANNER_SELECTED",
+            evidence_refs=state.evidence_refs,
+            blackboard_version=state.version + 1,
+        )
+        planned_event = SolverEvent(
+            event_type="ACTION_PLANNED",
+            action=intent.action_name,
+            audit_event=planned_audit,
+        )
+        state = await self.blackboard.update(
+            run_id,
+            {
+                "control_merge": {"solver_step": step_number},
+                "history_append": [planned_event.to_dict()],
+            },
+            expected_version=state.version,
+        )
+
         policy_result = self.policy.validate(state.phase, intent)
         if intent.action_name not in allowed_actions or not policy_result.allowed:
             reason = (
@@ -115,7 +146,13 @@ class SolverLoop:
                 {"history_append": [event.to_dict()]},
                 expected_version=state.version,
             )
-            return SolverLoopStep("REJECTED", updated, event, intent=intent)
+            return SolverLoopStep(
+                "REJECTED",
+                updated,
+                event,
+                intent=intent,
+                audit_event=planned_audit,
+            )
 
         usage = self._runtime_usage(state)
         authorize_with_usage = getattr(self.action_authorizer, "authorize_with_usage", None)
@@ -123,8 +160,32 @@ class SolverLoop:
             security_decision = authorize_with_usage(intent, self.run_context, usage)
         else:
             security_decision = self.action_authorizer.authorize(intent, self.run_context)
+        authorized_audit = self._audit(
+            event_type=SolverAuditEventType.ACTION_AUTHORIZED,
+            run_id=run_id,
+            step=step_number,
+            phase=state.phase,
+            action_name=intent.action_name,
+            action_id=planned_execution.action_id,
+            fingerprint=planned_execution.fingerprint,
+            status=security_decision.decision.value,
+            reason_code=security_decision.reason_code,
+            evidence_refs=state.evidence_refs,
+            blackboard_version=state.version + 1,
+        )
+        authorized_event = SolverEvent(
+            event_type="ACTION_AUTHORIZED",
+            action=intent.action_name,
+            payload={"status": security_decision.decision.value},
+            audit_event=authorized_audit,
+        )
+        state = await self.blackboard.update(
+            run_id,
+            {"history_append": [authorized_event.to_dict()]},
+            expected_version=state.version,
+        )
         if security_decision.decision is SecurityDecisionType.ALLOW:
-            execution = ActionExecutionRecord.pending(intent).started()
+            execution = planned_execution.started()
             retry_error = self._retry_error(state, execution)
             if retry_error is not None:
                 event = SolverEvent(
@@ -149,6 +210,19 @@ class SolverLoop:
                 event_type="ACTION_STARTED",
                 action=intent.action_name,
                 payload={"execution": execution.to_dict()},
+                audit_event=self._audit(
+                    event_type=SolverAuditEventType.ACTION_STARTED,
+                    run_id=run_id,
+                    step=step_number,
+                    phase=state.phase,
+                    action_name=intent.action_name,
+                    action_id=execution.action_id,
+                    fingerprint=execution.fingerprint,
+                    status="STARTED",
+                    reason_code="ACTION_CHECKPOINT_WRITTEN",
+                    evidence_refs=state.evidence_refs,
+                    blackboard_version=state.version + 1,
+                ),
             )
             state = await self.blackboard.update(
                 run_id,
@@ -215,6 +289,29 @@ class SolverLoop:
         )
         projected = projected.model_copy(update={"phase": next_phase})
 
+        final_audit = None
+        if execution is not None:
+            final_audit = self._audit(
+                event_type=(
+                    SolverAuditEventType.ACTION_COMPLETED
+                    if execution.state.value == "COMPLETED"
+                    else SolverAuditEventType.ACTION_FAILED
+                ),
+                run_id=run_id,
+                step=step_number,
+                phase=state.phase,
+                action_name=intent.action_name,
+                action_id=execution.action_id,
+                fingerprint=execution.fingerprint,
+                status=execution.state.value,
+                reason_code=(
+                    "ACTION_COMPLETED"
+                    if execution.state.value == "COMPLETED"
+                    else execution.error_reason
+                ),
+                evidence_refs=observation.evidence_refs,
+                blackboard_version=state.version + 1,
+            )
         event = SolverEvent(
             event_type=event_type,
             action=intent.action_name,
@@ -227,6 +324,7 @@ class SolverLoop:
                 "security_reason": security_decision.reason,
                 "security_reason_code": security_decision.reason_code,
             },
+            audit_event=final_audit,
         )
         if execution is not None:
             event.payload["execution"] = execution.to_dict()
@@ -249,7 +347,14 @@ class SolverLoop:
             },
             expected_version=state.version,
         )
-        return SolverLoopStep(step_status, updated, event, intent=intent, result=result)
+        return SolverLoopStep(
+            step_status,
+            updated,
+            event,
+            intent=intent,
+            result=result,
+            audit_event=final_audit or authorized_audit,
+        )
 
     async def _recover_interrupted(
         self,
@@ -266,6 +371,19 @@ class SolverLoop:
                 "execution": recovered.to_dict(),
                 "recovery_feedback": feedback,
             },
+            audit_event=self._audit(
+                event_type=SolverAuditEventType.ACTION_RECOVERED,
+                run_id=run_id,
+                step=self._current_step(state),
+                phase=state.phase,
+                action_name=recovered.action_name,
+                action_id=recovered.action_id,
+                fingerprint=recovered.fingerprint,
+                status="INTERRUPTED",
+                reason_code="IN_FLIGHT_ACTION_DETECTED",
+                evidence_refs=state.evidence_refs,
+                blackboard_version=state.version + 1,
+            ),
         )
         updated = await self.blackboard.update(
             run_id,
@@ -297,6 +415,19 @@ class SolverLoop:
                 "execution": interrupted.to_dict(),
                 "recovery_feedback": feedback,
             },
+            audit_event=self._audit(
+                event_type=SolverAuditEventType.ACTION_INTERRUPTED,
+                run_id=run_id,
+                step=self._current_step(state),
+                phase=state.phase,
+                action_name=interrupted.action_name,
+                action_id=interrupted.action_id,
+                fingerprint=interrupted.fingerprint,
+                status="INTERRUPTED",
+                reason_code=reason,
+                evidence_refs=state.evidence_refs,
+                blackboard_version=state.version + 1,
+            ),
         )
         await self.blackboard.update(
             run_id,
@@ -350,6 +481,43 @@ class SolverLoop:
             or result.output.get("error_code")
             or result.output.get("error")
             or result.status
+        )
+
+    @staticmethod
+    def _next_step(state: BlackboardState) -> int:
+        return int(state.control.get("solver_step") or 0) + 1
+
+    @staticmethod
+    def _current_step(state: BlackboardState) -> int:
+        return int(state.control.get("solver_step") or 0)
+
+    @staticmethod
+    def _audit(
+        *,
+        event_type: SolverAuditEventType,
+        run_id: str,
+        step: int,
+        phase: str,
+        action_name: str | None,
+        action_id: str | None,
+        fingerprint: str | None,
+        status: str | None,
+        reason_code: str | None,
+        evidence_refs: list[str] | tuple[str, ...],
+        blackboard_version: int,
+    ) -> SolverAuditEvent:
+        return SolverAuditEvent(
+            event_type=event_type.value,
+            run_id=run_id,
+            step=step,
+            phase=phase,
+            action_name=action_name,
+            action_id=action_id,
+            fingerprint=fingerprint,
+            status=status,
+            reason_code=reason_code,
+            evidence_refs=tuple(evidence_refs),
+            blackboard_version=blackboard_version,
         )
 
     @staticmethod

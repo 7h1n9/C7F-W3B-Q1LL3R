@@ -52,7 +52,7 @@ def test_stage_decider_ignores_stale_phase_and_requires_metadata() -> None:
         },
     )
     assert decision.stage == "MYSQL_METADATA_DISCOVERY"
-    assert decision.details["stage"] == "version"
+    assert decision.details["stage"] == "database"
 
 
 def test_tool_failure_fingerprint_is_stable_and_stage_sensitive() -> None:

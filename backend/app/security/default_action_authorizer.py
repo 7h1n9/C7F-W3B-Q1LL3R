@@ -18,7 +18,23 @@ from app.solver.context import RunContext, RuntimeUsage
 
 from .action_authorizer import ActionSecurityDecision, SecurityDecisionType
 
-SUPPORTED_ACTIONS = frozenset({"http_request", "sql_boolean_compare"})
+SUPPORTED_ACTIONS = frozenset(
+    {
+        "http_request",
+        "sql_boolean_compare",
+        "sql_injection_probe",
+        "oracle_probe_matrix",
+        "oracle_expression_calibration",
+        "mysql_metadata_discovery",
+        "boolean_config_extract",
+        "sql_extract",
+        "request_capture",
+        "sqlmap_detect",
+        "sqlmap_run",
+        "sqlite_metadata_discovery",
+        "script_run",
+    }
+)
 SUPPORTED_SCHEMES = frozenset({"http", "https"})
 
 
@@ -84,11 +100,16 @@ def extract_action_target(action: ActionIntent, context: RunContext) -> str | No
     """
 
     parameters = action.parameters or {}
+    request = parameters.get("request")
+    if isinstance(request, dict):
+        nested_url = request.get("url") or request.get("endpoint")
+        if isinstance(nested_url, str) and nested_url.strip():
+            return nested_url
     for key in ("url", "target_url", "endpoint"):
         value = parameters.get(key)
         if isinstance(value, str) and value.strip():
             return value
-    if action.action_name == "sql_boolean_compare":
+    if action.action_name in SUPPORTED_ACTIONS - {"http_request"}:
         return context.challenge.target.url
     return None
 

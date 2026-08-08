@@ -1,3 +1,4 @@
+from .adapters.gateway import GatewayWorker
 from .adapters.runner import RunnerAdapter, RunnerWorker
 from .interface import Worker, WorkerResult
 from .manager import WorkerManager, WorkerUnavailable
@@ -8,6 +9,7 @@ __all__ = [
     "NoopWorker",
     "RunnerAdapter",
     "RunnerWorker",
+    "GatewayWorker",
     "Worker",
     "WorkerManager",
     "WorkerResult",

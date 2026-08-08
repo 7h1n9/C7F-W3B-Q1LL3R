@@ -29,7 +29,17 @@ class ActionPolicyValidator:
     ACTIONS: dict[str, frozenset[str]] = {
         "BASELINE": frozenset({"http_request"}),
         "VALIDATION": frozenset({"sql_boolean_compare"}),
-        "EXPLOITATION": frozenset({"data_extraction"}),
+        "EXPLOITATION": frozenset({
+            "data_extraction",
+            "oracle_expression_calibration",
+            "mysql_metadata_discovery",
+            "sql_extract",
+            "request_capture",
+            "sqlmap_detect",
+            "sqlmap_run",
+            "sqlite_metadata_discovery",
+            "script_run",
+        }),
         "IMPACT": frozenset({"impact_validation"}),
         "REPORTING": frozenset({"report"}),
     }

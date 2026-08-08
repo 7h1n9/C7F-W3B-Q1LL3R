@@ -612,12 +612,24 @@ class MultiAgentOrchestrator:
             # This is deliberately a separate transaction. The controller
             # resets its orchestration session after production dispatch; the
             # ResultReview wakeup must survive that rollback.
-            await continuation_service.request_committed(
-                run.id,
-                kind="RESULT_REVIEW_PENDING",
-                dedupe_key=f"RESULT_REVIEW_PENDING:{task.id}",
-                payload={"producing_task_id": task.id},
-            )
+            # Production runs are committed before dispatch and therefore can
+            # safely receive a cross-session continuation.  Some legacy
+            # in-process callers intentionally keep the Run in an outer,
+            # uncommitted transaction; a separate session cannot satisfy the
+            # continuation FK in that compatibility seam.  The caller will
+            # finish/commit its transaction and the normal supervisor path
+            # can recreate the continuation from the durable task result.
+            async with SessionLocal() as probe_session:
+                persisted_run = await probe_session.scalar(
+                    select(SolveRun.id).where(SolveRun.id == run.id)
+                )
+            if persisted_run is not None:
+                await continuation_service.request_committed(
+                    run.id,
+                    kind="RESULT_REVIEW_PENDING",
+                    dedupe_key=f"RESULT_REVIEW_PENDING:{task.id}",
+                    payload={"producing_task_id": task.id},
+                )
         return result
 
     async def ensure_result_review_continuation(
@@ -1149,7 +1161,21 @@ class MultiAgentOrchestrator:
             budget=TaskBudget(max_logical_calls=1, max_internal_requests=8, max_runtime_seconds=300),
         )
 
-    async def _proposal(self, session, run: SolveRun, challenge: Challenge, task: AgentTask, result: AgentTaskResultContract) -> PlannerProposal:
+    async def _proposal(
+        self,
+        session,
+        run: SolveRun,
+        challenge: Challenge | AgentTask | None,
+        task: AgentTask | AgentTaskResultContract,
+        result: AgentTaskResultContract | None = None,
+    ) -> PlannerProposal:
+        # Keep the pre-Challenge compatibility seam used by older controller
+        # tests and integrations: ``_proposal(session, run, task, result)``.
+        # Production callers pass the explicit Challenge argument.
+        if result is None:
+            result = task
+            task = challenge
+            challenge = None
         raw = (result.proposed_next_action or {}).get("proposal") or {}
         raw_strategy = {
             "strategy_family": str(raw.get("strategy_family") or "").upper(),
@@ -1164,7 +1190,7 @@ class MultiAgentOrchestrator:
                 await self._controller_event(session, run.id, "planner.proposal.fallback", {"task_id": task.id, "reason": "PLANNER_PROPOSAL_INVALID", "proposal_id": contract.proposal_id})
             else:
                 raise DomainError("MODEL_OUTPUT_SCHEMA_INVALID", f"PlannerProposalContract is invalid: {error}", {"task_id": task.id}) from error
-        metadata = challenge.metadata_json or {}
+        metadata = (challenge.metadata_json if challenge is not None else {}) or {}
         strategy_portfolio: dict = {}
         attack_state: dict = {}
         strategy_selection: str = ""
@@ -2858,11 +2884,19 @@ class MultiAgentOrchestrator:
         except Exception as error:
             return await checkpoint("COMPILED_ACTION_NOT_DISPATCHED", str(error))
 
-        # Dispatch uses an independent session.  Re-read lifecycle rows from
-        # a fresh session here as well; the controller session may still hold
-        # a pre-dispatch snapshot or an obsolete MySQL transaction.
-        async with SessionLocal() as verify_session:
-            calls = list((await verify_session.scalars(
+        # Production dispatch uses an independent session, so re-read the
+        # lifecycle rows from a fresh session there.  Unit/in-process callers
+        # may deliberately keep the Run uncommitted; in that compatibility
+        # path the gateway wrote into the controller session and a second
+        # session cannot observe the ToolCall yet.
+        if used_separate_dispatch_session:
+            async with SessionLocal() as verify_session:
+                calls = list((await verify_session.scalars(
+                    select(ToolCall).where(ToolCall.run_id == run_id, ToolCall.agent_task_id == task_id)
+                )).all())
+        else:
+            await session.flush()
+            calls = list((await session.scalars(
                 select(ToolCall).where(ToolCall.run_id == run_id, ToolCall.agent_task_id == task_id)
             )).all())
         if not calls:
@@ -2872,7 +2906,7 @@ class MultiAgentOrchestrator:
         # A durable completed ToolCall is authoritative for lifecycle
         # recovery; do not divert it from _complete()/FactReducer because a
         # gateway wrapper exposed a different result-status field.
-        if completed_calls:
+        if completed_calls and result_status in {"", "COMPLETED", "SUCCESS"}:
             result_status = "COMPLETED"
         if result_status not in {"COMPLETED", "SUCCESS"}:
             failure_code = str(result.get("error_code") or "TOOL_FAILURE")

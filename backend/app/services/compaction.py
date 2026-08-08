@@ -17,6 +17,7 @@ from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.inspection import inspect as sa_inspect
 
 from app.core.exceptions import DomainError
+from app.models.multi_agent import EvidenceLedger
 from app.models.run import (
     Artifact,
     EvidenceSnapshot,
@@ -151,6 +152,7 @@ class CompactionService:
 
     async def protected_ids(self, session, run: SolveRun) -> dict[str, set[str]]:
         candidates = list((await session.scalars(select(FlagCandidate).where(FlagCandidate.run_id == run.id))).all())
+        evidence_rows = list((await session.scalars(select(EvidenceLedger).where(EvidenceLedger.run_id == run.id))).all())
         observations = list((await session.scalars(select(Observation).where(Observation.run_id == run.id))).all())
         artifacts = list((await session.scalars(select(Artifact).where(Artifact.run_id == run.id))).all())
         recent_logical = list(
@@ -176,12 +178,19 @@ class CompactionService:
             ).all()
         }
         candidate_artifacts = {item.source_artifact_id for item in candidates if item.source_artifact_id}
+        evidence_artifacts = {item.artifact_id for item in evidence_rows if item.artifact_id}
+        evidence_tools = {item.tool_call_id for item in evidence_rows if item.tool_call_id}
+        # An Observation keeps a foreign-key reference to its Artifact.  A
+        # prior incremental watermark can exclude the Observation from the
+        # current archive batch while still selecting the Artifact, so every
+        # artifact referenced by a durable Observation must remain protected.
+        observation_artifacts = {item.artifact_id for item in observations if item.artifact_id}
         protected_artifacts = candidate_artifacts | {
             item.id
             for item in artifacts
             if item.file_path.startswith(("evidence/", "final/"))
             or item.artifact_type in {"script", "writeup", "fresh_reproduction"}
-        }
+        } | evidence_artifacts | observation_artifacts
         protected_observations = {
             item.id
             for item in observations
@@ -189,7 +198,7 @@ class CompactionService:
             or item.tool_call_id in recent_tool_ids
             or item.id in {logical.result_observation_id for logical in recent_logical if logical.result_observation_id}
         }
-        protected_tools = recent_tool_ids | {
+        protected_tools = recent_tool_ids | evidence_tools | {
             item.tool_call_id for item in observations if item.id in protected_observations and item.tool_call_id
         }
         protected_traces = recent_ids
