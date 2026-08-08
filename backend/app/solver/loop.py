@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import logging
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from typing import Any
@@ -30,6 +31,8 @@ from .policy import ActionPolicyValidator
 from .reducers import ObservationReducer, WebObservationReducer
 from .state_machine import TaskStateMachine
 from .worker import WorkerManager, WorkerResult
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -83,6 +86,7 @@ class SolverLoop:
         if state is None:
             raise KeyError(f"Blackboard not found for run {run_id!r}")
 
+        logger.info("[SolverLoop] run_id=%s starting classification phase", run_id)
         state = await self._ensure_classified(run_id, state)
 
         interrupted = find_interrupted_action(state)
@@ -380,13 +384,23 @@ class SolverLoop:
         control = state.control
         reassess = bool(control.get("reassessment_requested"))
         if state.vulnerability_hypotheses and not reassess:
+            logger.info(
+                "[SolverLoop] run_id=%s hypotheses already persisted count=%s",
+                run_id,
+                len(state.vulnerability_hypotheses),
+            )
             return state
         context = self.challenge_context
         if context is None and self.run_context is not None:
             context = self.run_context.challenge
         if context is None:
+            logger.warning(
+                "[SolverLoop] run_id=%s classifier skipped: no ChallengeContext",
+                run_id,
+            )
             return state
         response = self.initial_response or dict(state.knowledge.get("initial_response") or {})
+        logger.info("[SolverLoop] run_id=%s invoking classifier", run_id)
         if self.classifier is not None:
             classified = self.classifier.classify(context, response)
         else:
@@ -396,6 +410,7 @@ class SolverLoop:
             classified = classify_task(context, response)
         if inspect.isawaitable(classified):
             classified = await classified
+        classified = self._classification_items(classified)
         existing = {
             str(item.get("type")): dict(item)
             for item in state.vulnerability_hypotheses
@@ -412,6 +427,7 @@ class SolverLoop:
                 }
             merged.append(item)
         attempts = int(control.get("classification_attempts") or 0) + 1
+        source = str(getattr(self.classifier, "last_source", "planner") or "planner")
         updated = await self.blackboard.update(
             run_id,
             {
@@ -420,7 +436,7 @@ class SolverLoop:
                     "classification_complete": True,
                     "classification_attempts": attempts,
                     "reassessment_requested": False,
-                    "classification_source": "heuristic",
+                    "classification_source": source,
                 },
                 "history_append": [
                     {
@@ -432,7 +448,42 @@ class SolverLoop:
             },
             expected_version=state.version,
         )
+        if merged:
+            logger.info(
+                "[SolverLoop] run_id=%s classified types=%s source=%s",
+                run_id,
+                [str(item.get("type")) for item in merged],
+                source,
+            )
+        else:
+            logger.warning("[SolverLoop] run_id=%s classifier returned empty", run_id)
         return updated
+
+    @staticmethod
+    def _classification_items(value: Any) -> list[dict[str, Any]]:
+        """Accept the Solver list contract and compatible result objects."""
+        if isinstance(value, Mapping):
+            value = value.get("hypotheses", [])
+        elif not isinstance(value, (list, tuple)):
+            value = getattr(value, "hypotheses", [])
+        items: list[dict[str, Any]] = []
+        for item in value or []:
+            if isinstance(item, Mapping):
+                normalized = dict(item)
+            elif hasattr(item, "model_dump"):
+                normalized = dict(item.model_dump())
+            else:
+                normalized = {
+                    "type": getattr(item, "type", ""),
+                    "confidence": getattr(item, "confidence", 0.0),
+                    "reason": getattr(item, "reason", getattr(item, "reasoning", "")),
+                    "evidence_refs": getattr(item, "evidence_refs", []),
+                    "tested": getattr(item, "tested", False),
+                    "failed_attempts": getattr(item, "failed_attempts", 0),
+                }
+            if normalized.get("type"):
+                items.append(normalized)
+        return items
 
     @staticmethod
     def _strategy_control(intent: ActionIntent) -> dict[str, object]:

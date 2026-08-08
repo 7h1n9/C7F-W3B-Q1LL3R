@@ -241,6 +241,21 @@ class SolverRuntimeService:
                 if max_steps <= 0:
                     return "MAX_AGENT_STEPS_REACHED"
                 for _ in range(max_steps):
+                    current_run = await session.get(SolveRun, run_id)
+                    if current_run is None:
+                        raise RuntimeError("run disappeared before Solver step")
+                    if RunStatus(current_run.status) == RunStatus.WAITING_USER:
+                        logger.info(
+                            "[SolverRuntimeService] run_id=%s status=WAITING_USER, stopping loop",
+                            run_id,
+                        )
+                        await event_service.append(
+                            session,
+                            run_id,
+                            "solver.run.paused",
+                            {"reason": "WAITING_USER", "step": steps},
+                        )
+                        return "WAITING_USER"
                     step: SolverLoopStep = await loop.step(run.id)
                     steps += 1
                     state_after = step.state
@@ -289,6 +304,12 @@ class SolverRuntimeService:
                     return await self._timeout(session, run_id, steps)
             else:
                 reason = await bounded_steps()
+
+            if reason == "WAITING_USER":
+                run = await session.get(SolveRun, run.id)
+                if run is None:
+                    raise RuntimeError("run disappeared while waiting for user")
+                return self._result(run, steps)
 
             run = await session.get(SolveRun, run.id)
             if run is None:

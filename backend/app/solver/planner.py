@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import inspect
+import logging
 from collections.abc import Mapping, Sequence
 from typing import Any, Protocol
 from urllib.parse import urljoin
@@ -10,6 +11,7 @@ from .blackboard.models import BlackboardState
 from .classification import LLMVulnerabilityClassifier, VulnerabilityClassifier
 
 AllowedAction = str | Mapping[str, object]
+logger = logging.getLogger(__name__)
 
 
 class Planner(Protocol):
@@ -77,6 +79,11 @@ class DeterministicPlanner:
             return None
 
         descriptors = list(allowed_actions)
+        if not state.vulnerability_hypotheses:
+            logger.warning(
+                "[Planner] run_id=%s no vulnerability hypotheses, using allowed-action fallback",
+                state.run_id,
+            )
         strategy = self._select_strategy(state)
         strategy_descriptor = self._strategy_descriptor(state, descriptors, strategy)
         descriptor = strategy_descriptor or self._select_descriptor(state, descriptors)
@@ -129,6 +136,13 @@ class DeterministicPlanner:
                     "strategy_chain": list(chain),
                     "strategy_index": strategy.get("index", 0),
                 }
+            )
+            logger.info(
+                "[Planner] run_id=%s selected %s confidence=%s action=%s",
+                state.run_id,
+                strategy["type"],
+                self._strategy_confidence(state, strategy["type"]),
+                action_name,
             )
         return ActionIntent(
             action_name=action_name,
@@ -240,6 +254,16 @@ class DeterministicPlanner:
         phase = str(state.control.get("strategy_phase") or "")
         index = chain.index(phase) if phase in chain else 0
         return {"type": vulnerability_type, "phase": chain[index], "index": index}
+
+    @staticmethod
+    def _strategy_confidence(state: BlackboardState, vulnerability_type: str) -> float | None:
+        for item in state.vulnerability_hypotheses:
+            if isinstance(item, Mapping) and str(item.get("type")) == vulnerability_type:
+                try:
+                    return float(item.get("confidence") or 0)
+                except (TypeError, ValueError):
+                    return None
+        return None
 
     def _strategy_descriptor(
         self,
