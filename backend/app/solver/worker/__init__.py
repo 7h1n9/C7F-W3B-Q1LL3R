@@ -3,6 +3,7 @@ from .adapters.runner import RunnerAdapter, RunnerWorker
 from .interface import Worker, WorkerResult
 from .manager import WorkerManager, WorkerUnavailable
 from .mock import MockWorker, NoopWorker
+from .pool import OneShotWorkerPool, WorkerJob, WorkerRole
 
 __all__ = [
     "MockWorker",
@@ -14,4 +15,7 @@ __all__ = [
     "WorkerManager",
     "WorkerResult",
     "WorkerUnavailable",
+    "OneShotWorkerPool",
+    "WorkerJob",
+    "WorkerRole",
 ]

@@ -23,13 +23,17 @@ from .context import ChallengeContext, RunContext, RunLimits, RuntimeUsage, Targ
 from .context_factory import RunContextFactory
 from .coordinator import Coordinator, CoordinatorStep
 from .events import SolverEvent
+from .gate import FlagGate, GateDecision
 from .knowledge import KnowledgeStore
 from .lifecycle import LifecycleDecision, SolverLifecycleMapper, SolverLifecycleOutcome
 from .loop import SolverLoop, SolverLoopStep
+from .multi_worker import CoordinationPhase, MultiWorkerCoordinator
 from .observation import SolverObservation
 from .planner import DeterministicPlanner, NoopPlanner, Planner, SolverIntent
 from .policy import ActionPolicyValidator, PolicyDecision, PolicyResult
+from .reason import ReasonIntent, ReasonPlanner
 from .reducers import KnowledgeUpdate, WebObservationReducer
+from .shared_graph import SharedGraph, SolverEventBus
 from .state_machine import SolverPhase, TaskStateMachine
 from .worker import (
     MockWorker,
@@ -73,6 +77,14 @@ __all__ = [
     "Planner",
     "SolverIntent",
     "SolverEvent",
+    "FlagGate",
+    "GateDecision",
+    "SharedGraph",
+    "SolverEventBus",
+    "ReasonIntent",
+    "ReasonPlanner",
+    "CoordinationPhase",
+    "MultiWorkerCoordinator",
     "SolverLoop",
     "SolverLoopStep",
     "SolverLifecycleMapper",
