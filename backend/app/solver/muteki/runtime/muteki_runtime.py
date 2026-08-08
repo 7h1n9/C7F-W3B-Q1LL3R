@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any
+from urllib.parse import urljoin
 
 from app.core.database import SessionLocal
 from app.models.challenge import Challenge
@@ -14,8 +15,10 @@ from app.solver.muteki.adapter import (
     ToolResult,
 )
 from app.solver.muteki.core.orchestrator import MutekiOrchestrator, MutekiRunResult
+from app.solver.muteki.core.race import RaceWorker
 from app.solver.muteki.graph import MutekiGraph
 from app.solver.muteki.reason import MutekiReason
+from app.solver.muteki.recon.fingerprint import classify_challenge
 from app.solver.muteki.workers import EngineProfile, WorkerJob, WorkerOutcome
 
 
@@ -40,7 +43,7 @@ class MutekiRuntime:
         # collecting ToolGateway results.
         self.event_bridge = EventBridge(SessionLocal, run_id=self.run.id)
         self._graph = MutekiGraph(graph_path, challenge_id=self.run.id, event_subscriber=self.event_bridge.callback())
-        reason = MutekiReason(provider=self._reason_provider)
+        reason = MutekiReason(provider=self._reason_provider, metadata=self.challenge.metadata_json or {})
         orchestrator = MutekiOrchestrator(
             self._graph,
             reason,
@@ -56,11 +59,20 @@ class MutekiRuntime:
             self._graph.close()
 
     def _reason_provider(self, snapshot: dict) -> list[dict[str, Any]]:
+        metadata = self.challenge.metadata_json or {}
+        classification = classify_challenge(metadata, snapshot.get("facts", ()))
+        if classification and classification.classification == "SQLI":
+            return [{
+                "goal": "sql_boolean_compare",
+                "worker_class": "exploit",
+                "rationale": "Challenge metadata or Race evidence identifies a SQL injection path.",
+                "payload": {"tool_name": "sql_boolean_compare", "arguments": self._sql_boolean_arguments(metadata)},
+            }]
         if snapshot.get("facts"):
             return []
         target = str(self.challenge.target_url or "")
         if not target:
-            return [{"goal": "target URL is not configured", "payload": {}}]
+            return []
         return [{
             "goal": "establish target HTTP baseline",
             "worker_class": "gateway",
@@ -68,10 +80,41 @@ class MutekiRuntime:
             "payload": {"tool_name": "http_request", "arguments": {"method": "GET", "url": target}},
         }]
 
+    def _sql_boolean_arguments(self, metadata: dict[str, Any]) -> dict[str, Any]:
+        request_metadata = metadata.get("request") if isinstance(metadata.get("request"), dict) else {}
+        endpoint = str(metadata.get("endpoint") or request_metadata.get("url") or request_metadata.get("path") or "/")
+        target = str(self.challenge.target_url or "")
+        url = endpoint if endpoint.startswith(("http://", "https://")) else urljoin(target.rstrip("/") + "/", endpoint.lstrip("/"))
+        fields = metadata.get("fields") if isinstance(metadata.get("fields"), list) else request_metadata.get("fields")
+        fields = [str(item) for item in (fields or ["query"]) if str(item)]
+        controls = metadata.get("control_values") if isinstance(metadata.get("control_values"), dict) else request_metadata.get("control_values")
+        controls = dict(controls or {fields[0]: "test"})
+        request = dict(request_metadata)
+        request.setdefault("method", str(metadata.get("method") or "GET"))
+        request["url"] = url
+        request.setdefault("params", controls)
+        return {
+            "request": request,
+            "test_field": fields[0],
+            "control_fields": fields,
+            "baseline_value": controls.get(fields[0], "test"),
+            "max_requests": 5,
+        }
+
     async def _worker_runner(self, job: WorkerJob) -> WorkerOutcome:
         graph = self._graph
         if graph is None:
             return WorkerOutcome(job.worker_id, "FAILED", result="GRAPH_NOT_INITIALIZED")
+        if job.role == "race":
+            race_result = await RaceWorker(
+                graph,
+                self.tool_adapter.execute_tool,
+                target_url=str(self.challenge.target_url or ""),
+                metadata=self.challenge.metadata_json or {},
+                workspace_id=str(self.run.workspace_path),
+                run_id=str(self.run.id),
+            ).run(worker_id=job.worker_id)
+            return WorkerOutcome(job.worker_id, "COMPLETED", flag_found=race_result.flag_found, result=race_result.classification.classification)
         payload = dict(job.payload or {})
         tool_name = str(payload.get("tool_name") or "")
         arguments = payload.get("arguments") if isinstance(payload.get("arguments"), dict) else {}
