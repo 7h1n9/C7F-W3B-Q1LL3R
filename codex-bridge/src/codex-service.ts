@@ -11,7 +11,7 @@ import { threadEventsToBridgeEvents } from "./event-adapter.js";
 import { ThreadStore } from "./thread-store.js";
 import type { BridgeEvent, ThreadRequest, ThreadResponse } from "./types.js";
 
-type SdkThread = { runStreamed(prompt: string): Promise<{ events: AsyncGenerator<ThreadEvent> }> };
+type SdkThread = { runStreamed(prompt: string, options?: { outputSchema?: unknown }): Promise<{ events: AsyncGenerator<ThreadEvent> }> };
 
 export class CodexService {
   private readonly mock = process.env.CODEX_MOCK_MODE === "true";
@@ -57,20 +57,23 @@ export class CodexService {
     return { thread_id: threadId, status: "created" };
   }
 
-  async run(threadId: string, prompt: string): Promise<BridgeEvent[]> {
+  async run(threadId: string, prompt: string, outputSchema?: unknown): Promise<BridgeEvent[]> {
     const events: BridgeEvent[] = [];
-    for await (const event of this.stream(threadId, prompt)) events.push(event);
+    for await (const event of this.stream(threadId, prompt, outputSchema)) events.push(event);
     return events;
   }
 
-  async *stream(threadId: string, prompt: string): AsyncGenerator<BridgeEvent> {
+  async *stream(threadId: string, prompt: string, outputSchema?: unknown): AsyncGenerator<BridgeEvent> {
     const thread = this.threads.get(threadId);
     if (!thread) throw new Error("THREAD_NOT_FOUND");
     const scope = this.scopes.get(threadId);
-    const guardedPrompt = scope?.execution_mode === "controller_tool_loop"
+    const boardSemantic = scope?.execution_mode === "board_semantic";
+    const guardedPrompt = boardSemantic
+      ? `${prompt}\n\n[BOARD SEMANTIC MODE]\nThis is a presentation-only task. Do not call tools, MCP servers, shell, command execution, web search, or network APIs. Do not read or write the workspace. Return only the requested JSON object.`
+      : scope?.execution_mode === "controller_tool_loop"
       ? `${prompt}\n\n[CONTROLLER TOOL LOOP]\nThis is one bounded model turn. Do not call any tool, MCP server, shell, web search, or command execution. Return only the requested JSON contract/action; the Controller will execute at most one approved tool action after this turn.`
       : `${prompt}\n\n[EXECUTION BOUNDARY]\nUse the installed ctfctl MCP tools exclusively for workspace and target operations. Do not use direct shell, command_execution, node repl, web_search, curl, Invoke-WebRequest, localhost/backend API calls, source-code browsing outside the current Run Workspace, or create other Runs. ctfctl.workspace_write_note may only edit notes/, scripts/, and final/.`;
-    const streamed = await thread.runStreamed(guardedPrompt);
+    const streamed = await thread.runStreamed(guardedPrompt, outputSchema === undefined ? undefined : { outputSchema });
     for await (const event of streamed.events) {
       for (const bridgeEvent of threadEventsToBridgeEvents(event)) yield bridgeEvent;
     }
@@ -149,6 +152,7 @@ export class CodexService {
   private createRealThread(input: ThreadRequest): SdkThread {
     const scope = normalizeScope(input);
     const controllerToolLoop = scope.execution_mode === "controller_tool_loop";
+    const boardSemantic = scope.execution_mode === "board_semantic";
     // SDK 0.144.1 exposes MCP registration through Codex.config, which it
     // serializes into native CLI configuration. The scope is supplied as
     // subprocess environment, never through model-visible prompt text.
@@ -158,10 +162,10 @@ export class CodexService {
       const sourceHome = process.env.CODEX_HOME ?? join(process.env.USERPROFILE ?? tmpdir(), ".codex");
       try { copyFileSync(join(sourceHome, "auth.json"), join(isolatedCodexHome, "auth.json")); } catch { /* auth may be keychain-backed */ }
     }
-    const mcpLaunch = controllerToolLoop ? undefined : resolveCtfctlMcpLaunch();
+    const mcpLaunch = controllerToolLoop || boardSemantic ? undefined : resolveCtfctlMcpLaunch();
     const codex = new Codex({
       ...(process.env.CODEX_DISABLE_MCP === "true" ? { env: { CODEX_HOME: isolatedCodexHome } } : {}),
-      config: process.env.CODEX_DISABLE_MCP === "true" ? {
+      config: process.env.CODEX_DISABLE_MCP === "true" || boardSemantic ? {
         mcp_servers: {},
       } : {
         // A controller-owned role thread must not register ctfctl at all.
@@ -193,11 +197,13 @@ export class CodexService {
       model: process.env.CODEX_MODEL ?? "gpt-5.6-luna",
       workingDirectory: codexWorkingDirectory(input.workspace_path),
       skipGitRepoCheck: true,
-      sandboxMode: "workspace-write",
+      sandboxMode: boardSemantic ? "read-only" : "workspace-write",
       // The run-scoped ctfctl stdio server calls the local Backend Tool Gateway.
       // Denying all network access cancels that MCP call before the server can
       // reach the gateway. Target access remains constrained by the backend's
       // challenge allowlist and the Kali Runner.
+      // Board semantic mode has no tools, MCP, shell or workspace writes, but
+      // the model provider still needs network access for the Codex turn.
       networkAccessEnabled: true,
       webSearchMode: "disabled",
       approvalPolicy: "never",

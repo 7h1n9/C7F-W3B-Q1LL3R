@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Awaitable, Callable
 from urllib.parse import urljoin, urlparse
 
@@ -19,6 +21,15 @@ class ReconObservation:
     jwt_detected: bool = False
     links: tuple[str, ...] = ()
     evidence_refs: tuple[str, ...] = ()
+    disclosed_paths: tuple[str, ...] = ()
+    form_actions: tuple[str, ...] = ()
+    parameter_names: tuple[str, ...] = ()
+    content_type: str | None = None
+    json_keys: tuple[str, ...] = ()
+    form_methods: tuple[str, ...] = ()
+    form_enctypes: tuple[str, ...] = ()
+    xml_detected: bool = False
+    multipart_detected: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -45,7 +56,7 @@ class BreadthScanner:
     _FRAMEWORK_HEADERS = ("server", "x-powered-by")
     _FLAG_RE = re.compile(r"flag\{[^}\r\n]{1,200}\}", re.I)
 
-    def __init__(self, execute_tool: ToolExecutor, *, max_requests: int = 12) -> None:
+    def __init__(self, execute_tool: ToolExecutor, *, max_requests: int = 20) -> None:
         self.execute_tool = execute_tool
         self.max_requests = max(4, int(max_requests))
 
@@ -71,7 +82,7 @@ class BreadthScanner:
             )
             output = dict(getattr(result, "output", {}) or {})
             status = _int(output.get("status_code") or _nested(output, "structured_result", "status_code"))
-            body = str(output.get("body_excerpt") or output.get("body") or output.get("summary") or "")
+            body = _response_body(output, workspace_id)
             discovered_credentials = _public_demo_credentials(body)
             if discovered_credentials:
                 public_credentials = discovered_credentials
@@ -79,6 +90,7 @@ class BreadthScanner:
             form_actions = extracted.get("form_actions") or output.get("form_actions") or []
             parameter_names = extracted.get("parameter_names") or output.get("parameter_names") or []
             headers = output.get("headers") if isinstance(output.get("headers"), dict) else {}
+            content_type = str(headers.get("content-type") or headers.get("Content-Type") or "")[:120] or None
             cookie_names = _cookie_names(output)
             location = str(headers.get("location") or headers.get("Location") or "")
             final_url = str(output.get("final_url") or "")
@@ -86,20 +98,56 @@ class BreadthScanner:
             framework = _framework(headers)
             jwt_detected = _jwt_detected(body, cookie_names)
             links = tuple(_links(body, normalized))
+            disclosed_paths = tuple(_disclosed_paths(body))
+            parsed_forms = _forms(body, normalized)
+            form_actions = parsed_forms[0] or form_actions
+            form_methods = parsed_forms[1]
+            form_enctypes = parsed_forms[2]
+            if not parameter_names:
+                parameter_names = _field_names(body)
+            json_keys = _json_keys(body, content_type)
+            xml_detected = bool(re.search(r"<!doctype\s+[^>]*xml|application/xml|text/xml", body, re.I) or "xml" in (content_type or "").casefold())
+            multipart_detected = bool(re.search(r"multipart/form-data", body, re.I) or "multipart/form-data" in (" ".join(form_enctypes)).casefold() or "multipart/form-data" in (content_type or "").casefold())
             refs = tuple(str(item) for item in getattr(result, "evidence_refs", ()) or ())
             evidence_refs.extend(refs)
             auth_hint = _auth_hint(body, form_actions, parameter_names)
-            observations.append(ReconObservation(normalized, status, _summary(body, status), cookie_names, redirected_to_login or auth_hint, framework, jwt_detected, links, refs))
+            observations.append(ReconObservation(
+                normalized,
+                status,
+                _summary(body, status),
+                cookie_names,
+                redirected_to_login or auth_hint,
+                framework,
+                jwt_detected,
+                links,
+                refs,
+                disclosed_paths,
+                tuple(str(item) for item in form_actions or ()),
+                tuple(str(item) for item in parameter_names or ()),
+                content_type,
+                tuple(json_keys),
+                tuple(form_methods),
+                tuple(form_enctypes),
+                xml_detected,
+                multipart_detected,
+            ))
 
         # Session creation is not counted as a target request.
         await self.execute_tool("http_session_request", {"operation": "create", "session_name": session_name}, workspace_id, run_id)
         for path in self._COMMON_PATHS:
             await request(path)
-        discovered_links = []
-        for item in observations:
-            discovered_links.extend(item.links)
-        for link in discovered_links:
+        # Follow same-host links to a bounded second level. This is needed for
+        # document portals where the preview URL is only present on a detail
+        # page, while the request cap still prevents an open crawler.
+        queue = [link for item in observations for link in item.links]
+        cursor = 0
+        while cursor < len(queue) and len(observations) < self.max_requests:
+            link = queue[cursor]
+            cursor += 1
+            before = len(observations)
             await request(link)
+            if len(observations) > before:
+                queue.extend(observations[-1].links)
 
         endpoints = tuple(dict.fromkeys(item.endpoint for item in observations if item.status_code != 404 or item.endpoint.endswith("/")))
         cookies = tuple(dict.fromkeys(cookie for item in observations for cookie in item.cookie_names))
@@ -116,6 +164,83 @@ class BreadthScanner:
 def _nested(value: dict[str, Any], key: str, child: str) -> Any:
     nested = value.get(key)
     return nested.get(child) if isinstance(nested, dict) else None
+
+
+def _response_body(output: dict[str, Any], workspace_id: str = "") -> str:
+    """Read the bounded HTML excerpt from either Gateway result shape.
+
+    The production GatewayWorker normally flattens ``model_view`` into
+    ``body_excerpt``.  During event/replay and some Runner versions the same
+    excerpt remains nested, so Race must accept both shapes without retaining
+    a raw response beyond the current observation.
+    """
+
+    direct = output.get("body_excerpt") or output.get("body") or output.get("content_excerpt")
+    if isinstance(direct, str) and direct:
+        return direct
+    for key in ("model_view", "structured_result"):
+        nested = output.get(key)
+        if not isinstance(nested, dict):
+            continue
+        candidate = nested.get("content_excerpt") or nested.get("body_excerpt") or nested.get("body")
+        if isinstance(candidate, str) and candidate:
+            return candidate
+        view = nested.get("model_view")
+        if isinstance(view, dict):
+            candidate = view.get("content_excerpt") or view.get("body_excerpt")
+            if isinstance(candidate, str) and candidate:
+                return candidate
+    def nested_excerpt(value: Any, depth: int = 0) -> str:
+        if depth > 4:
+            return ""
+        if isinstance(value, dict):
+            for key in ("body_excerpt", "content_excerpt", "body"):
+                candidate = value.get(key)
+                if isinstance(candidate, str) and candidate:
+                    return candidate
+            for child in value.values():
+                found = nested_excerpt(child, depth + 1)
+                if found:
+                    return found
+        elif isinstance(value, list):
+            for child in value[:20]:
+                found = nested_excerpt(child, depth + 1)
+                if found:
+                    return found
+        return ""
+
+    found = nested_excerpt(output)
+    if found:
+        return found
+    # A Runner-backed Gateway may return only the model view while the full
+    # bounded response is available in the already-authorized local artifact.
+    # Read it transiently for Race classification; never copy it into Graph
+    # facts or the ReconReport.
+    relative_paths: list[str] = []
+    artifact_path = output.get("artifact_path")
+    if isinstance(artifact_path, str):
+        relative_paths.append(artifact_path)
+    for artifact in output.get("artifacts", ()) if isinstance(output.get("artifacts"), list) else ():
+        if isinstance(artifact, dict):
+            relative = artifact.get("relative_path") or artifact.get("path")
+            if isinstance(relative, str):
+                relative_paths.append(relative)
+    root = Path(workspace_id).resolve() if workspace_id else None
+    if root is not None:
+        for relative in relative_paths:
+            candidate = (root / relative).resolve()
+            if root not in candidate.parents or not candidate.is_file():
+                continue
+            try:
+                artifact_text = candidate.read_text(encoding="utf-8", errors="replace")[:1_000_000]
+                artifact_value = json.loads(artifact_text)
+            except (OSError, ValueError, UnicodeError):
+                continue
+            if isinstance(artifact_value, dict):
+                candidate_body = _response_body(artifact_value)
+                if candidate_body:
+                    return candidate_body
+    return str(output.get("summary") or "")
 
 
 def _int(value: Any) -> int | None:
@@ -178,10 +303,67 @@ def _auth_hint(body: str, form_actions: Any, parameter_names: Any) -> bool:
 def _public_demo_credentials(body: str) -> tuple[str, str] | None:
     """Extract only credentials explicitly exposed by the public challenge page."""
 
+    # Challenge pages intentionally publish demo credentials in adjacent
+    # ``<code>user</code> / <code>password</code>`` elements.  Read only that
+    # public presentation form; never infer, brute-force, or persist secrets.
+    code_values = [
+        re.sub(r"\s+", " ", value).strip()
+        for value in re.findall(r"<code\b[^>]*>([^<]{1,120})</code>", body, re.I)
+    ]
+    for index in range(len(code_values) - 1):
+        username, password = code_values[index:index + 2]
+        if (
+            re.fullmatch(r"[A-Za-z][A-Za-z0-9_.-]{0,63}", username)
+            and len(password) >= 4
+            and any(marker in password.casefold() for marker in ("pass", "pwd"))
+        ):
+            return username, password
+
     folded = body.casefold()
     if "demo" in folded and "demo-pass" in folded:
         return "demo", "demo-pass"
     return None
+
+
+def _disclosed_paths(body: str) -> list[str]:
+    """Extract non-secret archive path references disclosed by a page."""
+
+    values = re.findall(r"(?:legacy_archive_ref|archive_ref|document_path)\s*:\s*([A-Za-z0-9._/-]+)", body, re.I)
+    return list(dict.fromkeys(str(item)[:300] for item in values))[:10]
+
+
+def _forms(body: str, base_url: str) -> tuple[list[str], list[str], list[str]]:
+    actions: list[str] = []
+    methods: list[str] = []
+    enctypes: list[str] = []
+    for tag in re.findall(r"<form\b[^>]*>", body, re.I)[:20]:
+        action = re.search(r"\baction=[\"']([^\"']+)", tag, re.I)
+        method = re.search(r"\bmethod=[\"']([^\"']+)", tag, re.I)
+        enctype = re.search(r"\benctype=[\"']([^\"']+)", tag, re.I)
+        if action:
+            actions.append(urljoin(base_url, action.group(1)))
+        if method:
+            methods.append(method.group(1).upper()[:10])
+        if enctype:
+            enctypes.append(enctype.group(1).casefold()[:80])
+    return list(dict.fromkeys(actions)), list(dict.fromkeys(methods)), list(dict.fromkeys(enctypes))
+
+
+def _field_names(body: str) -> list[str]:
+    values = re.findall(r"<(?:input|textarea|select)\b[^>]*\bname=[\"']([A-Za-z][A-Za-z0-9_.-]{0,79})", body, re.I)
+    return list(dict.fromkeys(values))[:40]
+
+
+def _json_keys(body: str, content_type: str | None) -> list[str]:
+    if not content_type or "json" not in content_type.casefold():
+        return []
+    try:
+        import json
+
+        parsed = json.loads(body)
+    except (TypeError, ValueError):
+        return []
+    return [str(key) for key in parsed if re.fullmatch(r"[A-Za-z][A-Za-z0-9_.-]{0,79}", str(key))][:40] if isinstance(parsed, dict) else []
 
 
 __all__ = ["BreadthScanner", "ReconObservation", "ReconReport"]

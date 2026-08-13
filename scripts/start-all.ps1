@@ -4,6 +4,8 @@ param(
     [switch]$Restart,
     [switch]$Install,
     [int]$BackendPort = 8000,
+    # Kept for compatibility with existing callers. Muteki runs do not start
+    # or probe the legacy Kali Runner.
     [int]$RunnerPort = 8091,
     [int]$BridgePort = 8090,
     [int]$FrontendPort = 5173,
@@ -20,7 +22,6 @@ $pythonExe = Join-Path $venvDir "Scripts\python.exe"
 $backendDir = Join-Path $repoRoot "backend"
 $frontendDir = Join-Path $repoRoot "frontend"
 $bridgeDir = Join-Path $repoRoot "codex-bridge"
-$runnerDir = Join-Path $repoRoot "kali-runner"
 $logsRoot = Join-Path $repoRoot "logs\services"
 $pidsRoot = Join-Path $repoRoot "data\pids"
 
@@ -315,6 +316,11 @@ Set-EnvValue -Name "CTFCTL_BACKEND_URL" -Value "http://127.0.0.1:$BackendPort"
 Set-EnvValue -Name "CODEX_BRIDGE_URL" -Value "http://127.0.0.1:$BridgePort"
 Set-EnvValue -Name "BACKEND_HOST" -Value "127.0.0.1"
 Set-EnvValue -Name "BACKEND_PORT" -Value "$BackendPort"
+# Official Muteki RCP: the run-scoped Worker container dials the host control
+# receiver via host.docker.internal.  The receiver must be container-reachable;
+# authorization remains the per-run token handshake, not an open worker port.
+Set-EnvValue -Name "MUTEKI_CONTROL_BIND" -Value "0.0.0.0"
+Set-EnvValue -Name "MUTEKI_CONTROL_PORT" -Value "9100"
 
 Set-EnvValue -Name "RUNNER_WORKSPACE_ROOT" -Value "../data/workspaces"
 Set-EnvValue -Name "RUNNER_MAX_OUTPUT_BYTES" -Value "1048576"
@@ -342,11 +348,8 @@ if (-not $SkipDocker -and $dockerUsed) {
 }
 
 if ($Install -or -not (Test-Path (Join-Path $backendDir "ctf_web_agent_backend.egg-info"))) {
-    Write-Host "[install] preparing backend and runner dependencies..."
+    Write-Host "[install] preparing backend dependencies..."
     Invoke-CommandInDirectory -Name "backend deps" -WorkingDirectory $backendDir -Command $pythonExe -Arguments @("-m", "pip", "install", "-e", ".[dev]")
-}
-if ($Install -or -not (Test-Path (Join-Path $runnerDir "ctf_web_agent_runner.egg-info"))) {
-    Invoke-CommandInDirectory -Name "runner deps" -WorkingDirectory $runnerDir -Command $pythonExe -Arguments @("-m", "pip", "install", "-e", ".[dev]")
 }
 
 if (-not (Test-Path (Join-Path $frontendDir "node_modules"))) {
@@ -360,15 +363,10 @@ if (-not (Test-Path (Join-Path $bridgeDir "node_modules"))) {
 Write-Host "[migrate] applying backend migrations..."
 Invoke-CommandInDirectory -Name "backend migrate" -WorkingDirectory $backendDir -Command $pythonExe -Arguments @("-m", "alembic", "upgrade", "head")
 
-$runnerUri = [Uri]$backendRunnerUrl
-$localRunner = $runnerUri.Host -in @("127.0.0.1", "localhost", "::1")
-if ($localRunner) {
-    Start-BackgroundService -Name "runner" -Port $RunnerPort -WorkingDirectory $runnerDir -Command $pythonExe -Arguments @("-m", "uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", "$RunnerPort") -HealthyUri "http://127.0.0.1:$RunnerPort/health" -ProcessPattern "app\.main:app.*--port\s+$RunnerPort"
-} else {
-    Stop-ProjectService -Name "runner" -Port $RunnerPort -ProcessPattern "app\.main:app.*--port\s+$RunnerPort"
-    Wait-HttpOk -Uri "$backendRunnerUrl/health" -Name "remote runner" | Out-Null
-    Write-Host "[runner] using remote Kali Runner at $backendRunnerUrl"
-}
+# Muteki's production execution boundary is container-native. The legacy Kali
+# Runner URL remains an environment-level compatibility setting for old paths,
+# but Start-All must not install, start, stop, or health-check that service.
+Write-Host "[runner] legacy Kali Runner is optional and not managed by Start-All."
 Start-BackgroundService -Name "backend" -Port $BackendPort -WorkingDirectory $backendDir -Command $pythonExe -Arguments @("-m", "uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", "$BackendPort") -HealthyUri "http://127.0.0.1:$BackendPort/api/v1/health/ready" -ProcessPattern "app\.main:app.*--port\s+$BackendPort"
 Start-BackgroundService -Name "bridge" -Port $BridgePort -WorkingDirectory $bridgeDir -Command $npmExe -Arguments @("run", "dev") -HealthyUri "http://127.0.0.1:$BridgePort/health" -ProcessPattern "codex-bridge.*(dist[\\/]server\.js|src[\\/]server\.ts)"
 
@@ -378,7 +376,7 @@ Write-Host ""
 Write-Host "[state]"
 Write-Host "  docker mysql : $([bool]$dockerUsed)"
 Write-Host "  backend      : http://127.0.0.1:$BackendPort/api/v1/health/ready"
-Write-Host "  runner       : $backendRunnerUrl/health"
+Write-Host "  runner       : optional legacy service (not managed)"
 Write-Host "  bridge       : http://127.0.0.1:$BridgePort/health"
 Write-Host "  frontend     : http://127.0.0.1:$FrontendPort"
 Write-Host "  logs         : $logsRoot"

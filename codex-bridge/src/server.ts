@@ -1,6 +1,6 @@
 import Fastify from "fastify";
 import { CodexService } from "./codex-service.js";
-import type { ThreadRequest } from "./types.js";
+import type { ThreadRequest, ThreadRunRequest } from "./types.js";
 
 const app = Fastify({ logger: true });
 const service = new CodexService();
@@ -22,7 +22,7 @@ app.post<{ Body: ThreadRequest }>("/threads", async (request, reply) => {
     return reply.code(502).send(response);
   }
 });
-app.post<{ Params: { thread_id: string }; Body: { prompt: string } }>("/threads/:thread_id/run", async (request, reply) => {
+app.post<{ Params: { thread_id: string }; Body: ThreadRunRequest }>("/threads/:thread_id/run", async (request, reply) => {
   if (!service.hasThread(request.params.thread_id)) {
     return reply.code(404).send({ code: "THREAD_NOT_FOUND", message: "Thread not found", details: {} });
   }
@@ -31,7 +31,7 @@ app.post<{ Params: { thread_id: string }; Body: { prompt: string } }>("/threads/
     // the whole Codex turn before advancing the durable state machine; a
     // hijacked keep-alive stream could leave its client socket in CLOSE_WAIT
     // after the SDK ended, making the Run appear permanently stuck.
-    const events = await service.run(request.params.thread_id, request.body.prompt);
+    const events = await service.run(request.params.thread_id, request.body.prompt, request.body.output_schema);
     return reply
       .header("Content-Type", "application/x-ndjson; charset=utf-8")
       .header("Connection", "close")

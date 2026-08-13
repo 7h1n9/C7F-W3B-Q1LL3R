@@ -1,27 +1,95 @@
 from __future__ import annotations
 
+import asyncio
+import contextlib
+import json
+import os
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
-from urllib.parse import urljoin
 
 from app.core.database import SessionLocal
+from app.engines.openai_compatible import OpenAICompatibleEngine
 from app.models.challenge import Challenge
+from app.models.model_config import ModelConfig
 from app.models.run import SolveRun
+from app.schemas.challenge import normalize_asset_warranty_metadata
+from app.services.crypto import decrypt_api_key
 from app.solver.muteki.adapter import (
     EventBridge,
-    EvidenceAdapter,
-    RunnerAdapter,
-    ToolAdapter,
-    ToolResult,
+    SqlAlchemyOfficialEvidenceBridge,
+)
+from app.solver.muteki.adapter.cost_bridge import (
+    record_muteki_reason_usage,
+    record_official_worker_usage,
+)
+from app.solver.muteki.adapter.reason_model import CoordinatorReasonModel
+from app.solver.muteki.adapter.upstream_runtime_graph import (
+    create_runtime_graph,
+    runtime_graph_backend,
 )
 from app.solver.muteki.core.orchestrator import MutekiOrchestrator, MutekiRunResult
-from app.solver.muteki.core.race import RaceWorker
+from app.solver.muteki.events import EventType
 from app.solver.muteki.graph import MutekiGraph
 from app.solver.muteki.reason import MutekiReason
+from app.solver.muteki.recon.breadth_scanner import _public_demo_credentials
 from app.solver.muteki.recon.fingerprint import classify_challenge
+from app.solver.muteki.runtime.configuration import runtime_selection_from_hints
+from app.solver.muteki.strategy import MutekiStrategyPlanner
 from app.solver.muteki.workers import EngineProfile, WorkerJob, WorkerOutcome
+
+MUTEKI_CONTAINER_ONLY_BACKEND = "upstream_container"
+
+
+def resolve_muteki_worker_backend(configured_backend: str | None = None) -> str:
+    """Resolve the only valid production Muteki Worker boundary.
+
+    Legacy Gateway/Kali Runner and host-local CLI paths remain available to
+    legacy solver modes and focused Coordinator tests. They are not valid for
+    a production ``solver_mode=muteki`` Run, so configuration drift fails
+    closed instead of silently crossing the old VM boundary.
+    """
+
+    value = (
+        os.environ.get("APP_MUTEKI_WORKER_BACKEND", "")
+        if configured_backend is None
+        else configured_backend
+    )
+    normalized = str(value or "").strip().casefold()
+    if normalized in {"", MUTEKI_CONTAINER_ONLY_BACKEND}:
+        return MUTEKI_CONTAINER_ONLY_BACKEND
+    raise ValueError(
+        "MUTEKI_CONTAINER_ONLY: production Muteki requires "
+        "APP_MUTEKI_WORKER_BACKEND=upstream_container; "
+        f"received {normalized!r}"
+    )
+
+
+def _resolve_official_account_root(
+    workspace_path: str,
+    *,
+    explicit_root: str | None = None,
+) -> str | None:
+    """Resolve the standard Muteki account store for a production Run.
+
+    The official container contract projects credentials from the durable
+    ``sessions/_secrets/accounts`` store.  The old adapter only consulted an
+    environment variable, so an account imported through the Settings page
+    was silently ignored by production Runs.  An explicit environment value
+    remains authoritative; otherwise derive the sibling ``sessions`` folder
+    from the Run workspace (``data/workspaces/<run-id>``).
+    """
+
+    if explicit_root and str(explicit_root).strip():
+        return str(Path(explicit_root).expanduser().resolve())
+    workspace = Path(workspace_path).expanduser().resolve()
+    data_root = workspace.parent.parent
+    account_root = data_root / "sessions" / "_secrets" / "accounts"
+    if account_root.is_dir():
+        return str(account_root)
+    return None
 
 
 @dataclass(frozen=True, slots=True)
@@ -45,9 +113,19 @@ class MutekiRuntime:
     def __init__(self, session: Any, run: SolveRun, challenge: Challenge) -> None:
         self.session = session
         self.run = run
+        # ToolGateway commits between worker turns.  Keep immutable runtime
+        # identifiers out of expired ORM attribute access; the Blackboard and
+        # Evidence adapters only need these scalar values.
+        self._run_id = str(run.id)
+        self._workspace_path = str(run.workspace_path)
         # Gateway commits happen between Solver turns.  Keep Runtime reads
         # detached from the SQLAlchemy Challenge instance so the next Reason
         # pass cannot trigger an async lazy load (MissingGreenlet).
+        # API serialization already applies the Challenge schema's metadata
+        # normalization.  The production Solver must consume that same
+        # contract from the ORM boundary; otherwise adapter-backed challenges
+        # lose their declared fields and silently fall back to ``query``.
+        normalized_metadata = normalize_asset_warranty_metadata(challenge)
         self.challenge = _ChallengeSnapshot(
             id=str(challenge.id),
             name=str(challenge.name or ""),
@@ -57,34 +135,126 @@ class MutekiRuntime:
             allowed_hosts=[str(item) for item in (challenge.allowed_hosts or [])],
             flag_pattern=str(challenge.flag_pattern or r"flag\{[^}]+\}"),
             source_path=str(challenge.source_path) if challenge.source_path else None,
-            metadata_json=dict(challenge.metadata_json or {}),
+            metadata_json=dict(normalized_metadata or {}),
         )
-        self.tool_adapter = ToolAdapter(session, run, self.challenge)
-        self.runner_adapter = RunnerAdapter()
-        self.evidence_adapter = EvidenceAdapter()
         self.event_bridge: EventBridge | None = None
         self._graph: MutekiGraph | None = None
         self._public_credentials: tuple[str, str] | None = None
+        self._reason_model: CoordinatorReasonModel | None = None
+        self._worker_models: dict[str, OpenAICompatibleEngine] = {}
 
-    async def run_once(self, *, max_rounds: int = 10, max_workers: int = 10) -> MutekiRunResult:
-        root = Path(self.run.workspace_path).resolve() / "muteki"
-        graph_path = root / "graph" / "shared_graph.db"
+    async def run_once(self, *, max_rounds: int | None = None, max_workers: int = 10) -> MutekiRunResult:
+        """Run one production Muteki session in its run-scoped container.
+
+        ``max_rounds`` remains an explicit compatibility/test override.  The
+        normal production path leaves it unset so Coordinator progress is
+        driven by SharedGraph changes and the persisted Run total-runtime
+        limit, not by the unrelated Agent-step budget.
+        """
+
+        root = Path(self._workspace_path).resolve() / "muteki"
+        # Production Muteki uses the upstream SharedGraph by default.  The
+        # compatibility graph remains available through an explicit
+        # APP_MUTEKI_GRAPH_BACKEND=current override for tests/legacy rollout.
+        graph_backend = runtime_graph_backend(default="upstream")
+        graph_path = root / "graph" / (
+            "upstream_shared_graph.db" if graph_backend == "upstream" else "shared_graph.db"
+        )
         # Event persistence uses a short-lived independent session because
         # graph callbacks can be scheduled while the worker session is busy
         # collecting ToolGateway results.
-        self.event_bridge = EventBridge(SessionLocal, run_id=self.run.id)
-        self._graph = MutekiGraph(graph_path, challenge_id=self.run.id, event_subscriber=self.event_bridge.callback())
-        reason = MutekiReason(provider=self._reason_provider, metadata=self.challenge.metadata_json or {})
-        orchestrator = MutekiOrchestrator(
-            self._graph,
-            reason,
-            worker_runner=self._worker_runner,
-            engines=[EngineProfile("gateway-runner")],
-            max_workers=max_workers,
+        self.event_bridge = EventBridge(SessionLocal, run_id=self._run_id)
+        self._graph = create_runtime_graph(
+            graph_path,
+            challenge=self.challenge,
+            challenge_id=self._run_id,
+            event_subscriber=self.event_bridge.callback(),
+            backend=graph_backend,
+        )
+        reason_provider = await self._build_reason_provider()
+        reason = MutekiReason(provider=reason_provider, metadata=self.challenge.metadata_json or {})
+        worker_backend = resolve_muteki_worker_backend()
+        native_evidence_bridge = SqlAlchemyOfficialEvidenceBridge(
+            self.session,
+            self.run,
+            self._workspace_path,
+        )
+        official_account_root = _resolve_official_account_root(
+            self._workspace_path,
+            explicit_root=os.environ.get("MUTEKI_ACCOUNT_ROOT"),
         )
         try:
-            result = await orchestrator.run(max_rounds=max_rounds)
-            import asyncio
+            engine_profiles = await self._worker_profiles(worker_backend)
+            # Map the existing Run limits onto the official Muteki boundaries:
+            # one native Worker is one durable application/tool turn, while
+            # its internal CLI loop keeps the separate upstream ``max_turns``
+            # limit.  Capping the smaller of the two Run budgets prevents a
+            # barren route from spawning indefinitely, without putting the
+            # legacy Agent/ToolGateway counters inside the official Worker.
+            max_agent_steps = max(1, int(getattr(self.run, "max_agent_steps", 120) or 120))
+            max_tool_calls = max(1, int(getattr(self.run, "max_tool_calls", 120) or 120))
+            native_worker_budget = min(max_agent_steps, max_tool_calls)
+            orchestrator = MutekiOrchestrator(
+                self._graph,
+                reason,
+                # The callback is deliberately fail-closed. Production
+                # Muteki workers are routed by WorkerPool to the official
+                # Sandbox container; no callback may re-enter ToolGateway or
+                # the legacy Kali Runner.
+                worker_runner=self._disabled_compat_worker,
+                engines=engine_profiles,
+                max_workers=max_workers,
+                worker_backend=worker_backend,
+                official_worker_evidence_bridge=native_evidence_bridge,
+                official_worker_usage_bridge=self._record_official_worker_usage,
+                official_account_root=official_account_root,
+                # Match upstream Swarm's bounded Race/Explore window.  This
+                # leaves the outer total budget available for Coordinator
+                # recovery and subsequent Reason/Worker turns after one
+                # Worker is reclaimed.
+                worker_timeout_seconds=max(
+                    1,
+                    min(
+                        720,
+                        int(getattr(self.run, "max_runtime_seconds", 900) or 900),
+                    ),
+                ),
+                worker_max_turns=min(80, max_agent_steps),
+                max_total_workers=native_worker_budget,
+            )
+            total_timeout = max(
+                1,
+                int(
+                    getattr(self.run, "max_total_runtime_seconds", 0)
+                    or max(
+                        60,
+                        (max_rounds or 1)
+                        * max(1, int(getattr(self.run, "max_runtime_seconds", 900) or 900)),
+                    ),
+                ),
+            )
+            try:
+                result = await asyncio.wait_for(
+                    orchestrator.run(max_rounds=max_rounds),
+                    timeout=total_timeout,
+                )
+            except asyncio.TimeoutError:
+                # The official Coordinator/Worker owns per-turn cancellation;
+                # this outer deadline owns the whole Run.  ``wait_for``
+                # cancellation enters Coordinator.finalize(), which calls the
+                # native CliSolver.cancel() hook before container teardown.
+                self._graph.add_dead_end(
+                    actor="muteki-runtime",
+                    description="MUTEKI_RUN_TIMEOUT",
+                )
+                result = MutekiRunResult(
+                    run_id=self._run_id,
+                    challenge_id=self.challenge.id,
+                    status="TIMEOUT",
+                    flag_found=False,
+                    reason="MUTEKI_RUN_TIMEOUT",
+                    graph_path=str(graph_path),
+                )
 
             try:
                 await asyncio.wait_for(self.event_bridge.flush(), timeout=15.0)
@@ -92,19 +262,288 @@ class MutekiRuntime:
                 self._graph.add_dead_end(actor="muteki-runtime", description="EVENT_BRIDGE_FLUSH_TIMEOUT")
             return result
         finally:
-            self._graph.close()
+            # Graph callbacks are intentionally persisted through an ordered
+            # independent-session EventBridge.  A cancelled Run must still
+            # drain that tail before the graph/model handles close, otherwise
+            # the final worker/recovery audit events disappear on restart.
+            if self.event_bridge is not None:
+                with contextlib.suppress(asyncio.CancelledError, asyncio.TimeoutError):
+                    await asyncio.wait_for(
+                        asyncio.shield(self.event_bridge.flush()),
+                        timeout=15.0,
+                    )
+            if self._reason_model is not None:
+                await self._reason_model.close()
+                self._reason_model = None
+            for model in tuple(self._worker_models.values()):
+                await model.close()
+            self._worker_models.clear()
+            if self._graph is not None:
+                self._graph.close()
+
+    async def _build_reason_provider(self):
+        """Build the Coordinator Reason model separately from Worker engines."""
+
+        def fallback(reason_code: str):
+            # A selected Reason model must never fail silently into local
+            # strategy logic.  Keep the fallback safe, but make the actual
+            # provider choice visible in the same run's audit stream.
+            if self._graph is not None:
+                self._graph.emit_event(
+                    actor="muteki-runtime",
+                    event_type=EventType.REASON_MODEL_FALLBACK,
+                    payload={"reason_code": str(reason_code)[:100]},
+                )
+            return self._reason_provider
+
+        reason_id, _ = runtime_selection_from_hints(
+            self.run.hints_json,
+            fallback_engine_type=self.run.engine_type,
+            fallback_model_config_id=self.run.model_config_id,
+        )
+        if not reason_id:
+            return fallback("NO_REASON_MODEL_SELECTED")
+        config = await self.session.get(ModelConfig, reason_id)
+        if not config or not config.enabled or config.provider_type != "openai_compatible":
+            return fallback("REASON_MODEL_UNSUPPORTED_OR_DISABLED")
+        api_key = decrypt_api_key(config.encrypted_api_key)
+        if not api_key:
+            return fallback("REASON_MODEL_CREDENTIALS_UNAVAILABLE")
+        # Coordinator Reason receives the full durable Blackboard summary and
+        # may use a reasoning model.  The model-config timeout was originally
+        # tuned for short Worker turns; reusing a 30s Worker window caused the
+        # production Reason request to time out at exactly 30s and be mislabeled
+        # as MODEL_UNAVAILABLE.  Keep the user setting as a lower bound source,
+        # but give this separate Coordinator boundary a recovery-safe floor.
+        reason_timeout_seconds = max(
+            120.0,
+            float(config.request_timeout_seconds or 30),
+        )
+        engine = OpenAICompatibleEngine(
+            str(config.base_url or ""),
+            api_key,
+            str(config.model_name or ""),
+            timeout=reason_timeout_seconds,
+            action_protocol=str(config.action_protocol or "json_schema"),
+            max_output_tokens=int(config.max_output_tokens or 2048),
+            temperature=float(config.temperature or 0.0),
+            max_retries=int(config.max_retries or 0),
+            retry_base_seconds=float(config.retry_base_seconds or 1.0),
+            rate_limit_cooldown_seconds=int(config.rate_limit_cooldown_seconds or 60),
+        )
+        self._reason_model = CoordinatorReasonModel(
+            engine,
+            model_config_id=str(config.id),
+            model_name=str(config.model_name or config.name),
+            fallback=self._reason_provider,
+            run_id=self._run_id,
+            challenge_id=str(self.challenge.id),
+            mode=str(getattr(self.challenge, "mode", "ctf") or "ctf"),
+            goal=str(getattr(self.challenge, "goal", "") or "") or None,
+            usage_recorder=lambda trace: record_muteki_reason_usage(
+                SessionLocal,
+                run_id=self._run_id,
+                model_config_id=str(config.id),
+                model_name=str(config.model_name or config.name),
+                trace=trace,
+            ),
+        )
+        if self._graph is not None:
+            self._graph.emit_event(
+                actor="muteki-runtime",
+                event_type=EventType.REASON_MODEL_SELECTED,
+                payload={
+                    "role": "coordinator_reason",
+                    "model_config_id": str(config.id),
+                    "model": str(config.model_name or config.name)[:120],
+                },
+            )
+        return self._reason_model
+
+    async def _openai_worker_action(
+        self,
+        job: WorkerJob,
+        expected_tool: str,
+        arguments: dict[str, Any],
+    ) -> tuple[str, dict[str, Any]] | None:
+        """Let an OpenAI-compatible Worker refine one declared Tool action.
+
+        The Coordinator has already selected the Intent and tool domain.  The
+        model may only return the same declared tool with bounded arguments;
+        actual execution remains inside the existing ToolGateway adapter.
+        """
+
+        config_id = str((job.environment or {}).get("MUTEKI_MODEL_CONFIG_ID") or "")
+        if not config_id:
+            return None
+        model = self._worker_models.get(config_id)
+        if model is None:
+            config = await self.session.get(ModelConfig, config_id)
+            if not config or not config.enabled or config.provider_type != "openai_compatible":
+                return None
+            api_key = decrypt_api_key(config.encrypted_api_key)
+            if not api_key:
+                return None
+            model = OpenAICompatibleEngine(
+                str(config.base_url or ""),
+                api_key,
+                str(config.model_name or ""),
+                timeout=float(config.request_timeout_seconds or 30),
+                action_protocol=str(config.action_protocol or "json_schema"),
+                max_output_tokens=int(config.max_output_tokens or 2048),
+                temperature=float(config.temperature or 0.0),
+                max_retries=int(config.max_retries or 0),
+                retry_base_seconds=float(config.retry_base_seconds or 1.0),
+                rate_limit_cooldown_seconds=int(config.rate_limit_cooldown_seconds or 60),
+            )
+            self._worker_models[config_id] = model
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "You are a bounded Muteki Worker. The Coordinator already selected one tool. "
+                    "Return exactly one ToolAction JSON. You may not change the tool name, add a new "
+                    "tool, claim a finding, or return raw response data."
+                ),
+            },
+            {
+                "role": "user",
+                "content": json.dumps(
+                    {"goal": str(job.goal or "")[:1200], "tool_name": expected_tool, "arguments": _safe_worker_arguments(arguments)},
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                )[:5000],
+            },
+        ]
+        try:
+            action = await model.next_action(messages)
+        except Exception:
+            return None
+        if getattr(action, "type", None) != "tool" or str(getattr(action, "tool_name", "")) != expected_tool:
+            return None
+        next_arguments = getattr(action, "arguments", None)
+        if not isinstance(next_arguments, dict):
+            return expected_tool, arguments
+        refined = dict(next_arguments)
+        for key, value in arguments.items():
+            if _sensitive_argument_name(str(key)):
+                refined[str(key)] = value
+        return expected_tool, refined
+
+    async def _worker_profiles(self, worker_backend: str) -> list[EngineProfile]:
+        """Project the Run's independent Worker selections into Muteki profiles."""
+
+        _, selections = runtime_selection_from_hints(
+            self.run.hints_json,
+            fallback_engine_type=self.run.engine_type,
+            fallback_model_config_id=self.run.model_config_id,
+        )
+        profiles: list[EngineProfile] = []
+        explicit_selections = bool(selections)
+        for selection in selections:
+            environment = {"MUTEKI_TARGET_URL": str(self.challenge.target_url or "")}
+            driver_profile: dict[str, Any] = {}
+            if selection.model_config_id:
+                config = await self.session.get(ModelConfig, selection.model_config_id)
+                if config is None or not config.enabled:
+                    continue
+                if selection.engine_type == "openai_compatible":
+                    api_key = decrypt_api_key(config.encrypted_api_key)
+                    if not api_key:
+                        # Do not silently turn an explicitly selected Worker
+                        # into Codex.  The official Coordinator must observe a
+                        # failed/unsupported selection instead of changing the
+                        # user's engine roster behind their back.
+                        continue
+                    capabilities = config.capabilities_json or {}
+                    driver_profile = {
+                        "id": selection.engine_id,
+                        "name": selection.engine_id,
+                        # OpenAI-compatible Workers use Muteki's native
+                        # Chat Completions client.  They must not be routed
+                        # through Codex EndpointDriver, whose default wire
+                        # contract is /responses.
+                        "engine": "openai_compatible",
+                        "transport": "openai_compatible",
+                        "protocol": "chat_completions",
+                        "base_url": str(config.base_url or "").strip(),
+                        "model": str(config.model_name or config.name).strip(),
+                        "wire_api": str(capabilities.get("wire_api") or "chat_completions").strip(),
+                        "api_key_ref": "env:OPENAI_API_KEY",
+                    }
+                    environment["OPENAI_API_KEY"] = api_key
+                environment.update(
+                    {
+                        "MUTEKI_MODEL_CONFIG_ID": str(config.id),
+                        "MUTEKI_MODEL_NAME": str(config.model_name or config.name)[:120],
+                    }
+                )
+            # ``codex`` is the official vendored driver identity.  Other
+            # identities remain explicit so Coordinator scheduling/audit never
+            # silently collapses a selected engine into another provider.
+            profiles.append(
+                EngineProfile(
+                    selection.engine_id,
+                    environment=environment,
+                    worker_class="reasoning" if selection.engine_type == "openai_compatible" else "code",
+                    driver_profile=driver_profile,
+                )
+            )
+        if profiles:
+            return profiles
+        if explicit_selections:
+            raise ValueError("MUTEKI_WORKER_SELECTION_UNAVAILABLE")
+        return [
+            EngineProfile(
+                "codex" if worker_backend in {"upstream_local", "upstream_container"} else "gateway-runner",
+                environment={"MUTEKI_TARGET_URL": str(self.challenge.target_url or "")},
+            )
+        ]
+
+    async def _record_official_worker_usage(self, job: WorkerJob, result: Any) -> None:
+        """Project native Worker usage into the durable RunEvent stream."""
+
+        await record_official_worker_usage(
+            SessionLocal,
+            run_id=self._run_id,
+            worker_id=str(getattr(job, "worker_id", "") or ""),
+            intent_id=str(getattr(job, "intent_id", "") or "") or None,
+            result=result,
+        )
 
     def _reason_provider(self, snapshot: dict) -> list[dict[str, Any]]:
         metadata = self.challenge.metadata_json or {}
         classification = classify_challenge(metadata, snapshot.get("facts", ()))
-        if classification and classification.classification == "SQLI":
-            return [{
-                "goal": "sql_boolean_compare",
-                "worker_class": "exploit",
-                "rationale": "Challenge metadata or Race evidence identifies a SQL injection path.",
-                "payload": {"tool_name": "sql_boolean_compare", "arguments": self._sql_boolean_arguments(metadata)},
-            }]
-        if classification and classification.classification == "IDOR":
+        if self._public_credentials is None:
+            self._public_credentials = self._recover_public_credentials()
+        if self._graph is not None:
+            self._graph.emit_event(
+                actor="muteki-runtime",
+                event_type="runtime.reason.context",
+                payload={
+                    "classification": classification.classification if classification else None,
+                    "public_demo_account_available": bool(self._public_credentials),
+                },
+            )
+        strategy = MutekiStrategyPlanner(
+            target_url=str(self.challenge.target_url or ""),
+            metadata=metadata,
+            public_credentials=self._public_credentials,
+        )
+        # The reusable Blackboard strategy owns the normal OODA continuation
+        # now: authentication bootstrap, classified web lanes, and the
+        # bounded IDOR/path routes all start here. A small generic fallback
+        # below remains for incomplete historical fact formats only.
+        planned = strategy.plan(snapshot)
+        if planned or (classification and classification.classification == "SQLI"):
+            return planned
+        # Keep this compatibility path only for low-confidence or historical
+        # snapshots that the reusable strategy cannot parse. High-confidence
+        # classifications must remain wholly owned by MutekiStrategyPlanner.
+        if (
+            self._public_credentials
+            and (classification is None or classification.confidence < 70)
+        ):
             facts = "\n".join(
                 str(item.get("content") or "")
                 for item in snapshot.get("facts", ())
@@ -113,12 +552,12 @@ class MutekiRuntime:
             folded = facts.casefold()
             target = str(self.challenge.target_url or "").rstrip("/")
             session_name = "muteki-recon"
-            if "request_method=post" not in folded or "/login" not in folded:
-                username, password = self._public_credentials or ("demo", "demo-pass")
+            if "request_method=post" not in folded or f"request_url={target}/login" not in folded:
+                username, password = self._public_credentials
                 return [{
-                    "goal": "authenticate using the public demo form",
+                    "goal": "authenticate using credentials explicitly disclosed by the target",
                     "worker_class": "exploit",
-                    "rationale": "The public homepage exposed a bounded demo login form; reuse the existing recon session.",
+                    "rationale": "Race observed a public demo account; establish one bounded session before probing protected business routes.",
                     "payload": {"tool_name": "http_session_request", "arguments": {
                         "session_name": session_name,
                         "method": "POST",
@@ -128,44 +567,41 @@ class MutekiRuntime:
                         "follow_redirects": False,
                     }},
                 }]
-            if f"request_url={target}/tickets" not in folded:
+            for endpoint in _protected_session_endpoints(snapshot, target):
+                if f"request_url={endpoint}" in folded:
+                    continue
                 return [{
-                    "goal": "open the authenticated ticket collection",
+                    "goal": f"inspect authenticated endpoint {endpoint}",
                     "worker_class": "exploit",
-                    "rationale": "The same session is authenticated; enumerate the authorized ticket list.",
-                    "payload": {"tool_name": "http_session_request", "arguments": {"session_name": session_name, "method": "GET", "url": f"{target}/tickets", "follow_redirects": False}},
+                    "rationale": "Reuse the established session to inspect the next evidence-backed protected endpoint.",
+                    "payload": {"tool_name": "http_session_request", "arguments": {
+                        "session_name": session_name,
+                        "method": "GET",
+                        "url": endpoint,
+                        "follow_redirects": False,
+                    }},
                 }]
-            ticket_match = re.search(r"/tickets/(WO-[A-Za-z0-9-]+)", facts, re.IGNORECASE)
-            if ticket_match and "/api/tickets/" not in folded:
-                ticket = ticket_match.group(1)
+        # All remaining classifications use the same graph-driven playbook.
+        # A low-confidence GENERIC_WEB result is deliberately treated as
+        # reconnaissance only; it must never fall through to SQL actions.
+        # A high-confidence non-SQL classification must never fall through to
+        # MutekiReason's empty-argument fallback.  That fallback is useful for
+        # unit-level graph reasoning, but it cannot satisfy the production
+        # Gateway schema.  Use one observed same-origin endpoint as a valid,
+        # bounded read-only continuation instead.
+        if classification is None or classification.confidence < 70:
+            endpoint = _next_observed_endpoint(snapshot, str(self.challenge.target_url or ""))
+            if endpoint:
+                classification_name = classification.classification if classification else "GENERIC_WEB"
+                tool_name = "http_session_request" if classification_name in {"IDOR", "JWT"} else "http_request"
+                arguments: dict[str, Any] = {"method": "GET", "url": endpoint, "follow_redirects": False}
+                if tool_name == "http_session_request":
+                    arguments["session_name"] = "muteki-recon"
                 return [{
-                    "goal": "read the discovered ticket API object",
-                    "worker_class": "exploit",
-                    "rationale": "The authenticated ticket page disclosed an object reference; validate the same-object API response.",
-                    "payload": {"tool_name": "http_session_request", "arguments": {"session_name": session_name, "method": "GET", "url": f"{target}/api/tickets/{ticket}", "follow_redirects": False}},
-                }]
-            # After reading the caller's own object, probe a small, explicit
-            # set of adjacent object IDs.  This is the bounded IDOR branch:
-            # it is driven by the observed ticket number and never guesses a
-            # challenge answer or reads challenge metadata.
-            if "/api/tickets/" in folded and "download_url" not in folded:
-                observed_ticket = re.findall(r"/api/tickets/(WO-[A-Za-z0-9-]+)", facts, re.IGNORECASE)
-                candidate = _next_idor_ticket(observed_ticket, facts)
-                if candidate:
-                    return [{
-                        "goal": f"test adjacent ticket object {candidate}",
-                        "worker_class": "exploit",
-                        "rationale": "The authenticated API exposed an object identifier; test a bounded adjacent identifier for authorization isolation.",
-                        "payload": {"tool_name": "http_session_request", "arguments": {"session_name": session_name, "method": "GET", "url": f"{target}/api/tickets/{candidate}", "follow_redirects": False}},
-                    }]
-            report_match = re.search(r"download_url\s*[\"']?\s*[:=]\s*[\"']?([^\"'\s,}]+)", facts, re.IGNORECASE)
-            if report_match:
-                report_url = urljoin(target + "/", report_match.group(1))
-                return [{
-                    "goal": "retrieve the referenced diagnostic report",
-                    "worker_class": "exploit",
-                    "rationale": "The ticket API returned an evidence-backed diagnostic report reference.",
-                    "payload": {"tool_name": "http_session_request", "arguments": {"session_name": session_name, "method": "GET", "url": report_url, "follow_redirects": False}},
+                    "goal": f"inspect classified {classification_name.lower()} endpoint {endpoint}",
+                    "worker_class": "recon",
+                    "rationale": "Continue with one evidence-backed endpoint using a complete Tool Gateway request contract.",
+                    "payload": {"tool_name": tool_name, "arguments": arguments, "classification": classification_name},
                 }]
         if snapshot.get("facts"):
             return []
@@ -179,122 +615,121 @@ class MutekiRuntime:
             "payload": {"tool_name": "http_request", "arguments": {"method": "GET", "url": target}},
         }]
 
-    def _sql_boolean_arguments(self, metadata: dict[str, Any]) -> dict[str, Any]:
-        request_metadata = metadata.get("request") if isinstance(metadata.get("request"), dict) else {}
-        endpoint = str(metadata.get("endpoint") or request_metadata.get("url") or request_metadata.get("path") or "/")
-        target = str(self.challenge.target_url or "")
-        url = endpoint if endpoint.startswith(("http://", "https://")) else urljoin(target.rstrip("/") + "/", endpoint.lstrip("/"))
-        fields = metadata.get("fields") if isinstance(metadata.get("fields"), list) else request_metadata.get("fields")
-        fields = [str(item) for item in (fields or ["query"]) if str(item)]
-        controls = metadata.get("control_values") if isinstance(metadata.get("control_values"), dict) else request_metadata.get("control_values")
-        controls = dict(controls or {fields[0]: "test"})
-        request = dict(request_metadata)
-        request.setdefault("method", str(metadata.get("method") or "GET"))
-        request["url"] = url
-        request.setdefault("params", controls)
-        return {
-            "request": request,
-            "test_field": fields[0],
-            "control_fields": fields,
-            "baseline_value": controls.get(fields[0], "test"),
-            "max_requests": 5,
-        }
+    def _recover_public_credentials(self) -> tuple[str, str] | None:
+        """Recover only explicitly published demo credentials from this Run.
 
-    async def _worker_runner(self, job: WorkerJob) -> WorkerOutcome:
-        graph = self._graph
-        if graph is None:
-            return WorkerOutcome(job.worker_id, "FAILED", result="GRAPH_NOT_INITIALIZED")
-        # Graph callbacks are scheduled asynchronously.  Drain the events
-        # emitted by the Coordinator/previous worker before entering the
-        # ToolGateway, so durable RunEvent writes cannot overlap the gateway's
-        # ToolCall transaction for the same Run.
-        if self.event_bridge is not None:
-            import asyncio
+        The Gateway may keep the full bounded response in an Evidence
+        artifact while returning only its model view to the Worker.  This
+        fallback reads only this Run's ``outputs`` directory and accepts the
+        same explicit public presentation pattern as Race.  It never scans
+        source files, challenge metadata, or other workspaces, and the values
+        are retained only in runtime memory for one login Intent.
+        """
 
+        outputs = Path(self._workspace_path).resolve() / "outputs"
+        if not outputs.is_dir():
+            return None
+        for path in sorted(outputs.glob("*.txt"))[:40]:
             try:
-                await asyncio.wait_for(self.event_bridge.flush(), timeout=15.0)
-            except asyncio.TimeoutError:
-                graph.add_dead_end(actor="muteki-runtime", description="EVENT_BRIDGE_PRE_TOOL_FLUSH_TIMEOUT")
-        if job.role == "race":
-            race_worker = RaceWorker(
-                graph,
-                self.tool_adapter.execute_tool,
-                target_url=str(self.challenge.target_url or ""),
-                metadata=self.challenge.metadata_json or {},
-                workspace_id=str(self.run.workspace_path),
-                run_id=str(self.run.id),
+                content = path.read_text(encoding="utf-8", errors="replace")[:1_000_000]
+            except OSError:
+                continue
+            credentials = _public_demo_credentials(content)
+            if credentials:
+                return credentials
+        return None
+
+    async def _disabled_compat_worker(self, job: WorkerJob) -> WorkerOutcome:
+        """Fail closed if a production job ever bypasses the container route."""
+
+        if self._graph is not None:
+            self._graph.add_dead_end(
+                actor=job.worker_id,
+                description="LEGACY_WORKER_ROUTE_DISABLED_CONTAINER_ONLY",
             )
-            race_result = await race_worker.run(worker_id=job.worker_id)
-            self._public_credentials = race_worker.public_credentials
-            return WorkerOutcome(job.worker_id, "COMPLETED", flag_found=race_result.flag_found, result=race_result.classification.classification)
-        payload = dict(job.payload or {})
-        tool_name = str(payload.get("tool_name") or "")
-        arguments = payload.get("arguments") if isinstance(payload.get("arguments"), dict) else {}
-        if not tool_name and job.role == "race" and self.challenge.target_url:
-            tool_name = "http_request"
-            arguments = {"method": "GET", "url": str(self.challenge.target_url)}
-        if not tool_name:
-            graph.add_dead_end(actor=job.worker_id, description="intent has no tool_name")
-            if job.intent_id:
-                graph.conclude_intent(actor=job.worker_id, intent_id=job.intent_id, result="NO_TOOL")
-            return WorkerOutcome(job.worker_id, "FAILED", result="NO_TOOL")
-        if str(payload.get("backend") or "gateway") == "runner" and tool_name in {"python_run", "script_run"}:
-            if tool_name == "python_run":
-                runner_result = await self.runner_adapter.run_python(
-                    str(arguments.get("code") or ""),
-                    str(self.run.workspace_path),
-                    self.run.id,
-                    int(arguments.get("timeout_seconds") or 60),
-                )
-            else:
-                runner_result = await self.runner_adapter.run_script(
-                    str(arguments.get("path") or ""),
-                    list(arguments.get("args") or []),
-                    str(self.run.workspace_path),
-                    self.run.id,
-                    int(arguments.get("timeout_seconds") or 60),
-                )
-            result = ToolResult(runner_result.success, tool_name, runner_result.output, error_code=runner_result.error_code)
-        else:
-            result = await self.tool_adapter.execute_tool(tool_name, arguments, str(self.run.workspace_path), self.run.id)
-        fact = self.tool_adapter.to_fact(result, source_worker_id=job.worker_id, request=arguments)
-        evidence_ref = await self.evidence_adapter.write_fact(fact, self.run.id, job.worker_id)
-        refs = list(result.evidence_refs)
-        if evidence_ref and evidence_ref not in refs:
-            refs.append(evidence_ref)
-        graph.add_fact(actor=job.worker_id, content=fact.content, verified=fact.verified, evidence_refs=refs, dedupe_key=f"{job.intent_id or tool_name}:{result.tool_call_id or ''}")
-        candidate = result.output.get("flag") or result.output.get("extracted_value") or result.output.get("answer")
-        real_output = result.output.get("real_output") or result.output.get("body_excerpt") or result.output.get("summary") or ""
-        if not candidate:
-            match = re.search(r"flag\{[^{}\r\n]+\}", str(real_output), re.IGNORECASE)
-            candidate = match.group(0) if match else None
-        flag_found = False
-        if isinstance(candidate, str) and candidate.startswith("flag{"):
-            graph.write_flag(actor=job.worker_id, flag=candidate, real_output=str(real_output))
-            flag_found = bool(graph.flags(verified_only=True))
-        if not result.success:
-            graph.add_dead_end(actor=job.worker_id, description=f"{tool_name} failed: {result.error_code or 'TOOL_FAILED'}")
-        if job.intent_id:
-            graph.conclude_intent(actor=job.worker_id, intent_id=job.intent_id, result="SUCCESS" if result.success else "FAILED")
-        return WorkerOutcome(job.worker_id, "COMPLETED" if result.success else "FAILED", flag_found=flag_found, result=result.output.get("summary", result.error_code or ""))
+        return WorkerOutcome(job.worker_id, "FAILED", result="MUTEKI_CONTAINER_ONLY")
+
+
+def _sensitive_argument_name(name: str) -> bool:
+    folded = name.casefold()
+    return any(token in folded for token in ("password", "passwd", "secret", "token", "cookie", "authorization", "api_key"))
+
+
+def _safe_worker_arguments(arguments: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        str(key): "<redacted>" if _sensitive_argument_name(str(key)) else value
+        for key, value in arguments.items()
+    }
 
 
 __all__ = ["MutekiRuntime"]
 
 
-def _next_idor_ticket(observed_api_tickets: list[str], facts: str) -> str | None:
-    """Return the next bounded numeric ticket candidate not yet requested."""
+def _protected_session_endpoints(snapshot: dict[str, Any], target: str) -> list[str]:
+    """Return bounded, same-origin routes that Race marked as protected."""
 
-    if not observed_api_tickets:
-        return None
-    match = re.match(r"^(.*?)(\d+)$", observed_api_tickets[-1])
-    if not match:
-        return None
-    prefix, number = match.groups()
-    base = int(number)
-    requested = {item.casefold() for item in re.findall(r"request_url=([^;\s]+/api/tickets/[^;\s]+)", facts, re.IGNORECASE)}
-    for offset in (1, 2, 3, 4, 5, -1, -2):
-        candidate = f"{prefix}{base + offset:0{len(number)}d}"
-        if f"/api/tickets/{candidate}".casefold() not in requested:
-            return candidate
-    return None
+    from urllib.parse import urlparse
+
+    origin = urlparse(target).netloc.casefold()
+    candidates: list[str] = []
+    for item in snapshot.get("facts", ()):
+        if not isinstance(item, dict):
+            continue
+        content = item.get("content")
+        if not isinstance(content, str):
+            continue
+        try:
+            value = json.loads(content)
+        except (TypeError, ValueError):
+            continue
+        if value.get("type") == "ENDPOINT_OBSERVED":
+            entries = [value]
+        elif value.get("type") == "ENDPOINTS_DISCOVERED":
+            entries = [entry for entry in value.get("endpoints", ()) if isinstance(entry, dict)]
+        else:
+            entries = []
+        for entry in entries:
+            endpoint = str(entry.get("endpoint") or "")
+            if not endpoint or urlparse(endpoint).netloc.casefold() != origin:
+                continue
+            path = urlparse(endpoint).path.rstrip("/").casefold()
+            if path in {"", "/login"}:
+                continue
+            status = int(entry.get("status_code") or 0)
+            if bool(entry.get("auth_required")) or status in {301, 302, 303, 307, 308, 401, 403}:
+                if endpoint not in candidates:
+                    candidates.append(endpoint)
+    return candidates[:8]
+
+
+def _next_observed_endpoint(snapshot: dict[str, Any], target: str) -> str | None:
+    """Return one unrequested, same-origin endpoint from Race facts."""
+
+    from urllib.parse import urlparse
+
+    origin = urlparse(target).netloc.casefold()
+    requested = {
+        value.casefold()
+        for item in snapshot.get("facts", ())
+        if isinstance(item, dict)
+        for value in re.findall(r"request_url=([^;\s]+)", str(item.get("content") or ""), re.IGNORECASE)
+    }
+    candidates: list[str] = []
+    for item in snapshot.get("facts", ()):
+        if not isinstance(item, dict):
+            continue
+        try:
+            value = json.loads(str(item.get("content") or ""))
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(value, dict):
+            continue
+        entries = [value] if value.get("type") == "ENDPOINT_OBSERVED" else [entry for entry in value.get("endpoints", ()) if isinstance(entry, dict)] if value.get("type") == "ENDPOINTS_DISCOVERED" else []
+        for entry in entries:
+            endpoint = str(entry.get("endpoint") or "")
+            if not endpoint or urlparse(endpoint).netloc.casefold() != origin:
+                continue
+            if endpoint.casefold() in requested or endpoint not in candidates:
+                if endpoint.casefold() not in requested and endpoint not in candidates:
+                    candidates.append(endpoint)
+    return candidates[0] if candidates else None

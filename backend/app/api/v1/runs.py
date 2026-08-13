@@ -7,6 +7,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends
+from fastapi.responses import Response
 from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -69,7 +70,7 @@ from app.models.run import (
 from app.models.skill import RunSkillSnapshot
 from app.models.solver_state import SolverState
 from app.orchestration.orchestrator import orchestrator
-from app.orchestration.state_machine import TERMINAL, RunStatus, transition
+from app.orchestration.state_machine import TERMINAL, RunStatus
 from app.orchestration.state_machine import restart as restart_state
 from app.schemas.compaction import CompactionDecisionAction
 from app.schemas.flag import FlagReviewUpdate
@@ -85,14 +86,22 @@ from app.services.fresh_reproduction import fresh_reproduction_executor
 from app.services.methodology_hints import hints_for_challenge
 from app.services.role_loader import role_loader
 from app.services.run_attempts import run_attempt_service
-from app.services.run_lifecycle import cancel_run as cancel_run_lifecycle
-from app.services.run_finalizer import run_finalizer
-from app.services.run_supervisor import run_supervisor
 from app.services.run_diagnostics import run_diagnostics_service
+from app.services.run_finalizer import run_finalizer
+from app.services.run_lifecycle import cancel_run as cancel_run_lifecycle
+from app.services.run_supervisor import run_supervisor
 from app.services.runner_client import runner_client
 from app.services.skill_selection import snapshot_run_skills
 from app.services.solver_state import solver_state_service
 from app.services.workspace import create_workspace
+from app.services.muteki_board_semantics import build_board_inputs, request_analysis_locked, SEMANTIC_CACHE_KEY
+from app.solver.muteki.adapter.cost_bridge import load_muteki_usage, load_muteki_usage_breakdown
+from app.solver.muteki.adapter.graph_snapshot import read_native_graph_snapshot
+from app.solver.muteki.runtime.configuration import (
+    normalize_worker_engines,
+    runtime_selection_from_hints,
+    write_runtime_selection,
+)
 
 router = APIRouter(tags=["runs"])
 LOCAL_TARGET_HOSTS = {"localhost", "127.0.0.1", "::1"}
@@ -126,6 +135,11 @@ def read(item: SolveRun) -> RunRead:
             value = value.replace(tzinfo=UTC)
         return value.astimezone(UTC).isoformat()
 
+    reason_model_config_id, worker_engines = runtime_selection_from_hints(
+        item.hints_json,
+        fallback_engine_type=item.engine_type,
+        fallback_model_config_id=item.model_config_id,
+    )
     payload = {
         **item.__dict__,
         # Columns introduced by later migrations can still be NULL on legacy
@@ -133,6 +147,9 @@ def read(item: SolveRun) -> RunRead:
         "recovery_checkpoint_json": item.recovery_checkpoint_json or {},
         "role_snapshot_json": item.role_snapshot_json or {},
         "hints_json": item.hints_json or {},
+        "title": str((item.hints_json or {}).get("muteki_title") or "") or None,
+        "reason_model_config_id": reason_model_config_id,
+        "worker_engines": [item.to_dict() for item in worker_engines],
         "created_at": iso(item.created_at),
         "updated_at": iso(item.updated_at),
         "started_at": iso(item.started_at),
@@ -146,6 +163,12 @@ async def read_with_summary(
 ) -> RunRead:
     challenge = await session.get(Challenge, item.challenge_id)
     model = await session.get(ModelConfig, item.model_config_id) if item.model_config_id else None
+    reason_model_config_id, worker_engines = runtime_selection_from_hints(
+        item.hints_json,
+        fallback_engine_type=item.engine_type,
+        fallback_model_config_id=item.model_config_id,
+    )
+    reason_model = await session.get(ModelConfig, reason_model_config_id) if reason_model_config_id else None
     state = await solver_state_service.load(session, item.id)
     active_skill_names: list[str] = []
     if state and state.active_skill_ids_json:
@@ -178,9 +201,13 @@ async def read_with_summary(
         "role_snapshot_json": item.role_snapshot_json or {},
         "hints_json": item.hints_json or {},
         "challenge_name": challenge.name if challenge else None,
+        "title": str((item.hints_json or {}).get("muteki_title") or "") or None,
         "challenge_type": challenge.challenge_type if challenge else None,
         "target_summary": challenge.target_url if challenge and challenge.target_url else None,
         "model_name": model.name if model else None,
+        "reason_model_config_id": reason_model_config_id,
+        "reason_model_name": reason_model.name if reason_model else None,
+        "worker_engines": [selection.to_dict() for selection in worker_engines],
         "model_source": "CODEX_BRIDGE" if is_codex else ("OPENAI_COMPATIBLE" if is_openai else None),
         "model_config_required": is_openai,
         "model_config_applicable": is_openai,
@@ -205,7 +232,11 @@ async def require_run(run_id: str, session: AsyncSession) -> SolveRun:
 
 
 async def ensure_codex_materialized(session: AsyncSession, run: SolveRun) -> SolveRun:
-    if run.engine_type == "codex_sdk":
+    # Muteki's official Worker owns its own container/Graph/Evidence
+    # lifecycle.  It deliberately has no legacy Codex cursor, so running the
+    # old materializer here would project an empty cursor over valid Muteki
+    # counters every time the UI polls the Run.
+    if run.engine_type == "codex_sdk" and run.solver_mode != "muteki":
         await codex_materializer.sync(session, run)
     return run
 
@@ -220,7 +251,14 @@ async def create_run(
     challenge_id: str, payload: RunCreate, session: AsyncSession = Depends(get_session)
 ) -> dict:
     challenge = await require_challenge(challenge_id, session)
-    if remote_local_target_blocked(challenge, payload.engine_type):
+    requested_engine_type = next(
+        (item.engine_type for item in payload.worker_engines if item.engine_type != "mock"),
+        payload.engine_type,
+    )
+    # Muteki's production Worker owns the run-scoped official Sandbox
+    # container and no longer depends on the remote Kali Runner reachability
+    # check.  Keep the guard for the legacy single-agent path only.
+    if payload.solver_mode != "muteki" and remote_local_target_blocked(challenge, requested_engine_type):
         raise DomainError(
             "TARGET_NOT_REACHABLE_FROM_RUNNER",
             "Remote Kali Runner cannot reach the Windows localhost target. Use the Windows LAN IP or configure a local Runner.",
@@ -239,8 +277,15 @@ async def create_run(
                 status_code=422,
             )
     values = payload.model_dump(
-        exclude={"selected_skill_ids", "disabled_skill_ids", "conversation_id"}
+        exclude={
+            "selected_skill_ids",
+            "disabled_skill_ids",
+            "conversation_id",
+            "reason_model_config_id",
+            "worker_engines",
+        }
     )
+    reason_model_config_id = payload.reason_model_config_id
     conversation_summary = None
     if payload.conversation_id:
         conversation = await session.get(ChallengeConversation, payload.conversation_id)
@@ -252,6 +297,19 @@ async def create_run(
             )
         if values.get("model_config_id") is None:
             values["model_config_id"] = conversation.model_config_id
+        if reason_model_config_id is None and conversation.model_config_id:
+            # Older conversations predate Muteki's explicit role split.  Only
+            # inherit the conversation model as Coordinator Reason when it
+            # has opted into that role; otherwise keep the local Reason
+            # fallback and let the model remain a Worker selection if asked.
+            conversation_config = await session.get(ModelConfig, conversation.model_config_id)
+            conversation_roles = (
+                (conversation_config.capabilities_json or {}).get("roles", ["worker"])
+                if conversation_config is not None
+                else []
+            )
+            if "coordinator_reason" in conversation_roles:
+                reason_model_config_id = conversation.model_config_id
         if not payload.selected_skill_ids:
             payload.selected_skill_ids = [
                 item.skill_id
@@ -276,26 +334,52 @@ async def create_run(
         conversation_summary = "\n".join(
             f"{message.role}: {message.content}" for message in reversed(messages)
         )[:8000]
-    if payload.engine_type == "openai_compatible":
-        from app.models.model_config import ModelConfig
-
-        config = (
-            await session.get(ModelConfig, values.get("model_config_id"))
-            if values.get("model_config_id")
-            else None
+    try:
+        worker_selections = normalize_worker_engines(
+            [item.model_dump() for item in payload.worker_engines],
+            fallback_engine_type=payload.engine_type,
+            fallback_model_config_id=(
+                values.get("model_config_id")
+                if payload.engine_type == "openai_compatible"
+                else None
+            ),
         )
+    except ValueError as error:
+        raise DomainError("WORKER_ENGINE_SELECTION_INVALID", str(error), status_code=422) from error
+    for selection in worker_selections:
+        if selection.engine_type != "openai_compatible":
+            continue
+        config = await session.get(ModelConfig, selection.model_config_id)
         if not config or not config.enabled:
             raise DomainError(
                 "MODEL_CONFIG_REQUIRED",
-                "OpenAI-compatible runs require an enabled model configuration.",
+                "Every OpenAI-compatible Worker requires an enabled model configuration.",
                 status_code=422,
             )
-    if payload.engine_type == "codex_sdk" and values.get("model_config_id"):
-        raise DomainError(
-            "MODEL_CONFIG_NOT_APPLICABLE",
-            "Codex SDK runs do not use a model configuration.",
-            status_code=422,
-        )
+        roles = (config.capabilities_json or {}).get("roles", ["worker"])
+        if "worker" not in roles:
+            raise DomainError(
+                "MODEL_CONFIG_ROLE_INVALID",
+                "The selected model is not enabled for Worker execution.",
+                status_code=422,
+            )
+    if reason_model_config_id:
+        reason_config = await session.get(ModelConfig, reason_model_config_id)
+        if not reason_config or not reason_config.enabled:
+            raise DomainError(
+                "REASON_MODEL_CONFIG_REQUIRED",
+                "The Coordinator reasoning model must be enabled.",
+                status_code=422,
+            )
+        reason_roles = (reason_config.capabilities_json or {}).get("roles", ["worker"])
+        if "coordinator_reason" not in reason_roles:
+            raise DomainError(
+                "REASON_MODEL_ROLE_INVALID",
+                "The selected model is not enabled for Coordinator reasoning.",
+                status_code=422,
+            )
+    values["engine_type"] = worker_selections[0].engine_type
+    values["model_config_id"] = worker_selections[0].model_config_id
     item = SolveRun(
         challenge_id=challenge.id,
         workspace_path="pending",
@@ -305,7 +389,11 @@ async def create_run(
         role_snapshot_json={},
         **values,
     )
-    item.hints_json = hints_for_challenge(challenge)
+    item.hints_json = write_runtime_selection(
+        hints_for_challenge(challenge),
+        reason_model_config_id=reason_model_config_id,
+        worker_engines=worker_selections,
+    )
     session.add(item)
     await session.flush()
     role = role_loader.load(challenge.challenge_type)
@@ -539,6 +627,145 @@ async def get_solver_state(run_id: str, session: AsyncSession = Depends(get_sess
     }
 
 
+@router.get("/runs/{run_id}/muteki-state")
+async def get_muteki_state(run_id: str, session: AsyncSession = Depends(get_session)) -> dict:
+    """Read the authoritative native Blackboard without opening it for write."""
+
+    run = await require_run(run_id, session)
+    if str(run.solver_mode or "").lower() != "muteki":
+        return {
+            "data": {
+                "available": False,
+                "run_id": str(run.id),
+                "revision": 0,
+                "facts": [],
+                "key_conditions": [],
+                "intents": [],
+                "dead_ends": [],
+                "flags": [],
+                "reason": "NOT_A_MUTEKI_RUN",
+            }
+        }
+    challenge = await session.get(Challenge, run.challenge_id)
+    if challenge is None:
+        raise DomainError("CHALLENGE_NOT_FOUND", "Challenge not found.", status_code=404)
+    graph_path = Path(str(run.workspace_path)).resolve() / "muteki" / "graph" / "upstream_shared_graph.db"
+    try:
+        state = await asyncio.to_thread(
+            read_native_graph_snapshot,
+            db_path=graph_path,
+            challenge=challenge,
+            run_id=str(run.id),
+        )
+    except Exception:
+        # The graph can be briefly unreadable while SQLite WAL files rotate.
+        # Keep the observer endpoint non-mutating and let the next poll retry.
+        state = {
+            "available": False,
+            "run_id": str(run.id),
+            "revision": 0,
+            "facts": [],
+            "key_conditions": [],
+            "intents": [],
+            "dead_ends": [],
+            "flags": [],
+            "reason": "GRAPH_TEMPORARILY_UNREADABLE",
+        }
+    semantic = dict((run.hints_json or {}).get(SEMANTIC_CACHE_KEY) or {})
+    if semantic:
+        state["board_semantic"] = semantic
+    return {"data": state}
+
+
+@router.post("/runs/{run_id}/muteki-board/semantic-analysis")
+async def start_muteki_board_semantic_analysis(run_id: str, session: AsyncSession = Depends(get_session)) -> dict:
+    """Start a user-requested, presentation-only Codex board analysis."""
+
+    run = await require_run(run_id, session)
+    if str(run.solver_mode or "").lower() != "muteki":
+        raise DomainError("NOT_A_MUTEKI_RUN", "Board semantic analysis is available only for Muteki runs.", status_code=409)
+    challenge = await session.get(Challenge, run.challenge_id)
+    if challenge is None:
+        raise DomainError("CHALLENGE_NOT_FOUND", "Challenge not found.", status_code=404)
+    graph_path = Path(str(run.workspace_path)).resolve() / "muteki" / "graph" / "upstream_shared_graph.db"
+    state = await asyncio.to_thread(
+        read_native_graph_snapshot,
+        db_path=graph_path,
+        challenge=challenge,
+        run_id=str(run.id),
+    )
+    if not state.get("available"):
+        raise DomainError("MUTEKI_BLACKBOARD_UNAVAILABLE", "The Blackboard is not ready for semantic analysis.", status_code=409)
+    items = build_board_inputs(state)
+    if not items:
+        raise DomainError("MUTEKI_BOARD_EMPTY", "There are no evidence-backed key conditions to analyze.", status_code=409)
+    cache = await request_analysis_locked(session, run=run, revision=int(state.get("revision") or 0), items=items)
+    return {"data": cache}
+
+
+@router.get("/runs/{run_id}/muteki-poc")
+async def export_muteki_poc(run_id: str, session: AsyncSession = Depends(get_session)) -> Response:
+    """Export a safe, evidence-backed Muteki answer PoC.
+
+    The official Muteki graph treats PoCs as shared metadata linked to an
+    artifact.  The export is therefore available only after the outer
+    Completion Gate has persisted a solved report, and contains graph facts,
+    evidence references and PoC metadata—not raw responses or credentials.
+    """
+
+    run = await require_run(run_id, session)
+    report = dict(run.report_json or {})
+    if str(run.solver_mode or "").lower() != "muteki" or str(run.status) != "COMPLETED_SOLVED" or report.get("flag_verified") is not True:
+        raise DomainError("MUTEKI_POC_NOT_AVAILABLE", "Only a verified Muteki result can export a PoC.", status_code=409)
+    challenge = await session.get(Challenge, run.challenge_id)
+    if challenge is None:
+        raise DomainError("CHALLENGE_NOT_FOUND", "Challenge not found.", status_code=404)
+    graph_path = Path(str(run.workspace_path)).resolve() / "muteki" / "graph" / "upstream_shared_graph.db"
+    state = await asyncio.to_thread(
+        read_native_graph_snapshot,
+        db_path=graph_path,
+        challenge=challenge,
+        run_id=str(run.id),
+    )
+    if not state.get("available"):
+        raise DomainError("MUTEKI_BLACKBOARD_UNAVAILABLE", "The solved Blackboard is unavailable.", status_code=409)
+    lines = [
+        "# Muteki Verified Answer PoC",
+        "",
+        f"- Run: `{run.id}`",
+        f"- Challenge: {challenge.name}",
+        f"- Flag: `{report.get('flag') or ''}`",
+        "- Gate: `COMPLETED_SOLVED` / evidence-backed",
+        "",
+        "## Verified Evidence Chain",
+    ]
+    facts = [item for item in state.get("facts", []) if item.get("verified")]
+    if facts:
+        for item in facts:
+            refs = ", ".join(f"`{ref}`" for ref in item.get("evidence_refs", [])) or "(none)"
+            lines.append(f"- {item.get('content', '')} — Evidence: {refs}")
+    else:
+        lines.append("- No verified fact was exposed by the Blackboard projection.")
+    lines.extend(["", "## Saved PoC Metadata"])
+    pocs = state.get("pocs", [])
+    if pocs:
+        for item in pocs:
+            lines.append(
+                f"- `{item.get('name') or item.get('poc_id')}` · "
+                f"status={item.get('status', 'available')} · "
+                f"command=`{item.get('entry_command', '')}` · "
+                f"artifact=`{item.get('artifact_id') or 'n/a'}`"
+            )
+    else:
+        lines.append("- No separate PoC artifact metadata was saved; the verified flag and evidence chain are the answer record.")
+    content = "\n".join(lines) + "\n"
+    return Response(
+        content=content,
+        media_type="text/markdown",
+        headers={"Content-Disposition": f'attachment; filename="muteki-{run.id}-answer-poc.md"'},
+    )
+
+
 @router.get("/runs/{run_id}/tool-manifest")
 async def get_run_tool_manifest(run_id: str, session: AsyncSession = Depends(get_session)) -> dict:
     run = await require_run(run_id, session)
@@ -585,6 +812,10 @@ async def start_run(run_id: str, session: AsyncSession = Depends(get_session)) -
                 {"max_total_runtime_seconds": run.max_total_runtime_seconds},
                 status_code=409,
             )
+    if str(run.solver_mode or "").lower() == "muteki" and not (run.hints_json or {}).get("muteki_title"):
+        from app.solver.muteki.titler import generate_run_title
+
+        asyncio.create_task(generate_run_title(str(run.id)), name=f"muteki-titler-{run.id}")
     asyncio.create_task(run_supervisor.run_background(run.id))
     return {"data": {"run_id": run.id, "status": "STARTING"}}
 
@@ -791,11 +1022,20 @@ async def restart_run(
 @router.post("/runs/{run_id}/cancel")
 async def cancel_run(run_id: str, session: AsyncSession = Depends(get_session)) -> dict:
     run = await require_run(run_id, session)
+    solver_mode = str(run.solver_mode or "").lower()
+    # Native Muteki has its own Coordinator/Worker/Sandbox lifecycle.  Enter
+    # that cancellation path first so its official ``finally`` persists the
+    # final Graph events and tears down the run container before the outer
+    # Run row becomes terminal.  Legacy runs retain their existing cancel
+    # adapter and Runner session cleanup.
+    if solver_mode == "muteki":
+        await run_supervisor.cancel_muteki(str(run.id))
     await cancel_run_lifecycle(session, run.id, "Run cancelled by user.")
     await run_finalizer.reconcile(session, run)
-    await orchestrator.cancel(run.id)
-    with contextlib.suppress(Exception):
-        await runner_client.clear_sessions(run.id)
+    if solver_mode != "muteki":
+        await orchestrator.cancel(run.id)
+        with contextlib.suppress(Exception):
+            await runner_client.clear_sessions(run.id)
     return {"data": read(run)}
 
 
@@ -848,6 +1088,27 @@ async def list_tool_calls(run_id: str, session: AsyncSession = Depends(get_sessi
             }
             for item in items
         ]
+    }
+
+
+@router.get("/runs/{run_id}/usage")
+async def get_run_usage(run_id: str, session: AsyncSession = Depends(get_session)) -> dict:
+    """Return durable total and per-model Muteki usage for the Workspace."""
+
+    await require_run(run_id, session)
+    total = await load_muteki_usage(session, run_id)
+    models = await load_muteki_usage_breakdown(session, run_id)
+    return {
+        "data": {
+            "total": {
+                "calls": total.calls,
+                "input_tokens": total.input_tokens,
+                "output_tokens": total.output_tokens,
+                "total_tokens": total.tokens,
+                "cost_usd": round(total.cost_usd, 10),
+            },
+            "models": models,
+        }
     }
 
 

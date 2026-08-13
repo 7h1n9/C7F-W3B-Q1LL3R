@@ -194,6 +194,24 @@ async def test_run_list_is_lightweight_for_codex_runs(
 
 
 @pytest.mark.asyncio
+async def test_muteki_codex_runs_skip_legacy_materializer(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    async def fail_materialize(*_: object) -> None:
+        raise AssertionError("Muteki runs must not use the legacy Codex cursor")
+
+    monkeypatch.setattr(runs_api.codex_materializer, "sync", fail_materialize)
+    run = SolveRun(
+        challenge_id="muteki-challenge",
+        workspace_path=str(tmp_path),
+        engine_type="codex_sdk",
+        solver_mode="muteki",
+    )
+
+    assert await runs_api.ensure_codex_materialized(object(), run) is run
+
+
+@pytest.mark.asyncio
 async def test_codex_progress_snapshot_ignores_agent_only_events(tmp_path: Path) -> None:
     engine = create_async_engine(
         f"sqlite+aiosqlite:///{tmp_path / 'codex-progress.db'}", poolclass=StaticPool

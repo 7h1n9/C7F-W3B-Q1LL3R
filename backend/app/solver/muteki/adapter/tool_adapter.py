@@ -57,6 +57,8 @@ class ToolAdapter:
         )
         result = await self._worker.execute(action)
         output = dict(result.output or {})
+        if result.metadata.get("error_reason"):
+            output["error_reason"] = str(result.metadata["error_reason"])[:800]
         return ToolResult(
             success=bool(result.success),
             tool_name=str(tool_name),
@@ -94,7 +96,15 @@ class ToolAdapter:
 def _safe_result_details(output: Mapping[str, Any]) -> dict[str, Any]:
     """Keep navigation metadata while excluding response bodies and secrets."""
 
-    keys = ("status_code", "final_url", "links", "form_actions", "parameter_names", "json_keys")
+    keys = (
+        "status_code", "final_url", "links", "form_actions", "parameter_names",
+        "json_keys", "tables", "columns", "databases", "database",
+        "candidate_table", "candidate_column", "target_expression",
+        "test_field", "oracle", "stage",
+        "extracted_value", "flag_candidates", "oracle_verified",
+        "boolean_oracle_confirmed", "adaptive_extraction_profile",
+        "error_type", "error_reason",
+    )
     details = {key: output.get(key) for key in keys if output.get(key) not in (None, [], {})}
     excerpt = output.get("body_excerpt") or output.get("content_excerpt")
     if isinstance(excerpt, str):
@@ -109,6 +119,48 @@ def _safe_result_details(output: Mapping[str, Any]) -> dict[str, Any]:
             for key in ("ticket_no", "title"):
                 if parsed.get(key):
                     details[key] = str(parsed[key])[:200]
+        html_forms = re.findall(r"<form\b[^>]*>(.*?)</form\s*>", excerpt, re.IGNORECASE | re.DOTALL)
+        form_actions: list[str] = []
+        form_methods: list[str] = []
+        parameter_names: list[str] = []
+        for form in html_forms[:20]:
+            tag = re.search(r"<form\b[^>]*>", form, re.IGNORECASE)
+            action = re.search(r"\baction=[\"']([^\"']+)", tag.group(0), re.IGNORECASE) if tag else None
+            method = re.search(r"\bmethod=[\"']([^\"']+)", tag.group(0), re.IGNORECASE) if tag else None
+            if action:
+                form_actions.append(action.group(1)[:500])
+            form_methods.append((method.group(1) if method else "GET").upper()[:10])
+            parameter_names.extend(
+                value[:80]
+                for value in re.findall(
+                    r"<(?:input|textarea|select)\b[^>]*\bname=[\"']([A-Za-z][A-Za-z0-9_.-]{0,79})",
+                    form,
+                    re.IGNORECASE,
+                )
+            )
+        if form_actions:
+            details["form_actions"] = list(dict.fromkeys(form_actions))[:20]
+            details["form_methods"] = form_methods[:20]
+        if parameter_names:
+            details["parameter_names"] = list(dict.fromkeys(parameter_names))[:40]
+    structured_forms = output.get("forms")
+    if isinstance(structured_forms, list):
+        form_methods: list[str] = []
+        form_actions: list[str] = []
+        parameter_names: list[str] = []
+        for form in structured_forms[:20]:
+            if not isinstance(form, Mapping):
+                continue
+            form_actions.extend(str(value)[:500] for value in (form.get("action"),) if value)
+            form_methods.append(str(form.get("method") or "GET").upper()[:10])
+            for field in form.get("inputs") or ():
+                if isinstance(field, Mapping) and field.get("name"):
+                    parameter_names.append(str(field["name"])[:80])
+        if form_actions:
+            details["form_actions"] = list(dict.fromkeys(form_actions))[:20]
+            details["form_methods"] = form_methods[:20]
+        if parameter_names:
+            details["parameter_names"] = list(dict.fromkeys(parameter_names))[:40]
     links = details.get("links") or []
     ticket_links = [str(item) for item in links if re.search(r"/tickets/WO-[A-Za-z0-9-]+", str(item), re.I)]
     if ticket_links:

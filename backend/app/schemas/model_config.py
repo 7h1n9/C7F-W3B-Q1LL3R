@@ -1,3 +1,5 @@
+from typing import Literal
+
 from pydantic import BaseModel, ConfigDict, Field, HttpUrl
 
 
@@ -10,6 +12,7 @@ class ModelConfigWrite(BaseModel):
     model_name: str = Field(min_length=1, max_length=255)
     api_key: str | None = Field(default=None, min_length=1, max_length=1000)
     enabled: bool = True
+    roles: list[Literal["worker", "coordinator_reason"]] = Field(default_factory=lambda: ["worker"], max_length=2)
     action_protocol: str = Field(default="json_schema", pattern="^(json_schema|json_object|prompt_json|native_tool_call)$")
     structured_output_mode: str = Field(default="json_schema", pattern="^(json_schema|json_object|prompt_json)$")
     request_timeout_seconds: int = Field(default=30, ge=5, le=600)

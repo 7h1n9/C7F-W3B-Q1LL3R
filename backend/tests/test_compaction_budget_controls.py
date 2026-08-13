@@ -85,3 +85,24 @@ async def test_compaction_archives_and_restores_snapshot(session_factory, tmp_pa
     assert archive.joinpath("archive-manifest.json").is_file()
     assert result["manifest"]["restorable"] is True
     assert restored and restored["generation"] == 1
+
+
+@pytest.mark.asyncio
+async def test_compaction_captures_ids_before_expire_on_commit(tmp_path: Path) -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:", poolclass=StaticPool)
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    sessions = async_sessionmaker(engine, expire_on_commit=True)
+    async with sessions() as session:
+        challenge = Challenge(name="expired", target_url="http://expired.local", allowed_hosts=["expired.local"], challenge_type="WEB_TARGET")
+        session.add(challenge)
+        await session.flush()
+        run = SolveRun(challenge_id=challenge.id, workspace_path=str(tmp_path), status="EXECUTING", current_phase="EXECUTING")
+        session.add(run)
+        await session.flush()
+        for index in range(20):
+            await effective_logical_tool_call_service.ensure(session, run, logical_tool_call_id=f"expired-{index}", tool_name="http_request")
+        result = await compaction_service.apply(session, run, CompactionDecisionAction())
+        assert result["status"] == "COMPLETED"
+        assert result["snapshot_id"]
+    await engine.dispose()

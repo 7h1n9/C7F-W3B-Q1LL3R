@@ -215,6 +215,11 @@ class ContextBuilder:
         started_at = run.started_at
         if started_at and started_at.tzinfo is None:
             started_at = started_at.replace(tzinfo=UTC)
+        solver_hints = dict(run.hints_json or {})
+        # Board semantic summaries are presentation cache only.  They are
+        # intentionally persisted on the Run for the UI, but must never enter
+        # a Solver/Worker prompt or influence planning.
+        solver_hints.pop("muteki_board_semantic", None)
         context = {
             "Role Snapshot": role_snapshot,
             "Challenge-Type Methodology Skill": {
@@ -234,7 +239,7 @@ class ContextBuilder:
                 ],
             },
             "Evidence Snapshot": snapshot_data or None,
-            "Authorized Methodology Hints": run.hints_json or {},
+            "Authorized Methodology Hints": solver_hints,
             "User Resume Context": {
                 "user_inputs": list((run.hints_json or {}).get("user_inputs") or [])[-20:],
                 "resume_reason": (run.recovery_checkpoint_json or {}).get("resume_reason"),

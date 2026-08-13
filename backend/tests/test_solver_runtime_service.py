@@ -254,9 +254,11 @@ async def test_blackboard_store_preserves_other_checkpoint_keys(session_factory)
         assert refreshed.recovery_checkpoint_json["legacy_key"] == {"keep": True}
 
 
-def test_run_create_accepts_solver_v2_without_changing_default() -> None:
-    assert RunCreate().solver_mode == "multi_agent_v1"
-    assert RunCreate(solver_mode="solver_v2").solver_mode == "solver_v2"
+def test_new_run_schema_exposes_only_supported_modes() -> None:
+    assert RunCreate().solver_mode == "muteki"
+    assert RunCreate(solver_mode="single_agent").solver_mode == "single_agent"
+    with pytest.raises(ValueError):
+        RunCreate(solver_mode="solver_v2")
 
 
 @pytest.mark.asyncio

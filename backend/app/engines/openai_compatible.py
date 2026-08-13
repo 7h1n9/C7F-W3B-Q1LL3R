@@ -1,6 +1,7 @@
 import asyncio
 import json
 import time
+from dataclasses import dataclass
 from typing import Any
 
 import httpx
@@ -31,6 +32,16 @@ class ModelProviderError(RuntimeError):
     def __init__(self, code: str, message: str) -> None:
         self.code = code
         super().__init__(f"{code}: {message}")
+
+
+@dataclass(frozen=True, slots=True)
+class ChatCompletionResponse:
+    """Minimal response contract used by the official Muteki Reason parser."""
+
+    content: str
+    input_tokens: int = 0
+    output_tokens: int = 0
+    model: str = ""
 
 
 class OpenAICompatibleEngine:
@@ -265,3 +276,93 @@ class OpenAICompatibleEngine:
         usage = body.get("usage") or {}
         self.last_trace = {"latency_ms": round((time.perf_counter() - started) * 1000), "input_tokens": usage.get("prompt_tokens") or usage.get("input_tokens"), "output_tokens": usage.get("completion_tokens") or usage.get("output_tokens"), "parse_attempts": 1, "response_excerpt": content[:2000]}
         return raw
+
+    async def chat(
+        self,
+        *,
+        model: str,
+        messages: list[dict[str, Any]],
+        temperature: float = 0.4,
+        max_tokens: int | None = None,
+        stream: bool = False,
+        run_id: str | None = None,
+        challenge_id: str | None = None,
+        solver_id: str | None = None,
+    ) -> ChatCompletionResponse:
+        """Execute the plain Chat Completion contract used by Muteki Reason.
+
+        Muteki's official Reason path deliberately does not send a provider
+        JSON-Schema response format and does not cap ``max_tokens``.  Reasoning
+        models may spend most of their budget in ``reasoning_content`` before
+        emitting the planning JSON.  The existing action/role contracts keep
+        their structured methods; this method is the separate Coordinator-only
+        boundary.
+        """
+
+        del run_id, challenge_id, solver_id
+        if time.monotonic() < self.cooldown_until:
+            raise ModelRateLimitError("MODEL_RATE_LIMITED: provider cooldown is active")
+        started = time.perf_counter()
+        payload: dict[str, Any] = {
+            "model": model or self.model,
+            "messages": messages,
+            "temperature": temperature,
+            "stream": bool(stream),
+        }
+        # ``None`` is intentional and matches official Muteki's run_reason()
+        # call.  Do not silently replace it with the Worker output-token cap.
+        if max_tokens is not None:
+            payload["max_tokens"] = max_tokens
+        try:
+            response = await self._get_client().post(
+                f"{self.base_url}/chat/completions",
+                headers={"Authorization": f"Bearer {self.api_key}"},
+                json=payload,
+            )
+            response.raise_for_status()
+            body = response.json()
+            content = body["choices"][0]["message"].get("content")
+            if not isinstance(content, str):
+                raise ValueError("chat response did not contain text content")
+            usage = body.get("usage") or {}
+            self.last_trace = {
+                "latency_ms": round((time.perf_counter() - started) * 1000),
+                "input_tokens": usage.get("prompt_tokens") or usage.get("input_tokens"),
+                "output_tokens": usage.get("completion_tokens") or usage.get("output_tokens"),
+                "provider_request_id": getattr(response, "headers", {}).get("x-request-id")
+                if getattr(response, "headers", None)
+                else None,
+                "parse_attempts": 1,
+                "response_excerpt": content[:2000],
+            }
+            return ChatCompletionResponse(
+                content=content,
+                input_tokens=int(self.last_trace.get("input_tokens") or 0),
+                output_tokens=int(self.last_trace.get("output_tokens") or 0),
+                model=str(body.get("model") or payload["model"]),
+            )
+        except httpx.HTTPStatusError as error:
+            status = error.response.status_code
+            if status == 402:
+                raise ModelProviderError("MODEL_QUOTA_EXCEEDED", "provider quota exceeded") from error
+            if status in {401, 403}:
+                code = "MODEL_AUTH_FAILED" if status == 401 else "MODEL_PERMISSION_DENIED"
+                raise ModelProviderError(code, f"provider returned HTTP {status}") from error
+            if status == 400:
+                # A malformed/unsupported Reason request is a provider
+                # contract error, not a transport outage.  Keeping this
+                # distinct prevents the Coordinator from repeatedly probing
+                # an endpoint that is reachable but rejects the payload.
+                raise ModelProviderError("MODEL_BAD_REQUEST", "provider rejected the request") from error
+            if status == 429:
+                self.cooldown_until = time.monotonic() + self.rate_limit_cooldown_seconds
+                raise ModelRateLimitError(
+                    "MODEL_RATE_LIMITED: provider returned HTTP 429 Too Many Requests"
+                ) from error
+            if status in TRANSIENT_HTTP_STATUSES:
+                raise ModelUnavailableError(f"MODEL_UNAVAILABLE: provider returned HTTP {status}") from error
+            raise ModelProviderError("MODEL_UNAVAILABLE", f"provider returned HTTP {status}") from error
+        except httpx.TimeoutException as error:
+            raise ModelProviderError("MODEL_TIMEOUT", "provider request timed out") from error
+        except httpx.RequestError as error:
+            raise ModelUnavailableError(f"MODEL_UNAVAILABLE: {error}") from error

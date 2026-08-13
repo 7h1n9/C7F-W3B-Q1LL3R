@@ -65,6 +65,77 @@ def test_race_writes_endpoint_facts_and_infers_idor(tmp_path) -> None:
         graph.close()
 
 
+def test_race_does_not_call_404_ticket_probe_idor(tmp_path) -> None:
+    async def execute(tool_name: str, arguments: dict, workspace_id: str, run_id: str) -> ToolResult:
+        if arguments.get("operation") == "create":
+            return ToolResult(True, tool_name, {"summary": "session created"}, ("ev-session",))
+        path = arguments["url"].removeprefix(BASE_URL) or "/"
+        if path == "/":
+            body = "<form action='/login'><input name='password'></form>"
+            output = {"status_code": 200, "body": body, "headers": {}}
+        else:
+            output = {"status_code": 404, "body": "not found", "headers": {}}
+        return ToolResult(True, tool_name, output, (f"ev-{path.strip('/') or 'root'}",))
+
+    graph = MutekiGraph(tmp_path / "graph.db", challenge_id="run")
+    try:
+        result = asyncio.run(RaceWorker(graph, execute, target_url=BASE_URL, metadata={}).run())
+        assert result.classification.classification == "GENERIC_WEB"
+    finally:
+        graph.close()
+
+
+def test_breadth_scanner_extracts_explicitly_published_credentials() -> None:
+    async def execute(tool_name: str, arguments: dict, workspace_id: str, run_id: str) -> ToolResult:
+        if arguments.get("operation") == "create":
+            return ToolResult(True, tool_name, {"summary": "session created"}, ("ev-session",))
+        return ToolResult(
+            True,
+            tool_name,
+            {"status_code": 200, "body": "<code>employee</code> / <code>employee-pass</code>", "headers": {}},
+            ("ev-home",),
+        )
+
+    report = asyncio.run(BreadthScanner(execute, max_requests=1).scan(base_url=BASE_URL, workspace_id="ws", run_id="run"))
+    assert report.public_credentials == ("employee", "employee-pass")
+
+
+def test_breadth_scanner_extracts_credentials_from_nested_gateway_view() -> None:
+    async def execute(tool_name: str, arguments: dict, workspace_id: str, run_id: str) -> ToolResult:
+        if arguments.get("operation") == "create":
+            return ToolResult(True, tool_name, {"summary": "session created"}, ("ev-session",))
+        return ToolResult(
+            True,
+            tool_name,
+            {"model_view": {"content_excerpt": "<code>employee</code> / <code>employee-pass</code>"}},
+            ("ev-home",),
+        )
+
+    report = asyncio.run(BreadthScanner(execute, max_requests=1).scan(base_url=BASE_URL, workspace_id="ws", run_id="run"))
+    assert report.public_credentials == ("employee", "employee-pass")
+
+
+def test_breadth_scanner_reads_public_credentials_from_local_artifact(tmp_path) -> None:
+    artifact = tmp_path / "response.json"
+    artifact.write_text(
+        json.dumps({"body": "<code>employee</code> / <code>employee-pass</code>"}),
+        encoding="utf-8",
+    )
+
+    async def execute(tool_name: str, arguments: dict, workspace_id: str, run_id: str) -> ToolResult:
+        if arguments.get("operation") == "create":
+            return ToolResult(True, tool_name, {"summary": "session created"}, ("ev-session",))
+        return ToolResult(
+            True,
+            tool_name,
+            {"artifacts": [{"relative_path": artifact.name}], "summary": "HTTP 200"},
+            ("ev-home",),
+        )
+
+    report = asyncio.run(BreadthScanner(execute, max_requests=1).scan(base_url=BASE_URL, workspace_id=str(tmp_path), run_id="run"))
+    assert report.public_credentials == ("employee", "employee-pass")
+
+
 def test_sql_metadata_takes_race_fast_path_without_http(tmp_path) -> None:
     graph = MutekiGraph(tmp_path / "graph.db", challenge_id="run")
     calls: list[tuple[str, dict]] = []
@@ -123,6 +194,33 @@ def test_reason_allows_sql_domain_only_for_explicit_sql_metadata(tmp_path) -> No
         )
         result = asyncio.run(reason.reason(graph))
         assert result.intents[0].payload["tool_name"] == "sql_boolean_compare"
+    finally:
+        graph.close()
+
+
+def test_reason_keeps_exhausted_provider_route_empty_for_sql_classification(tmp_path) -> None:
+    graph = MutekiGraph(tmp_path / "graph.db", challenge_id="run")
+    try:
+        reason = MutekiReason(lambda _snapshot: [], metadata={"vulnerability_type": "SQL_INJECTION"})
+        result = asyncio.run(reason.reason(graph))
+
+        assert result.intents == ()
+    finally:
+        graph.close()
+
+
+def test_reason_allows_authenticated_session_bootstrap_in_non_sql_domain(tmp_path) -> None:
+    graph = MutekiGraph(tmp_path / "graph.db", challenge_id="run")
+    try:
+        reason = MutekiReason(
+            lambda _: [{
+                "goal": "authenticate before bounded template probe",
+                "payload": {"tool_name": "http_session_request"},
+            }],
+            metadata={"vulnerability_type": "SSTI"},
+        )
+        result = asyncio.run(reason.reason(graph))
+        assert result.intents[0].payload["tool_name"] == "http_session_request"
     finally:
         graph.close()
 

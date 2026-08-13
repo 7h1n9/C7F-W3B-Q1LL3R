@@ -13,9 +13,15 @@ from .events import EventEnvelope, EventType
 from .gate import GateDecision, MutekiFlagGate
 from .graph import DeadEnd, Fact, Flag, Intent, MutekiGraph, PoC, ResourceClaim
 from .identity import EngineType, IdentityModel
+from .outcomes import DeadEndKind, DeadEndSignal, WorkerResultCode
 from .phases import MutekiPhase, PhaseDecision
 from .reason import IntentProposal, MutekiReason, ReasonResult
 from .worker import WorkerEngine, WorkerPool, WorkerResult
+from .worker.official_worker import (
+    OfficialWorkerAdapter,
+    OfficialWorkerConfig,
+    OfficialWorkerResult,
+)
 from .workers import EngineProfile, MutekiWorkerPool, WorkerJob, WorkerOutcome
 from .workspace import MutekiWorkspace
 
@@ -65,5 +71,11 @@ __all__ = [
     "WorkerEngine",
     "WorkerPool",
     "WorkerResult",
+    "OfficialWorkerAdapter",
+    "OfficialWorkerConfig",
+    "OfficialWorkerResult",
+    "DeadEndKind",
+    "DeadEndSignal",
+    "WorkerResultCode",
     "SkillResult",
 ]

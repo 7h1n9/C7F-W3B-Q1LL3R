@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
+from types import SimpleNamespace
 
 from app.schemas.run import RunCreate
 from app.solver.muteki.adapter.event_bridge import EventBridge
@@ -13,6 +14,7 @@ from app.solver.muteki.events import EventEnvelope
 from app.solver.muteki.graph import Fact, MutekiGraph
 from app.solver.muteki.reason import MutekiReason
 from app.solver.muteki.workers import WorkerOutcome
+from app.solver.worker.adapters.gateway import GatewayWorker
 
 
 @dataclass
@@ -61,6 +63,22 @@ def test_tool_adapter_normalizes_gateway_result_without_raw_fact():
     assert fact.evidence_refs == ("ev-1",)
 
 
+def test_gateway_normalizes_tool_model_view_navigation_facts():
+    payload = {
+        "tool_model_view": {
+            "content_excerpt": "<form method='post' action='/preview'><textarea name='body'></textarea></form>",
+            "extracted_facts": {
+                "links": ["/templates/TPL-1"],
+                "forms": [{"action": "/preview", "method": "POST", "inputs": [{"name": "body"}]}],
+            },
+        }
+    }
+    normalized = GatewayWorker._normalize_payload(payload)
+    assert normalized["links"] == ["/templates/TPL-1"]
+    assert normalized["forms"][0]["method"] == "POST"
+    assert "body_excerpt" in normalized
+
+
 def test_runner_adapter_normalizes_python_job():
     runner = FakeRunner()
     adapter = RunnerAdapter(runner)
@@ -97,6 +115,50 @@ def test_event_bridge_deduplicates_and_sanitizes_sensitive_payload():
     assert service.events[0][2]["payload"]["evidence_refs"] == ["ev-1"]
 
 
+def test_event_bridge_projects_muteki_phase_to_outer_run_view():
+    service = FakeEventService()
+    run = SimpleNamespace(id="run", status="RUNNING", current_phase="INTAKE")
+
+    class Session:
+        async def scalar(self, _statement):
+            return run
+
+        async def commit(self):
+            return None
+
+        async def rollback(self):
+            return None
+
+    bridge = EventBridge(Session(), service=service, run_id="run")
+    event = EventEnvelope(1, "now", "run", "coordinator", "phase_changed", {"phase": "coordinator"})
+
+    asyncio.run(bridge.bridge(event))
+
+    assert run.current_phase == "COORDINATOR"
+
+
+def test_event_bridge_does_not_regress_terminal_run_phase():
+    service = FakeEventService()
+    run = SimpleNamespace(id="run", status="COMPLETED_UNSOLVED", current_phase="REPORTING")
+
+    class Session:
+        async def scalar(self, _statement):
+            return run
+
+        async def commit(self):
+            return None
+
+        async def rollback(self):
+            return None
+
+    bridge = EventBridge(Session(), service=service, run_id="run")
+    event = EventEnvelope(1, "now", "run", "coordinator", "phase_changed", {"phase": "coordinator"})
+
+    asyncio.run(bridge.bridge(event))
+
+    assert run.current_phase == "REPORTING"
+
+
 def test_muteki_graph_intent_payload_survives_projection_rebuild(tmp_path):
     graph = MutekiGraph(tmp_path / "graph.db", challenge_id="run")
     intent_id = graph.propose_intent(actor="reason", description="baseline", payload={"tool_name": "http_request"})
@@ -118,8 +180,36 @@ def test_muteki_orchestrator_reaches_verified_flag(tmp_path):
     assert graph.flags(verified_only=True)[0].flag_value == "flag{real}"
 
 
+def test_muteki_orchestrator_production_mode_forwards_unbounded_graph_loop(tmp_path):
+    graph = MutekiGraph(tmp_path / "graph-unbounded.db", challenge_id="run-unbounded")
+
+    class FakeCoordinator:
+        stop_reason = None
+
+        async def run(self, *, max_ticks, unbounded):
+            assert max_ticks is None
+            assert unbounded is True
+            graph.write_flag(
+                actor="fake-coordinator",
+                flag="flag{unbounded}",
+                real_output="verified output flag{unbounded}",
+            )
+
+    orchestrator = MutekiOrchestrator(
+        graph,
+        MutekiReason(),
+        worker_runner=lambda _job: None,
+    )
+    orchestrator.coordinator = FakeCoordinator()
+
+    result = asyncio.run(orchestrator.run(max_rounds=None))
+
+    assert result.status == "COMPLETED_SOLVED"
+    assert graph.flags(verified_only=True)[0].flag_value == "flag{unbounded}"
+
+
 def test_run_create_accepts_muteki_without_changing_default():
-    assert RunCreate().solver_mode == "multi_agent_v1"
+    assert RunCreate().solver_mode == "muteki"
     assert RunCreate(solver_mode="muteki").solver_mode == "muteki"
 
 

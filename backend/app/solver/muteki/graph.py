@@ -57,6 +57,9 @@ class Intent:
     created_at: str
     lease_until: float | None = None
     payload: dict[str, Any] | None = None
+    route_hash: str = ""
+    branch_id: str = ""
+    engine_attempt_id: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -296,6 +299,33 @@ class MutekiGraph:
             self._db.commit()
             return True
 
+    def record_engine_attempt(self, *, intent_id: str, engine_attempt_id: str, actor: str) -> bool:
+        """Persist the engine assignment in the existing Intent payload."""
+
+        with self._lock:
+            row = self._db.execute(
+                "SELECT payload_json FROM intents WHERE intent_id=?",
+                (str(intent_id),),
+            ).fetchone()
+            if row is None:
+                return False
+            payload = _load(row["payload_json"], {})
+            payload["engine_attempt_id"] = str(engine_attempt_id)[:240]
+            self._db.execute(
+                "UPDATE intents SET payload_json=? WHERE intent_id=?",
+                (_dump(payload), str(intent_id)),
+            )
+            self._append(
+                actor,
+                EventType.INTENT_STATE_CHANGED,
+                {
+                    "intent_id": str(intent_id),
+                    "engine_attempt_id": str(engine_attempt_id)[:240],
+                },
+            )
+            self._db.commit()
+            return True
+
     def conclude_intent(self, *, actor: str, intent_id: str, result: str = "") -> bool:
         with self._lock:
             cursor = self._db.execute("UPDATE intents SET status='done', lease_until=NULL WHERE intent_id=? AND status='claimed'", (intent_id,))
@@ -403,7 +433,24 @@ class MutekiGraph:
             query += " WHERE status=?"
             params = (status,)
         rows = self._db.execute(query + " ORDER BY created_at", params).fetchall()
-        return [Intent(row["intent_id"], row["description"], row["status"], row["claimed_by"], row["created_at"], row["lease_until"], _load(row["payload_json"], {})) for row in rows]
+        values = []
+        for row in rows:
+            payload = _load(row["payload_json"], {})
+            values.append(
+                Intent(
+                    row["intent_id"],
+                    row["description"],
+                    row["status"],
+                    row["claimed_by"],
+                    row["created_at"],
+                    row["lease_until"],
+                    payload,
+                    str(payload.get("route_hash") or "") if isinstance(payload, dict) else "",
+                    str(payload.get("branch_id") or "") if isinstance(payload, dict) else "",
+                    str(payload.get("engine_attempt_id") or "") if isinstance(payload, dict) else "",
+                )
+            )
+        return values
 
     def flags(self, *, verified_only: bool = False) -> list[Flag]:
         query = "SELECT * FROM flags"

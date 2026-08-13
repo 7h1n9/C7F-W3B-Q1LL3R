@@ -1,6 +1,16 @@
 import asyncio
 import contextlib
+import os
 from contextlib import asynccontextmanager
+
+# The official Muteki Worker Sandbox uses the reverse-connect control plane:
+# containers dial the host receiver through ``host.docker.internal``.  A
+# loopback-only listener is not a valid production boundary for that topology
+# on Docker Desktop.  Keep the per-run token handshake as the authorization
+# boundary, but make the listener container-reachable before any Muteki module
+# imports its bind constants.  Operators can still explicitly override it.
+os.environ.setdefault("MUTEKI_CONTROL_BIND", "0.0.0.0")
+os.environ.setdefault("MUTEKI_CONTROL_PORT", "9100")
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
@@ -41,8 +51,13 @@ async def lifespan(_: FastAPI):
         # Reconcile every persisted Run after process restart.  This also
         # removes leases left by a previously terminated process and repairs
         # phase projections before the first resume request arrives.
-        for run in (await session.scalars(select(SolveRun))).all():
+        persisted_runs = list((await session.scalars(select(SolveRun))).all())
+        for run in persisted_runs:
             await run_finalizer.reconcile(session, run)
+        # A prior process may have terminalized the SQL Run before its native
+        # Muteki task/container finished.  Reconcile those exact run-scoped
+        # Sandboxes at startup using the official idempotent teardown API.
+        await run_supervisor.reap_terminal_muteki_containers(persisted_runs)
         recovery = await deterministic_controller.reconcile_startup(session)
         for run_id in recovery.get("run_ids", []):
             run = await session.get(SolveRun, run_id)

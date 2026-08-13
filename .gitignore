@@ -10,9 +10,12 @@ __pycache__/
 local-dev.db
 data/workspaces/*
 !data/workspaces/.gitkeep
+backend/data/workspaces/
 backend/e2e.db
 backend/e2e.*.log
 backend/local-dev.db
 data/runtime-logs/
 data/logs/
+data/sessions/
+backend/data/sessions/
 *.log

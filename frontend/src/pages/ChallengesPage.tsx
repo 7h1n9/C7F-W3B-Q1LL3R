@@ -10,6 +10,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Button,
   Card,
+  Checkbox,
   Descriptions,
   Empty,
   Form,
@@ -95,7 +96,17 @@ export function ChallengesPage() {
     onError: (error: Error) => message.error(error.message),
   });
   const createRun = useMutation({
-    mutationFn: (values: Record<string, unknown>) => api.createRun(runChallenge!.id, values),
+    mutationFn: (values: Record<string, unknown>) => {
+      const workerTypes = Array.isArray(values.worker_engine_types) ? values.worker_engine_types.filter((item): item is string => typeof item === "string") : [];
+      const workerConfigIds = Array.isArray(values.worker_model_config_ids) ? values.worker_model_config_ids.filter((item): item is string => typeof item === "string") : [];
+      const workerEngines = [
+        ...workerTypes.filter((type) => type !== "openai_compatible").map((engine_type) => ({ engine_type })),
+        ...(workerTypes.includes("openai_compatible") ? workerConfigIds.map((model_config_id) => ({ engine_type: "openai_compatible", model_config_id })) : []),
+      ];
+      const primary: { engine_type: string; model_config_id?: string } = workerEngines[0] ?? { engine_type: "mock" };
+      const { worker_engine_types: _types, worker_model_config_ids: _configs, ...rest } = values;
+      return api.createRun(runChallenge!.id, { ...rest, engine_type: primary.engine_type, model_config_id: primary.model_config_id, worker_engines: workerEngines });
+    },
     onSuccess: (run) => {
       void client.invalidateQueries({ queryKey: ["runs"] });
       message.success("已创建解题任务");
@@ -132,7 +143,10 @@ export function ChallengesPage() {
     setRunChallenge(challenge);
     runForm.setFieldsValue({
       engine_type: "mock",
-      solver_mode: "multi_agent_v1",
+      solver_mode: "muteki",
+      reason_model_config_id: undefined,
+      worker_engine_types: ["mock"],
+      worker_model_config_ids: [],
       max_agent_steps: 120,
       max_tool_calls: 120,
       max_runtime_seconds: 900,
@@ -263,9 +277,11 @@ export function ChallengesPage() {
 
       <Modal open={Boolean(runChallenge)} title="创建解题任务" onCancel={() => setRunChallenge(undefined)} onOk={() => runForm.submit()} confirmLoading={createRun.isPending} okText="创建" cancelText="取消">
         <Form form={runForm} layout="vertical" onFinish={(values) => createRun.mutate(values)}>
-          <Form.Item name="engine_type" label="解题引擎" rules={[{ required: true }]}><Select options={[{ value: "mock", label: "Mock" }, { value: "openai_compatible", label: "OpenAI Compatible" }, { value: "codex_sdk", label: "Codex SDK" }]} /></Form.Item>
-          <Form.Item name="solver_mode" label="解题架构" rules={[{ required: true }]}><Select options={[{ value: "muteki", label: "Muteki（Blackboard 多 Worker）" }, { value: "solver_v2", label: "Solver v2（生产闭环）" }, { value: "multi_agent_v1", label: "Multi-Agent v1（兼容）" }, { value: "single_agent", label: "Single-Agent 兼容模式" }]} /></Form.Item>
-          <Form.Item noStyle shouldUpdate={(previous, current) => previous.engine_type !== current.engine_type}>{() => runForm.getFieldValue("engine_type") === "openai_compatible" ? <Form.Item name="model_config_id" label="模型配置" rules={[{ required: true, message: "请选择已启用的模型配置" }]}><Select options={(modelConfigs.data ?? []).filter((item) => item.enabled).map((item) => ({ value: item.id, label: item.name }))} /></Form.Item> : null}</Form.Item>
+          <Form.Item name="engine_type" hidden><Input /></Form.Item>
+          <Form.Item name="solver_mode" label="解题架构" rules={[{ required: true }]}><Select options={[{ value: "muteki", label: "Muteki（Blackboard 多 Worker）" }, { value: "single_agent", label: "Single-Agent 兼容模式" }]} /></Form.Item>
+          <Form.Item name="reason_model_config_id" label="Coordinator Reason 模型" extra="只负责读取 Blackboard 和规划 Intent，不执行工具"><Select allowClear placeholder="使用 Muteki 本地 Reason 回退" options={(modelConfigs.data ?? []).filter((item) => item.enabled && (item.roles ?? ["worker"]).includes("coordinator_reason")).map((item) => ({ value: item.id, label: `${item.name} · ${item.model_name ?? ""}` }))} /></Form.Item>
+          <Form.Item name="worker_engine_types" label="Worker 引擎（可多选）" extra="不同引擎会作为独立 EngineProfile 并行调度"><Checkbox.Group options={[{ value: "codex_sdk", label: "Codex SDK" }, { value: "mock", label: "Mock" }, { value: "openai_compatible", label: "OpenAI-compatible 模型" }]} /></Form.Item>
+          <Form.Item noStyle shouldUpdate={(previous, current) => previous.worker_engine_types !== current.worker_engine_types}>{({ getFieldValue }) => (getFieldValue("worker_engine_types") ?? []).includes("openai_compatible") ? <Form.Item name="worker_model_config_ids" label="OpenAI-compatible Worker 模型（可多选）" extra="例如 step-xxx、deepseek-chat；模型配置需包含 Worker 角色" rules={[{ required: true, type: "array", min: 1, message: "请选择至少一个 Worker 模型" }]}><Checkbox.Group options={(modelConfigs.data ?? []).filter((item) => item.enabled && (item.roles ?? ["worker"]).includes("worker")).map((item) => ({ value: item.id, label: `${item.name} · ${item.model_name ?? ""}` }))} /></Form.Item> : null}</Form.Item>
           <Form.Item name="max_agent_steps" label="Run 累计最大 Agent 步数"><InputNumber min={1} max={300} style={{ width: "100%" }} /></Form.Item>
           <Form.Item name="max_tool_calls" label="Run 累计最大逻辑工具调用"><InputNumber min={0} max={300} style={{ width: "100%" }} /></Form.Item>
           <Form.Item name="max_runtime_seconds" label="单 Attempt 最大运行时长（秒）"><InputNumber min={10} max={3600} style={{ width: "100%" }} /></Form.Item>

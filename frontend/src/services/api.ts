@@ -1,4 +1,4 @@
-import type { ApiEnvelope, Challenge, ChallengeConversation, ChallengeMessage, FlagCandidate, RunDiagnostics, RunEvent, RunHealth, Skill, SolveRun, SolverState } from "../types/api";
+import type { ApiEnvelope, Challenge, ChallengeConversation, ChallengeMessage, FlagCandidate, ModelConfig, MutekiGraphState, MutekiBoardSemantic, RunDiagnostics, RunEvent, RunHealth, RunUsage, RunUserInput, Skill, SolveRun, SolverState } from "../types/api";
 
 const base = import.meta.env.VITE_API_BASE_URL ?? "/api/v1";
 const runEventTypes = [
@@ -9,16 +9,23 @@ const runEventTypes = [
   "skill.activated", "skill.deactivated", "skill.declined", "skill.recommended", "skill.activation_rejected",
   "tool.requested", "tool.started", "tool.output", "tool.completed", "tool.failed", "artifact.created",
   "flag.candidate_found", "flag.reviewed", "flag.verified", "report.started", "report.completed",
-  "run.completed", "run.failed",
+  "run.completed", "run.failed", "user_input.received", "user_input.consumed", "user.input_consumed",
   "solver.run.started", "solver.action.planned", "solver.action.authorized", "solver.action.started",
   "solver.action.completed", "solver.action.failed", "solver.action.interrupted", "solver.action.recovered",
   "solver.tool.called", "solver.observation.received", "solver.completion.evaluated", "solver.run.completed",
   "solver.run.failed", "solver.step.completed",
-  "muteki.run.started", "muteki.run_finished", "muteki.phase_changed", "muteki.prepare.engine.checked",
+  "muteki.run.started", "muteki.run.titled", "muteki.run_finished", "muteki.phase_changed", "muteki.prepare.engine.checked",
   "muteki.fact_added", "muteki.dead_end", "muteki.intent_proposed", "muteki.intent_claimed",
   "muteki.intent_released", "muteki.intent_concluded", "muteki.flag_candidate", "muteki.flag_found",
   "muteki.poc_saved", "muteki.resource_locked", "muteki.resource_released", "muteki.worker_started",
-  "muteki.worker_finished",
+  "muteki.worker_step", "muteki.worker_finished", "muteki.review_finding", "muteki.review_proposal",
+  "muteki.branch_split", "muteki.branch_resolved", "muteki.lane_locked", "muteki.lane_released",
+  "muteki.intent_lane_deferred", "muteki.fact_challenged", "muteki.fact_revalidated",
+  "muteki.fact_rejected", "muteki.fact_merged", "muteki.fact_superseded", "muteki.fact_pinned",
+  "muteki.route_suppressed", "muteki.route_reopened", "muteki.review_proposal_decision",
+  "muteki.coordinator_directive", "muteki.operator_directive", "muteki.operator_directive_status",
+  "muteki.hitl_classified", "muteki.intent_state_changed", "muteki.graph_compacted",
+  "cost.update", "muteki.cost.update",
 ];
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   let response: Response;
@@ -66,9 +73,21 @@ export const api = {
   getReadiness: () => request<{ ready: boolean; level: string; checks: Array<{ name: string; ok: boolean; message: string }> }>("/readiness/range-test"),
   listRuns: () => request<SolveRun[]>("/runs"),
   getRun: (id: string) => request<SolveRun>(`/runs/${id}`),
+  getRunMessages: (id: string) => request<RunUserInput[]>(`/runs/${id}/messages`),
   getSolverState: (id: string) => request<SolverState>(`/runs/${id}/solver-state`),
+  getMutekiState: (id: string) => request<MutekiGraphState>(`/runs/${id}/muteki-state`),
+  startMutekiBoardSemanticAnalysis: (id: string) => request<MutekiBoardSemantic>(`/runs/${id}/muteki-board/semantic-analysis`, { method: "POST" }),
+  downloadMutekiPoc: async (id: string) => {
+    const response = await fetch(`${base}/runs/${id}/muteki-poc`);
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({}));
+      throw new Error(error.message || `PoC 导出失败（HTTP ${response.status}）`);
+    }
+    return { filename: response.headers.get("content-disposition")?.match(/filename="([^"]+)"/)?.[1] ?? `muteki-${id}-answer-poc.md`, content: await response.text() };
+  },
   getRunDiagnostics: (id: string) => request<RunDiagnostics>(`/runs/${id}/diagnostics`),
   getRunHealth: (id: string) => request<RunHealth>(`/runs/${id}/health`),
+  getRunUsage: (id: string) => request<RunUsage>(`/runs/${id}/usage`),
   listRunDiagnostics: (limit = 25) => request<Array<{ run_id: string } & RunDiagnostics>>(`/diagnostics/runs?limit=${limit}`),
   createRun: (challengeId: string, payload: Record<string, unknown>) => request<SolveRun>(`/challenges/${challengeId}/runs`, { method: "POST", body: JSON.stringify(payload) }),
   startRun: (id: string) => request<{ run_id: string; status: string }>(`/runs/${id}/start`, { method: "POST" }),
@@ -76,7 +95,7 @@ export const api = {
   cancelRun: (id: string) => request<SolveRun>(`/runs/${id}/cancel`, { method: "POST" }),
   deleteRun: (id: string) => request<void>(`/runs/${id}`, { method: "DELETE" }),
   deleteRuns: (runIds: string[]) => request<{ deleted_count: number; run_ids: string[] }>("/runs/batch", { method: "DELETE", body: JSON.stringify({ run_ids: runIds }) }),
-  listModelConfigs: () => request<Array<{ id: string; name: string; provider_type: string; base_url?: string; model_name?: string; enabled: boolean; api_key_configured: boolean; action_protocol?: string; structured_output_mode?: string; request_timeout_seconds?: number; max_output_tokens?: number; temperature?: number; max_retries?: number; retry_base_seconds?: number; rate_limit_cooldown_seconds?: number; requests_per_minute?: number; max_concurrency?: number; context_token_limit?: number; capabilities?: Record<string, unknown>; last_test_at?: string | null; last_test_ok?: boolean | null }>>("/model-configs"),
+  listModelConfigs: () => request<ModelConfig[]>("/model-configs"),
   createModelConfig: (payload: Record<string, unknown>) => request<unknown>("/model-configs", { method: "POST", body: JSON.stringify(payload) }),
   updateModelConfig: (id: string, payload: Record<string, unknown>) => request<unknown>(`/model-configs/${id}`, { method: "PUT", body: JSON.stringify(payload) }),
   deleteModelConfig: (id: string) => request<void>(`/model-configs/${id}`, { method: "DELETE" }),
@@ -89,7 +108,7 @@ export const api = {
   getArtifact: (runId: string, artifactId: string) => request<{ content: string; path: string }>(`/runs/${runId}/artifacts/${artifactId}`),
   getFlags: (id: string) => request<FlagCandidate[]>(`/runs/${id}/flag-candidates`),
   reviewFlagCandidate: (runId: string, candidateId: string, reviewState: "OPEN" | "VALID" | "INVALID") => request<FlagCandidate>(`/runs/${runId}/flag-candidates/${candidateId}`, { method: "PATCH", body: JSON.stringify({ review_state: reviewState }) }),
-  getReport: (id: string) => request<{ content: string; path: string }>(`/runs/${id}/report`),
+  getReport: (id: string) => request<{ content: string; path: string; report_json?: Record<string, unknown> }>(`/runs/${id}/report`),
   continueRun: (id: string, message: string) => request<{ run_id: string }>(`/runs/${id}/continue`, { method: "POST", body: JSON.stringify({ message }) }),
   sendRunMessage: (id: string, content: string) => request<{ accepted: boolean; revision: number; status: string; message: string }>(`/runs/${id}/messages`, { method: "POST", body: JSON.stringify({ content }) }),
   streamRunEvents: (id: string, onEvent: (event: RunEvent) => void) => {

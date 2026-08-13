@@ -427,9 +427,18 @@ class CompactionService:
         run.compaction_status = "COMPLETED"
         run.compaction_finished_at = datetime.now(UTC)
         (archive_dir / "archive-manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+        # EventService commits the shared AsyncSession and therefore expires
+        # ORM instances.  Capture scalar identifiers before that commit; the
+        # return payload and audit event must never trigger implicit async IO
+        # through an expired checkpoint/run/snapshot attribute.
+        run_id = str(run.id)
+        checkpoint_status = str(checkpoint.status)
+        snapshot_id = str(snapshot.id)
+        archive_path = str(archive_dir)
+        deleted_counts = dict(deleted)
         await session.commit()
-        await event_service.append(session, run.id, "run.compaction_completed", {"generation": generation, "snapshot_id": snapshot.id, "archive_path": str(archive_dir), "deleted_row_counts": deleted})
-        return {"generation": generation, "status": checkpoint.status, "archive_path": str(archive_dir), "snapshot_id": snapshot.id, "manifest": manifest}
+        await event_service.append(session, run_id, "run.compaction_completed", {"generation": generation, "snapshot_id": snapshot_id, "archive_path": archive_path, "deleted_row_counts": deleted_counts})
+        return {"generation": generation, "status": checkpoint_status, "archive_path": archive_path, "snapshot_id": snapshot_id, "manifest": manifest}
 
     async def maybe_auto_compact(self, session, run: SolveRun) -> dict | None:
         triggered, metrics = await self.should_compact(session, run)

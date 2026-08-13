@@ -11,6 +11,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.challenge import Challenge
+from app.models.multi_agent import EvidenceLedger
 from app.models.run import (
     Artifact,
     FlagCandidate,
@@ -24,6 +25,7 @@ from app.orchestration.state_machine import TERMINAL, RunStatus
 from app.services.events import event_service
 from app.services.manual_writeup import ManualWriteupRenderer
 from app.services.reproduction_commands import reproduction_command_renderer
+from app.solver.muteki.adapter.cost_bridge import load_muteki_usage
 
 
 class ReproductionStep(BaseModel):
@@ -322,6 +324,119 @@ class ReportService:
             if existing:
                 return existing
             return await self._generate(session, run, challenge, result, failure_reason)
+
+    async def generate_muteki(
+        self,
+        session: AsyncSession,
+        run: SolveRun,
+        result: Any,
+    ) -> Artifact:
+        """Materialize the canonical Muteki result as a formal report.
+
+        Muteki owns completion evidence in its append-only graph rather than
+        the legacy ``FlagCandidate`` review path.  Its terminal result still
+        needs the same report artifacts so the existing Run API and frontend
+        can consume a completed run consistently.  This adapter intentionally
+        stores only sanitized outcome metadata and Evidence references.
+        """
+
+        existing = await session.scalar(
+            select(Artifact).where(
+                Artifact.run_id == run.id,
+                Artifact.artifact_type == "report",
+                Artifact.status == "ACTIVE",
+            )
+        )
+        if existing is not None:
+            return existing
+
+        evidence_refs = [
+            str(item)
+            for item in await session.scalars(
+                select(EvidenceLedger.id)
+                .where(EvidenceLedger.run_id == run.id)
+                .order_by(EvidenceLedger.created_at)
+            )
+        ]
+        status = str(getattr(result, "status", run.status))
+        solved = status == RunStatus.COMPLETED_SOLVED.value
+        usage = await load_muteki_usage(session, str(run.id))
+        report_payload = {
+            "result": "solved" if solved else "unsolved",
+            "engine": "muteki",
+            "status": status,
+            "reason": str(getattr(result, "reason", "")),
+            "flag": getattr(result, "flag", None) if solved else None,
+            "flag_verified": bool(getattr(result, "flag_found", False)) if solved else False,
+            "evidence_refs": evidence_refs,
+            "evidence_count": len(evidence_refs),
+            "graph_path": str(getattr(result, "graph_path", "")),
+            "completed_stages": ["prepare", "race", "coordinator", "finalize"],
+            "tool_call_count": int(run.tool_call_count or 0),
+        }
+        if usage.calls:
+            report_payload.update(
+                {
+                    "cost_usd": round(usage.cost_usd, 10),
+                    "total_tokens": usage.tokens,
+                    "input_tokens": usage.input_tokens,
+                    "output_tokens": usage.output_tokens,
+                    "llm_calls": usage.calls,
+                }
+            )
+        run.report_json = report_payload
+
+        root = Path(run.workspace_path).resolve()
+        final = root / "final"
+        final.mkdir(parents=True, exist_ok=True)
+        report_json_raw = json.dumps(report_payload, ensure_ascii=False, indent=2).encode("utf-8")
+        (final / "report.json").write_bytes(report_json_raw)
+
+        flag_line = "已通过 canonical graph 验证。" if solved else "未发现通过 Completion Gate 的 Flag。"
+        writeup = (
+            "# Muteki Solver Report\n\n"
+            f"- Result: {'SOLVED' if solved else 'UNSOLVED'}\n"
+            f"- Status: {status}\n"
+            f"- Reason: {report_payload['reason']}\n"
+            f"- Evidence references: {len(evidence_refs)}\n\n"
+            f"{flag_line}\n\n"
+            "The report is generated from the canonical Muteki graph and the "
+            "existing Evidence Ledger. Raw HTTP responses and secrets are not "
+            "included in this artifact.\n"
+        ).encode("utf-8")
+        (final / "writeup.zh-CN.md").write_bytes(writeup)
+        (final / "writeup.md").write_bytes(writeup)
+
+        report_artifact = Artifact(
+            run_id=run.id,
+            artifact_type="report",
+            file_path="final/writeup.zh-CN.md",
+            mime_type="text/markdown",
+            size=len(writeup),
+            sha256=hashlib.sha256(writeup).hexdigest(),
+            summary="Muteki canonical graph completion report",
+            status="ACTIVE",
+        )
+        report_json_artifact = Artifact(
+            run_id=run.id,
+            artifact_type="report_json",
+            file_path="final/report.json",
+            mime_type="application/json",
+            size=len(report_json_raw),
+            sha256=hashlib.sha256(report_json_raw).hexdigest(),
+            summary="Sanitized Muteki completion payload",
+            status="ACTIVE",
+        )
+        session.add(report_artifact)
+        session.add(report_json_artifact)
+        await session.commit()
+        await event_service.append(
+            session,
+            run.id,
+            "report.completed",
+            {"artifact_id": report_artifact.id, "engine": "muteki", "evidence_count": len(evidence_refs)},
+        )
+        return report_artifact
 
     async def _generate(
         self,

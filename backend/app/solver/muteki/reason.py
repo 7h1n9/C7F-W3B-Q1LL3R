@@ -6,10 +6,14 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .graph import MutekiGraph
+from .outcomes import stable_branch_id, stable_route_hash
 from .recon.fingerprint import ClassificationResult, classify_challenge
 
 SQL_TOOLS = frozenset({
     "sql_boolean_compare",
+    "oracle_expression_calibration",
+    "mysql_metadata_discovery",
+    "boolean_config_extract",
     "sql_injection_probe",
     "sql_union_probe",
     "sqlmap_detect",
@@ -21,14 +25,18 @@ SQL_TOOLS = frozenset({
 TOOL_DOMAINS = {
     "SQLI": SQL_TOOLS,
     "IDOR": frozenset({"http_session_request", "http_extract", "http_request"}),
-    "PATH_TRAVERSAL": frozenset({"http_request", "file_read", "http_extract"}),
-    "COMMAND_INJECTION": frozenset({"http_request", "http_extract"}),
-    "SSRF": frozenset({"http_request"}),
+    # Session requests are the bounded authentication bootstrap/continuation
+    # path for a classified web surface.  They do not grant any SQL or shell
+    # capability; keeping them in the web domains lets a public demo account
+    # establish the session required before the domain-specific probe.
+    "PATH_TRAVERSAL": frozenset({"http_request", "http_session_request", "file_read", "http_extract"}),
+    "COMMAND_INJECTION": frozenset({"http_request", "http_session_request", "http_extract"}),
+    "SSRF": frozenset({"http_request", "http_session_request"}),
     "JWT": frozenset({"jwt_inspect", "http_session_request"}),
-    "SSTI": frozenset({"http_request", "http_extract"}),
-    "XXE": frozenset({"http_request", "http_extract"}),
-    "FILE_UPLOAD": frozenset({"http_request", "file_type"}),
-    "GENERIC_WEB": frozenset({"http_request", "http_extract", "file_read", "file_search"}),
+    "SSTI": frozenset({"http_request", "http_session_request", "http_extract"}),
+    "XXE": frozenset({"http_request", "http_session_request", "http_extract"}),
+    "FILE_UPLOAD": frozenset({"http_request", "http_session_request", "file_type"}),
+    "GENERIC_WEB": frozenset({"http_request", "http_session_request", "http_extract", "file_read", "file_search"}),
 }
 
 TOOL_PREFERENCE = {
@@ -60,7 +68,10 @@ class ReasonResult:
     drift: str = ""
 
 
-ReasonProvider = Callable[[Mapping[str, Any]], Sequence[Mapping[str, Any] | str] | Awaitable[Sequence[Mapping[str, Any] | str]]]
+ReasonProvider = Callable[
+    [Mapping[str, Any]],
+    Sequence[Mapping[str, Any] | str] | str | Awaitable[Sequence[Mapping[str, Any] | str] | str],
+]
 
 
 class MutekiReason:
@@ -75,21 +86,49 @@ class MutekiReason:
         snapshot = graph.snapshot()
         if snapshot["flags"]:
             return ReasonResult(True, (), verdict="complete")
-        open_goals = {
-            item["description"].casefold()
-            for item in snapshot["intents"]
-            if item["status"] in {"open", "claimed"}
-        }
         known_goals = {item["description"].casefold() for item in snapshot["intents"]}
         dead_ends = {item["description"].casefold() for item in snapshot["dead_ends"]}
         classification = classify_challenge(self.metadata, snapshot.get("facts", ()))
         if classification is not None and classification.confidence < 70:
             classification = None
+        provider_goal_met = False
+        provider_verdict = "explore"
+        provider_drift = ""
         if self.provider is None:
             raw: Sequence[Mapping[str, Any] | str] = ()
         else:
-            raw_value = self.provider(snapshot)
-            raw = await raw_value if inspect.isawaitable(raw_value) else raw_value
+            # The official Muteki Reason prompt consumes the full labelled
+            # SharedGraph view, not a short JSON tail. Keep the generic
+            # snapshot contract for compatibility, but attach the canonical
+            # summary when the selected graph exposes it.
+            provider_snapshot = dict(snapshot)
+            summary = getattr(graph, "to_reason_summary", None)
+            if callable(summary):
+                try:
+                    provider_snapshot["_reason_summary"] = summary()
+                except Exception:
+                    pass
+            pin_context = getattr(graph, "fact_pin_context", None)
+            if callable(pin_context):
+                try:
+                    provider_snapshot["_fact_pin_context"] = pin_context()
+                except Exception:
+                    pass
+            raw_value = self.provider(provider_snapshot)
+            raw_value = await raw_value if inspect.isawaitable(raw_value) else raw_value
+            if isinstance(raw_value, str):
+                from .adapter.upstream_reason import parse_upstream_reason_reply
+
+                raw = parse_upstream_reason_reply(raw_value, max_intents=self.max_intents)
+            else:
+                raw = raw_value
+            # The official adapter returns a list-compatible envelope so the
+            # existing provider contract remains intact.  Read the envelope
+            # after both string parsing and direct provider injection; this
+            # keeps the upstream verdict from being lost at either boundary.
+            provider_goal_met = bool(getattr(raw, "goal_met", False))
+            provider_verdict = str(getattr(raw, "verdict", "explore") or "explore")
+            provider_drift = str(getattr(raw, "drift", "") or "")
         proposals: list[IntentProposal] = []
         for item in raw:
             if isinstance(item, Mapping):
@@ -102,11 +141,15 @@ class MutekiReason:
             if not isinstance(goal, str) or not goal.strip():
                 continue
             normalized = goal.strip().casefold()
-            if normalized in open_goals or any(dead and dead in normalized for dead in dead_ends):
+            # Intents are immutable graph decisions.  Once a route has been
+            # concluded, proposing the exact same description again is a
+            # replay loop, not a new OODA branch.  Strategy providers should
+            # express a retry or alternate route with a distinct goal.
+            if normalized in known_goals or any(dead and dead in normalized for dead in dead_ends):
                 continue
             normalized_payload = dict(payload) if isinstance(payload, Mapping) else {}
             tool_name = _tool_name(normalized_payload, normalized)
-            if _blocked_before_classification(tool_name, normalized):
+            if _blocked_before_classification(tool_name, normalized, classification):
                 continue
             if classification and classification.classification != "SQLI":
                 allowed = TOOL_DOMAINS.get(classification.classification, TOOL_DOMAINS["GENERIC_WEB"])
@@ -121,17 +164,77 @@ class MutekiReason:
             if len(proposals) >= self.max_intents:
                 break
         if not proposals:
+            # A provider may intentionally return no next action after an
+            # evidence-backed route is exhausted (for example, every
+            # declared SQL field was tested without a confirmed oracle).
+            # Do not resurrect the generic SQL fallback in that case: an
+            # invented action would violate the Blackboard-driven stop rule.
+            # Canonical Muteki's Reason keeps an empty model result empty: when
+            # the SharedGraph says every direction is concluded, it does not
+            # resurrect a generic fallback intent.  Preserve the old fallback
+            # only for the provider-less compatibility mode used by isolated
+            # graph tests; a real provider returning no next action is an
+            # explicit exhausted route.
+            if provider_verdict in {"course_correct", "complete"}:
+                return ReasonResult(
+                    provider_goal_met,
+                    (),
+                    verdict=provider_verdict,
+                    drift=provider_drift,
+                )
+            if (
+                classification is not None
+                and classification.classification == "SQLI"
+                and (raw or self.provider is not None)
+            ):
+                return ReasonResult(
+                    provider_goal_met,
+                    (),
+                    verdict=provider_verdict,
+                    drift=provider_drift,
+                )
             fallback = _fallback_intent(classification, snapshot.get("pocs", ()))
             if fallback.goal.casefold() in known_goals:
-                return ReasonResult(False, ())
+                return ReasonResult(
+                    provider_goal_met,
+                    (),
+                    verdict=provider_verdict,
+                    drift=provider_drift,
+                )
             proposals.append(fallback)
-        return ReasonResult(False, tuple(proposals))
+        return ReasonResult(
+            provider_goal_met,
+            tuple(proposals),
+            verdict=provider_verdict,
+            drift=provider_drift,
+        )
 
     def write_intents(self, graph: MutekiGraph, result: ReasonResult, *, actor: str = "coordinator") -> list[str]:
-        return [
-            graph.propose_intent(actor=actor, description=item.goal, payload={"worker_class": item.worker_class, "rationale": item.rationale, **item.payload})
-            for item in result.intents
-        ]
+        intent_ids: list[str] = []
+        for item in result.intents:
+            payload = {
+                "worker_class": item.worker_class,
+                "rationale": item.rationale,
+                **item.payload,
+            }
+            route_hash = stable_route_hash(payload, goal=item.goal)
+            payload["route_hash"] = route_hash
+            payload["branch_id"] = stable_branch_id(
+                route_hash,
+                str(payload.get("branch_id") or ""),
+            )
+            # The engine attempt is assigned only when a Coordinator claims
+            # the Intent.  Keeping the field in the Intent envelope makes the
+            # identity explicit without coupling Reason to an engine.
+            payload.setdefault("engine_attempt_id", "")
+            intent_ids.append(
+                graph.propose_intent(
+                    actor=actor,
+                    description=item.goal,
+                    payload=payload,
+                )
+            )
+        return intent_ids
 
 
 def _tool_name(payload: Mapping[str, Any], normalized_goal: str) -> str | None:
@@ -144,7 +247,15 @@ def _tool_name(payload: Mapping[str, Any], normalized_goal: str) -> str | None:
     return None
 
 
-def _blocked_before_classification(tool_name: str | None, normalized_goal: str) -> bool:
+def _blocked_before_classification(
+    tool_name: str | None,
+    normalized_goal: str,
+    classification: ClassificationResult | None,
+) -> bool:
+    """Reject SQL actions only while the classification gate is unresolved."""
+
+    if classification is not None:
+        return False
     if tool_name in SQL_TOOLS:
         return True
     return any(tool in normalized_goal for tool in SQL_TOOLS)

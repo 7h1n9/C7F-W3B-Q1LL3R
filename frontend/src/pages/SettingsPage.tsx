@@ -1,69 +1,259 @@
 import { ApiOutlined, KeyOutlined, PlusOutlined, SafetyCertificateOutlined, ToolOutlined } from "@ant-design/icons";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Alert, Button, Card, Col, Descriptions, Empty, Form, Input, message, Modal, Popconfirm, Row, Space, Spin, Switch, Table, Tabs, Tag } from "antd";
+import {
+  Alert,
+  Button,
+  Card,
+  Col,
+  Descriptions,
+  Empty,
+  Form,
+  Input,
+  message,
+  Modal,
+  Popconfirm,
+  Row,
+  Select,
+  Space,
+  Spin,
+  Switch,
+  Table,
+  Tabs,
+  Tag,
+} from "antd";
 import { useState } from "react";
-import { api } from "../services/api";
 import { ModelSkillBinding } from "../components/skills/ModelSkillBinding";
+import { api } from "../services/api";
+import type { ModelConfig } from "../types/api";
 
-type Config = { id: string; name: string; provider_type: string; base_url?: string; model_name?: string; enabled: boolean; api_key_configured: boolean; action_protocol?: string; structured_output_mode?: string; request_timeout_seconds?: number; max_output_tokens?: number; temperature?: number; max_retries?: number; retry_base_seconds?: number; rate_limit_cooldown_seconds?: number; requests_per_minute?: number; max_concurrency?: number; context_token_limit?: number; capabilities?: Record<string, unknown>; last_test_at?: string | null; last_test_ok?: boolean | null };
 type ServiceForm = { runner_url: string; codex_bridge_url: string };
+type SkillBinding = { skill_id: string; enabled: boolean; priority: number; config_json: Record<string, unknown> };
+type ModelConfigFormValues = {
+  name?: string;
+  provider_type?: string;
+  base_url?: string;
+  model_name?: string;
+  api_key?: string;
+  enabled?: boolean;
+  roles?: ModelConfig["roles"];
+  action_protocol?: string;
+  structured_output_mode?: string;
+  request_timeout_seconds?: number;
+  max_output_tokens?: number;
+  temperature?: number;
+  max_retries?: number;
+  retry_base_seconds?: number;
+  rate_limit_cooldown_seconds?: number;
+  requests_per_minute?: number;
+  max_concurrency?: number;
+  context_token_limit?: number;
+};
 
-function StatusTag({ reachable }: { reachable?: boolean }) { return <Tag color={reachable ? "success" : "error"}>{reachable ? "服务正常" : "不可达"}</Tag>; }
+const modelConfigFields: Array<keyof ModelConfigFormValues> = [
+  "name", "provider_type", "base_url", "model_name", "api_key", "enabled", "roles",
+  "action_protocol", "structured_output_mode", "request_timeout_seconds", "max_output_tokens",
+  "temperature", "max_retries", "retry_base_seconds", "rate_limit_cooldown_seconds",
+  "requests_per_minute", "max_concurrency", "context_token_limit",
+];
+
+function toModelConfigPayload(values: ModelConfigFormValues): Record<string, unknown> {
+  return Object.fromEntries(
+    modelConfigFields
+      .filter((field) => values[field] !== undefined)
+      .map((field) => [field, values[field]]),
+  );
+}
+
+function StatusTag({ reachable }: { reachable?: boolean }) {
+  return <Tag color={reachable ? "success" : "error"}>{reachable ? "服务正常" : "不可达"}</Tag>;
+}
+
+function roleLabel(role: string) {
+  return role === "coordinator_reason" ? "Coordinator Reason" : "Worker";
+}
 
 export function SettingsPage() {
   const client = useQueryClient();
-  const [open, setOpen] = useState(false); const [editing, setEditing] = useState<Config>(); const [form] = Form.useForm();
-  const [serviceOpen, setServiceOpen] = useState(false); const [serviceForm] = Form.useForm<ServiceForm>();
-  const [bindingConfig, setBindingConfig] = useState<Config>();
-  const [bindingValues, setBindingValues] = useState<Array<{ skill_id: string; enabled: boolean; priority: number; config_json: Record<string, unknown> }>>([]);
+  const [open, setOpen] = useState(false);
+  const [editing, setEditing] = useState<ModelConfig>();
+  const [form] = Form.useForm();
+  const [serviceOpen, setServiceOpen] = useState(false);
+  const [serviceForm] = Form.useForm<ServiceForm>();
+  const [bindingConfig, setBindingConfig] = useState<ModelConfig>();
+  const [bindingValues, setBindingValues] = useState<SkillBinding[]>([]);
   const configs = useQuery({ queryKey: ["model-configs"], queryFn: api.listModelConfigs });
   const skills = useQuery({ queryKey: ["skills"], queryFn: api.listSkills });
   const services = useQuery({ queryKey: ["system-settings"], queryFn: api.getSystemSettings, refetchInterval: 15_000 });
   const refresh = () => void client.invalidateQueries({ queryKey: ["model-configs"] });
   const refreshServices = () => void client.invalidateQueries({ queryKey: ["system-settings"] });
-  const save = useMutation({ mutationFn: (values: Record<string, unknown>) => editing ? api.updateModelConfig(editing.id, values) : api.createModelConfig(values), onSuccess: () => { message.success("模型配置已保存"); setOpen(false); setEditing(undefined); form.resetFields(); refresh(); }, onError: (error: Error) => message.error(error.message) });
-  const remove = useMutation({ mutationFn: api.deleteModelConfig, onSuccess: () => { message.success("模型配置已删除"); refresh(); }, onError: (error: Error) => message.error(error.message) });
-  const test = useMutation({ mutationFn: api.testModelConfig, onSuccess: (result) => result.ok ? message.success(result.message) : message.error(result.message), onError: (error: Error) => message.error(error.message) });
-  const saveServices = useMutation({ mutationFn: api.updateSystemSettings, onSuccess: () => { message.success("服务地址已保存"); setServiceOpen(false); refreshServices(); }, onError: (error: Error) => message.error(error.message) });
-  const saveBindings = useMutation({ mutationFn: async () => api.setModelSkills(bindingConfig!.id, bindingValues), onSuccess: () => { message.success("Skills 绑定已保存"); setBindingConfig(undefined); }, onError: (error: Error) => message.error(error.message) });
-  const edit = (item?: Config) => { setEditing(item); form.setFieldsValue(item ? { ...item, api_key: undefined } : { provider_type: "openai_compatible", enabled: true }); setOpen(true); };
-  const editServices = () => { if (services.data) { serviceForm.setFieldsValue({ runner_url: services.data.runner_url, codex_bridge_url: services.data.codex_bridge_url }); } setServiceOpen(true); };
-  const editBindings = async (item: Config) => { setBindingConfig(item); const rows = await api.getModelSkills(item.id); setBindingValues(rows as typeof bindingValues); };
+
+  const save = useMutation({
+    mutationFn: (values: ModelConfigFormValues) => {
+      const payload = toModelConfigPayload(values);
+      return editing ? api.updateModelConfig(editing.id, payload) : api.createModelConfig(payload);
+    },
+    onSuccess: () => {
+      message.success("模型配置已保存");
+      setOpen(false);
+      setEditing(undefined);
+      form.resetFields();
+      refresh();
+    },
+    onError: (error: Error) => message.error(error.message),
+  });
+  const remove = useMutation({
+    mutationFn: api.deleteModelConfig,
+    onSuccess: () => { message.success("模型配置已删除"); refresh(); },
+    onError: (error: Error) => message.error(error.message),
+  });
+  const test = useMutation({
+    mutationFn: api.testModelConfig,
+    onSuccess: (result) => result.ok ? message.success(result.message) : message.error(result.message),
+    onError: (error: Error) => message.error(error.message),
+  });
+  const saveServices = useMutation({
+    mutationFn: api.updateSystemSettings,
+    onSuccess: () => { message.success("执行服务地址已保存"); setServiceOpen(false); refreshServices(); },
+    onError: (error: Error) => message.error(error.message),
+  });
+  const saveBindings = useMutation({
+    mutationFn: async () => api.setModelSkills(bindingConfig!.id, bindingValues),
+    onSuccess: () => { message.success("Skills 绑定已保存"); setBindingConfig(undefined); },
+    onError: (error: Error) => message.error(error.message),
+  });
+
+  const edit = (item?: ModelConfig) => {
+    setEditing(item);
+    form.resetFields();
+    form.setFieldsValue(item ? {
+      name: item.name,
+      provider_type: item.provider_type,
+      base_url: item.base_url,
+      model_name: item.model_name,
+      api_key: undefined,
+      enabled: item.enabled,
+      roles: item.roles ?? ["worker"],
+      action_protocol: item.action_protocol,
+      structured_output_mode: item.structured_output_mode,
+      request_timeout_seconds: item.request_timeout_seconds,
+      max_output_tokens: item.max_output_tokens,
+      temperature: item.temperature,
+      max_retries: item.max_retries,
+      retry_base_seconds: item.retry_base_seconds,
+      rate_limit_cooldown_seconds: item.rate_limit_cooldown_seconds,
+      requests_per_minute: item.requests_per_minute,
+      max_concurrency: item.max_concurrency,
+      context_token_limit: item.context_token_limit,
+    } : { provider_type: "openai_compatible", enabled: true, roles: ["worker"] });
+    setOpen(true);
+  };
+  const editServices = () => {
+    if (services.data) serviceForm.setFieldsValue({ runner_url: services.data.runner_url, codex_bridge_url: services.data.codex_bridge_url });
+    setServiceOpen(true);
+  };
+  const editBindings = async (item: ModelConfig) => {
+    setBindingConfig(item);
+    setBindingValues(await api.getModelSkills(item.id) as SkillBinding[]);
+  };
+
   const configColumns = [
-    { title: "名称", dataIndex: "name", width: 190 },
-    { title: "服务地址", dataIndex: "base_url", width: 280, ellipsis: true },
+    { title: "名称", dataIndex: "name", width: 180 },
     { title: "模型", dataIndex: "model_name", width: 180 },
-    { title: "密钥", dataIndex: "api_key_configured", width: 120, render: (value: boolean) => value ? <Tag color="success">已配置</Tag> : <Tag>未配置</Tag> },
-    { title: "状态", dataIndex: "enabled", width: 120, render: (value: boolean) => <Tag color={value ? "success" : "default"}>{value ? "已启用" : "已禁用"}</Tag> },
+    { title: "Base URL", dataIndex: "base_url", width: 260, ellipsis: true },
+    {
+      title: "Muteki 角色",
+      dataIndex: "roles",
+      width: 230,
+      render: (roles?: ModelConfig["roles"]) => <Space wrap>{(roles ?? ["worker"]).map((role) => <Tag key={role} color={role === "coordinator_reason" ? "purple" : "blue"}>{roleLabel(role)}</Tag>)}</Space>,
+    },
+    { title: "API Key", dataIndex: "api_key_configured", width: 100, render: (value: boolean) => value ? <Tag color="success">已配置</Tag> : <Tag>未配置</Tag> },
+    { title: "状态", dataIndex: "enabled", width: 90, render: (value: boolean) => <Tag color={value ? "success" : "default"}>{value ? "启用" : "禁用"}</Tag> },
     {
       title: "操作",
-      width: 280,
+      width: 300,
       fixed: "right" as const,
-      render: (_: unknown, item: Config) => (
+      render: (_: unknown, item: ModelConfig) => (
         <Space size={0} wrap>
           <Button type="link" onClick={() => edit(item)}>编辑</Button>
           <Button type="link" onClick={() => void editBindings(item)}>配置 Skills</Button>
           <Button type="link" onClick={() => test.mutate(item.id)}>测试连接</Button>
-          <Popconfirm title="删除该模型配置？" onConfirm={() => remove.mutate(item.id)}>
+          <Popconfirm title="确认删除模型配置？" onConfirm={() => remove.mutate(item.id)}>
             <Button type="link" danger>删除</Button>
           </Popconfirm>
         </Space>
       ),
     },
   ];
+
   return <>
-    <div className="page-heading"><div><h1>系统配置</h1><p>管理模型接入及本地执行服务状态。</p></div><Button type="primary" icon={<PlusOutlined />} onClick={() => edit()}>新建模型配置</Button></div>
-    <Alert className="panel-card" type="warning" showIcon icon={<KeyOutlined />} message="API 密钥与 Runner Token 均为仅写入字段；前端只显示是否已配置。" />
-    <Card className="panel-card" title="模型配置" style={{ marginTop: 18 }}><Table className="cyber-table" rowKey="id" dataSource={configs.data} loading={configs.isLoading} scroll={{ x: 1180 }} tableLayout="fixed" locale={{ emptyText: <Empty description="尚未配置模型服务" image={Empty.PRESENTED_IMAGE_SIMPLE} /> }} columns={configColumns} /></Card>
+    <div className="page-heading">
+      <div><h1>系统配置</h1><p>配置 Coordinator Reason、Worker 引擎和执行服务。</p></div>
+      <Button type="primary" icon={<PlusOutlined />} onClick={() => edit()}>新建模型配置</Button>
+    </div>
+    <Alert className="panel-card" type="warning" showIcon icon={<KeyOutlined />} message="API Key 和 Runner Token 只写入后端，前端仅显示是否已配置。" />
+
+    <Card className="panel-card" title="模型配置" style={{ marginTop: 18 }}>
+      <Table className="cyber-table" rowKey="id" dataSource={configs.data} loading={configs.isLoading} scroll={{ x: 1420 }} tableLayout="fixed" locale={{ emptyText: <Empty description="尚未配置模型服务" image={Empty.PRESENTED_IMAGE_SIMPLE} /> }} columns={configColumns} />
+    </Card>
+
+    <Card className="panel-card" title="Muteki Runtime 分工" style={{ marginTop: 18 }}>
+      <Alert type="info" showIcon message="Coordinator Reason 只读取 Blackboard 并生成 Intent；Worker 引擎负责执行 Intent。创建任务时可以选择多个 Worker 并行调度。" />
+      <Space wrap style={{ marginTop: 14 }}>{(configs.data ?? []).map((item) => <Tag key={item.id} color={item.enabled ? "green" : "default"}>{item.name} · {(item.roles ?? ["worker"]).map(roleLabel).join(" / ")}</Tag>)}</Space>
+    </Card>
+
     <Card className="panel-card" title="执行服务" extra={<Space><Button onClick={refreshServices}>刷新状态</Button><Button type="primary" onClick={editServices}>编辑服务地址</Button></Space>} style={{ marginTop: 18 }}>
       {services.isLoading ? <Spin /> : <Descriptions column={{ xs: 1, md: 2 }} items={[
-        { key: "runner-url", label: "Kali Runner 地址", children: services.data?.runner_url ?? "—" }, { key: "runner-state", label: "Kali Runner 状态", children: <StatusTag reachable={services.data?.runner.reachable} /> }, { key: "runner-cidr", label: "Runner 允许网段", children: services.data?.runner_allowed_cidrs ?? "—" }, { key: "runner-token", label: "Runner Token", children: services.data?.runner_token_configured ? <Tag color="success">已配置</Tag> : <Tag color="error">未配置</Tag> }, { key: "bridge-url", label: "Codex Bridge 地址", children: services.data?.codex_bridge_url ?? "—" }, { key: "bridge-state", label: "Codex Bridge 状态", children: <StatusTag reachable={services.data?.codex_bridge.reachable} /> }, { key: "bridge-mode", label: "Codex 模式", children: typeof services.data?.codex_bridge.details === "object" && services.data.codex_bridge.details.mock_mode === true ? <Tag color="blue">Mock</Tag> : "运行时" },
+        { key: "runner-url", label: "Kali Runner 地址", children: services.data?.runner_url ?? "—" },
+        { key: "runner-state", label: "Runner 状态", children: <StatusTag reachable={services.data?.runner.reachable} /> },
+        { key: "runner-cidr", label: "Runner 允许网段", children: services.data?.runner_allowed_cidrs ?? "—" },
+        { key: "runner-token", label: "Runner Token", children: services.data?.runner_token_configured ? <Tag color="success">已配置</Tag> : <Tag color="error">未配置</Tag> },
+        { key: "bridge-url", label: "Codex Bridge 地址", children: services.data?.codex_bridge_url ?? "—" },
+        { key: "bridge-state", label: "Codex Bridge 状态", children: <StatusTag reachable={services.data?.codex_bridge.reachable} /> },
       ]} />}
     </Card>
-    <Tabs className="panel-card" style={{ marginTop: 18 }} items={[{ key: "agent", label: "Agent Policy", children: <Descriptions column={{ xs: 1, md: 2 }} items={[{ key: "steps", label: "默认最大步骤", children: 12 }, { key: "tools", label: "默认最大工具调用", children: 12 }, { key: "runtime", label: "默认运行时间", children: "300 秒" }, { key: "specialists", label: "最大 Specialist", children: 3 }, { key: "lesson", label: "历史 Challenge Lesson", children: "启用" }]} /> }, { key: "tools", label: "Tool Policy", children: <Descriptions column={{ xs: 1, md: 2 }} items={[{ key: "allow", label: "工具边界", children: "题型 + Role + Runner Policy" }, { key: "risk", label: "风险等级", children: "受控" }, { key: "host", label: "允许主机", children: "当前题目 allowed_hosts" }, { key: "output", label: "最大输出", children: "Runner 配置" }]} /> }, { key: "skills", label: "Skill Policy", children: <Descriptions column={{ xs: 1, md: 2 }} items={[{ key: "core", label: "默认 Core Skill", children: "ctf-solver-core" }, { key: "web", label: "Web Methodology", children: "按题型自动激活" }, { key: "traffic", label: "Traffic Methodology", children: "按题型自动激活" }, { key: "disabled", label: "禁用 Skill", children: "GENERAL_SECURITY catalog" }]} /> }, { key: "runner", label: "Runner", children: <Descriptions column={{ xs: 1, md: 2 }} items={[{ key: "url", label: "Runner URL", children: services.data?.runner_url ?? "—" }, { key: "cidr", label: "允许 CIDR", children: services.data?.runner_allowed_cidrs ?? "—" }, { key: "caps", label: "能力矩阵", children: services.data?.runner.details && typeof services.data.runner.details === "object" ? "已读取" : "—" }]} /> }, { key: "audit", label: "数据与审计", children: <Descriptions column={{ xs: 1, md: 2 }} items={[{ key: "run", label: "Run 保留", children: "数据库策略" }, { key: "artifact", label: "Artifact 保留", children: "工作区策略" }, { key: "redact", label: "敏感字段脱敏", children: "启用" }, { key: "summary", label: "模型响应摘要", children: "仅保存脱敏摘要" }]} /> }, { key: "evaluation", label: "评测", children: <Descriptions column={{ xs: 1, md: 2 }} items={[{ key: "profile", label: "Benchmark Profile", children: "受控本地题目" }, { key: "engine", label: "引擎对比", children: "OpenAI Compatible / Codex SDK" }, { key: "duplicate", label: "重复动作率", children: "诊断指标" }]} /> }]} />
-    <Row gutter={[18, 18]} style={{ marginTop: 18 }}><Col xs={24} md={8}><Card className="panel-card" title={<><ApiOutlined /> OpenAI 兼容模型</>}>执行前依次测试普通 Chat、JSON Object、JSON Schema、AgentAction、SkillAction、Usage 和限流能力。</Card></Col><Col xs={24} md={8}><Card className="panel-card" title={<><ToolOutlined /> Codex SDK 桥接服务</>}>所有分析结果通过统一事件和 ToolModelView 回传。</Card></Col><Col xs={24} md={8}><Card className="panel-card" title={<><SafetyCertificateOutlined /> Kali 执行端</>}>令牌、主机白名单、工具能力和工作区边界均在执行端再次校验。</Card></Col></Row>
-    <Modal open={open} title={editing ? "编辑模型配置" : "新建模型配置"} onCancel={() => setOpen(false)} onOk={() => form.submit()} confirmLoading={save.isPending}><Form form={form} layout="vertical" onFinish={(values) => save.mutate(values)}><Form.Item name="name" label="名称" rules={[{ required: true }]}><Input /></Form.Item><Form.Item name="base_url" label="Base URL" rules={[{ required: true, type: "url" }]}><Input placeholder="https://api.example.com/v1" /></Form.Item><Form.Item name="model_name" label="模型名称" rules={[{ required: true }]}><Input /></Form.Item><Form.Item name="api_key" label={editing ? "新 API Key（留空则不变）" : "API Key"} rules={editing ? [] : [{ required: true }]}><Input.Password autoComplete="new-password" /></Form.Item><Form.Item name="action_protocol" label="Action Protocol"><Input placeholder="json_schema / json_object / prompt_json" /></Form.Item><Form.Item name="structured_output_mode" label="Structured Output Mode"><Input placeholder="json_schema / json_object / prompt_json" /></Form.Item><Row gutter={12}><Col span={12}><Form.Item name="request_timeout_seconds" label="Timeout"><Input type="number" /></Form.Item></Col><Col span={12}><Form.Item name="max_output_tokens" label="Max Output Tokens"><Input type="number" /></Form.Item></Col></Row><Row gutter={12}><Col span={12}><Form.Item name="temperature" label="Temperature"><Input type="number" step="0.1" /></Form.Item></Col><Col span={12}><Form.Item name="context_token_limit" label="Context Token Limit"><Input type="number" /></Form.Item></Col></Row><Row gutter={12}><Col span={12}><Form.Item name="max_retries" label="Max Retries"><Input type="number" /></Form.Item></Col><Col span={12}><Form.Item name="retry_base_seconds" label="Retry Backoff"><Input type="number" /></Form.Item></Col></Row><Row gutter={12}><Col span={12}><Form.Item name="rate_limit_cooldown_seconds" label="429 Cooldown"><Input type="number" /></Form.Item></Col><Col span={12}><Form.Item name="requests_per_minute" label="RPM"><Input type="number" /></Form.Item></Col></Row><Form.Item name="max_concurrency" label="Max Concurrency"><Input type="number" /></Form.Item><Form.Item name="provider_type" hidden><Input /></Form.Item><Form.Item name="enabled" label="启用" valuePropName="checked"><Switch /></Form.Item></Form></Modal>
-    <Modal open={serviceOpen} title="编辑服务地址" onCancel={() => setServiceOpen(false)} onOk={() => serviceForm.submit()} confirmLoading={saveServices.isPending}><Alert type="info" showIcon message="Runner 仅允许配置环境变量声明的私网网段；Codex Bridge 仅允许本机地址。" style={{ marginBottom: 16 }} /><Form form={serviceForm} layout="vertical" onFinish={(values) => saveServices.mutate(values)}><Form.Item name="runner_url" label="Kali Runner 地址" rules={[{ required: true, type: "url" }]}><Input /></Form.Item><Form.Item name="codex_bridge_url" label="Codex Bridge 地址" rules={[{ required: true, type: "url" }]}><Input /></Form.Item></Form></Modal>
-    <Modal open={Boolean(bindingConfig)} title={`配置 ${bindingConfig?.name ?? "模型"} 的 Skills`} onCancel={() => setBindingConfig(undefined)} onOk={() => saveBindings.mutate()} confirmLoading={saveBindings.isPending} width={720}><ModelSkillBinding skills={skills.data ?? []} value={bindingValues} onChange={setBindingValues} /></Modal>
+
+    <Tabs className="panel-card" style={{ marginTop: 18 }} items={[
+      { key: "reason", label: "Coordinator Reason", children: <Descriptions column={{ xs: 1, md: 2 }} items={[{ key: "source", label: "职责", children: "读取 Blackboard，输出受策略约束的 Intent。" }, { key: "fallback", label: "失败回退", children: "使用 Muteki 本地策略规划器，不会让 Reason 直接执行工具。" }, { key: "output", label: "输出", children: "verdict + typed intents，不包含 Worker 原始响应。" }]} /> },
+      { key: "worker", label: "Worker Engines", children: <Descriptions column={{ xs: 1, md: 2 }} items={[{ key: "parallel", label: "并行", children: "按创建任务时勾选的 EngineProfile 调度。" }, { key: "supported", label: "可选引擎", children: "Codex SDK / OpenAI-compatible / Mock。" }, { key: "boundary", label: "执行边界", children: "Codex 走官方 Worker/Sandbox；兼容模型通过受限 Worker 适配器进入 Tool Gateway。" }]} /> },
+      { key: "tools", label: "Tool Policy", children: <Descriptions column={{ xs: 1, md: 2 }} items={[{ key: "allow", label: "工具边界", children: "题型、Worker 角色和 Runner Policy 共同约束。" }, { key: "risk", label: "风险等级", children: "由现有安全层和 Tool Gateway 继续控制。" }]} /> },
+      { key: "audit", label: "数据与审计", children: <Descriptions column={{ xs: 1, md: 2 }} items={[{ key: "redact", label: "敏感字段脱敏", children: "启用。" }, { key: "summary", label: "模型响应", children: "只保留安全摘要和 Token 用量，不保存原始响应。" }]} /> },
+    ]} />
+
+    <Row gutter={[18, 18]} style={{ marginTop: 18 }}>
+      <Col xs={24} md={8}><Card className="panel-card" title={<><ApiOutlined /> OpenAI-compatible</>}>可配置 Step、DeepSeek 等兼容 Chat Completions 的模型，并分别指定 Coordinator Reason 或 Worker 角色。</Card></Col>
+      <Col xs={24} md={8}><Card className="panel-card" title={<><ToolOutlined /> Codex SDK</>}>通过 Muteki 官方 Worker/Sandbox 适配器执行，并可与其他 Worker EngineProfile 并行。</Card></Col>
+      <Col xs={24} md={8}><Card className="panel-card" title={<><SafetyCertificateOutlined /> Security Boundary</>}>模型只能生成受约束的 Intent；实际工具执行仍经过现有安全层和 Tool Gateway。</Card></Col>
+    </Row>
+
+    <Modal open={open} title={editing ? "编辑模型配置" : "新建模型配置"} onCancel={() => setOpen(false)} onOk={() => form.submit()} confirmLoading={save.isPending}>
+      <Form form={form} layout="vertical" onFinish={(values) => save.mutate(values as ModelConfigFormValues)}>
+        <Form.Item name="name" label="名称" rules={[{ required: true }]}><Input /></Form.Item>
+        <Form.Item name="base_url" label="Base URL" rules={[{ required: true, type: "url" }]}><Input placeholder="https://api.example.com/v1" /></Form.Item>
+        <Form.Item name="model_name" label="模型名称" rules={[{ required: true }]}><Input placeholder="step-xxx / deepseek-chat" /></Form.Item>
+        <Form.Item name="api_key" label={editing ? "新 API Key（留空则不变）" : "API Key"} rules={editing ? [] : [{ required: true }]}><Input.Password autoComplete="new-password" /></Form.Item>
+        <Form.Item name="roles" label="Muteki 角色" rules={[{ required: true }]}><Select mode="multiple" options={[{ value: "coordinator_reason", label: "Coordinator Reason（协调器推理）" }, { value: "worker", label: "Worker（执行引擎）" }]} /></Form.Item>
+        <Form.Item name="action_protocol" label="Action Protocol"><Input placeholder="json_schema / json_object / prompt_json" /></Form.Item>
+        <Form.Item name="structured_output_mode" label="Structured Output Mode"><Input placeholder="json_schema / json_object / prompt_json" /></Form.Item>
+        <Row gutter={12}><Col span={12}><Form.Item name="request_timeout_seconds" label="Timeout"><Input type="number" /></Form.Item></Col><Col span={12}><Form.Item name="max_output_tokens" label="Max Output Tokens"><Input type="number" /></Form.Item></Col></Row>
+        <Row gutter={12}><Col span={12}><Form.Item name="temperature" label="Temperature"><Input type="number" step="0.1" /></Form.Item></Col><Col span={12}><Form.Item name="context_token_limit" label="Context Token Limit"><Input type="number" /></Form.Item></Col></Row>
+        <Row gutter={12}><Col span={12}><Form.Item name="max_retries" label="Max Retries"><Input type="number" /></Form.Item></Col><Col span={12}><Form.Item name="retry_base_seconds" label="Retry Backoff"><Input type="number" /></Form.Item></Col></Row>
+        <Row gutter={12}><Col span={12}><Form.Item name="rate_limit_cooldown_seconds" label="429 Cooldown"><Input type="number" /></Form.Item></Col><Col span={12}><Form.Item name="requests_per_minute" label="RPM"><Input type="number" /></Form.Item></Col></Row>
+        <Form.Item name="max_concurrency" label="Max Concurrency"><Input type="number" /></Form.Item>
+        <Form.Item name="provider_type" hidden><Input /></Form.Item>
+        <Form.Item name="enabled" label="启用" valuePropName="checked"><Switch /></Form.Item>
+      </Form>
+    </Modal>
+
+    <Modal open={serviceOpen} title="编辑服务地址" onCancel={() => setServiceOpen(false)} onOk={() => serviceForm.submit()} confirmLoading={saveServices.isPending}>
+      <Alert type="info" showIcon message="Runner 允许配置私网地址；Codex Bridge 仅允许本机地址。" style={{ marginBottom: 16 }} />
+      <Form form={serviceForm} layout="vertical" onFinish={(values) => saveServices.mutate(values)}>
+        <Form.Item name="runner_url" label="Kali Runner 地址" rules={[{ required: true, type: "url" }]}><Input /></Form.Item>
+        <Form.Item name="codex_bridge_url" label="Codex Bridge 地址" rules={[{ required: true, type: "url" }]}><Input /></Form.Item>
+      </Form>
+    </Modal>
+
+    <Modal open={Boolean(bindingConfig)} title={`配置 ${bindingConfig?.name ?? "模型"} 的 Skills`} onCancel={() => setBindingConfig(undefined)} onOk={() => saveBindings.mutate()} confirmLoading={saveBindings.isPending} width={720}>
+      <ModelSkillBinding skills={skills.data ?? []} value={bindingValues} onChange={setBindingValues} />
+    </Modal>
   </>;
 }

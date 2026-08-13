@@ -9,9 +9,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import DomainError
 from app.models.multi_agent import AgentTask
-from app.models.run import AgentTurn, RunAttempt, RunExecutionLease, SolveRun, ToolCall, ToolInvocationTicket
-from app.schemas.multi_agent import AgentTaskStatus
+from app.models.run import (
+    AgentTurn,
+    RunAttempt,
+    RunExecutionLease,
+    SolveRun,
+    ToolInvocationTicket,
+)
 from app.orchestration.state_machine import TERMINAL, RunStatus
+from app.schemas.multi_agent import AgentTaskStatus
 from app.services.codex_preflight import codex_preflight_service
 from app.services.events import event_service
 from app.services.execution_recovery import execution_recovery_guard
@@ -75,7 +81,6 @@ class RunAttemptService:
     async def recover_stale_execution(self, session: AsyncSession, run: SolveRun, *, stale_after_seconds: int = 300) -> bool:
         """Recover abandoned execution rows without interrupting fresh work."""
         now = utc_now()
-        cutoff = now - timedelta(seconds=stale_after_seconds)
         stale_calls = await execution_recovery_guard.recoverable_tool_calls(
             session,
             run.id,
@@ -158,7 +163,12 @@ class RunAttemptService:
                 status_code=409,
             )
         await self.reclaim_expired_lease(session, run.id)
-        if await self.consecutive_zero_tool_failures(session, run.id) >= 2 and not codex_preflight_service.is_ready(run.id):
+        # The Codex preflight gate belongs to the legacy Runner/ToolGateway
+        # attempt path.  Canonical Muteki performs its own engine health check
+        # in Prepare and must be resumable from its durable SharedGraph even
+        # when an earlier legacy attempt recorded zero tool calls.
+        is_muteki = str(getattr(run, "solver_mode", "")).lower() == "muteki"
+        if not is_muteki and await self.consecutive_zero_tool_failures(session, run.id) >= 2 and not codex_preflight_service.is_ready(run.id):
             raise DomainError(
                 "RUN_CONFIGURATION_BLOCKED",
                 "Two consecutive zero-tool engine failures require a successful Codex preflight before another Attempt.",
@@ -268,6 +278,17 @@ class RunAttemptService:
         attempt: RunAttempt | None,
         lease: RunExecutionLease | None,
     ) -> None:
+        # ToolGateway, report generation, and compaction may commit or roll
+        # back through the same AsyncSession before final accounting.  Reload
+        # lifecycle rows explicitly so an expired ORM attribute never tries
+        # to perform implicit async IO from synchronous attribute access.
+        current_run = await session.get(SolveRun, run.id, populate_existing=True)
+        if current_run is not None:
+            run = current_run
+        if attempt is not None:
+            current_attempt = await session.get(RunAttempt, attempt.id, populate_existing=True)
+            if current_attempt is not None:
+                attempt = current_attempt
         if attempt is not None:
             turns = list((await session.scalars(select(AgentTurn).where(AgentTurn.run_id == run.id))).all())
             attempt.finished_at = utc_now()

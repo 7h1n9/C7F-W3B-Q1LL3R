@@ -9,6 +9,14 @@ from app.services.events import EventService
 from ..events import EventEnvelope
 
 
+_MUTEKI_PHASE_TO_RUN_PHASE = {
+    "prepare": "PREPARE",
+    "race": "RACE",
+    "coordinator": "COORDINATOR",
+    "finalize": "FINALIZE",
+}
+
+
 class EventBridge:
     """Bridge canonical graph events into the existing durable SSE stream."""
 
@@ -21,13 +29,15 @@ class EventBridge:
         # RunEvent table, and EventService already retries sequence races.
         self._service = service or EventService()
         self._run_id = run_id
-        self._seen: set[tuple[str, int]] = set()
+        self._seen: set[tuple[str, str, int]] = set()
         self._tail: asyncio.Task[Any] | None = None
         self._buffered: list[EventEnvelope] = []
 
     async def bridge(self, event: EventEnvelope) -> Any:
         run_id = str(self._run_id or event.challenge_id)
-        key = (run_id, int(event.sequence))
+        # Include the event namespace: a read-only upstream shadow feed may
+        # legitimately reuse the same sequence numbers as the current graph.
+        key = (run_id, str(event.event_type), int(event.sequence))
         if key in self._seen:
             return None
         self._seen.add(key)
@@ -41,8 +51,62 @@ class EventBridge:
         }
         if hasattr(self._session, "__call__"):
             async with self._session() as session:
-                return await self._service.append(session, run_id, f"muteki.{event.event_type}", payload)
-        return await self._service.append(self._session, run_id, f"muteki.{event.event_type}", payload)
+                result = await self._service.append(session, run_id, f"muteki.{event.event_type}", payload)
+                await self._project_run_phase(session, run_id, event)
+                return result
+        result = await self._service.append(self._session, run_id, f"muteki.{event.event_type}", payload)
+        await self._project_run_phase(self._session, run_id, event)
+        return result
+
+    @staticmethod
+    async def _project_run_phase(session: Any, run_id: str, event: EventEnvelope) -> None:
+        """Project canonical Muteki stage changes onto the outer Run view.
+
+        The official graph remains the phase authority.  This is only a
+        lifecycle/view projection: it does not change RunStatus, perform a
+        transition, or write any solver state.  The outer supervisor still
+        owns terminal transitions and overwrites the final view with
+        ``REPORTING`` after the runtime returns.
+        """
+
+        if str(event.event_type) != "phase_changed":
+            return
+        event_payload = event.payload if isinstance(event.payload, dict) else {}
+        phase = str(event_payload.get("phase") or "").strip().casefold()
+        run_phase = _MUTEKI_PHASE_TO_RUN_PHASE.get(phase)
+        if not run_phase:
+            return
+        try:
+            from sqlalchemy import select
+
+            from app.models.run import SolveRun
+
+            run = await session.scalar(select(SolveRun).where(SolveRun.id == run_id))
+            if run is None:
+                return
+            # A terminal outer lifecycle owns its reporting view.  Late event
+            # delivery must not regress a completed/failed Run back to a
+            # canonical Muteki stage.
+            if str(run.status) in {
+                "COMPLETED_SOLVED",
+                "COMPLETED_UNSOLVED",
+                "FAILED_ENGINE",
+                "FAILED_TOOL",
+                "FAILED_RUNNER",
+                "TIMEOUT",
+                "CANCELLED",
+            }:
+                return
+            run.current_phase = run_phase
+            await session.commit()
+        except Exception:
+            # Event projection is observability-only.  A stale test session,
+            # shutdown race, or unavailable lifecycle row must not interrupt
+            # the canonical Graph/Worker loop.
+            try:
+                await session.rollback()
+            except Exception:
+                pass
 
     def callback(self) -> Callable[[EventEnvelope], None]:
         def submit(event: EventEnvelope) -> None:

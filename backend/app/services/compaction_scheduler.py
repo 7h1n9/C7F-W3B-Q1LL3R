@@ -47,11 +47,13 @@ class CompactionWorker:
         except IntegrityError:
             await session.rollback()
             return None
+        await session.refresh(lease)
         return lease
 
     async def run(self, run_id: str) -> None:
         async with SessionLocal() as session:
             lease = None
+            lease_token: str | None = None
             try:
                 run = await session.get(SolveRun, run_id)
                 if not run:
@@ -62,6 +64,10 @@ class CompactionWorker:
                     return
                 lease = await self._claim(session, run_id)
                 if not lease:
+                    return
+                lease_token = str(lease.lease_token)
+                run = await session.get(SolveRun, run_id, populate_existing=True)
+                if not run:
                     return
                 # The deterministic decision is intentional: compaction is a
                 # safety operation and cannot wait for a model response.
@@ -74,7 +80,7 @@ class CompactionWorker:
             except Exception as error:
                 with contextlib.suppress(Exception):
                     await session.rollback()
-                    failed_run = await session.get(SolveRun, run_id)
+                    failed_run = await session.get(SolveRun, run_id, populate_existing=True)
                     if failed_run:
                         failed_run.compaction_status = "FAILED"
                         failed_run.last_error_code = "COMPACTION_FAILED"
@@ -85,7 +91,8 @@ class CompactionWorker:
                 if lease is None:
                     return
                 with contextlib.suppress(Exception):
-                    await session.execute(delete(CompactionLease).where(CompactionLease.lease_token == lease.lease_token))
+                    if lease_token:
+                        await session.execute(delete(CompactionLease).where(CompactionLease.lease_token == lease_token))
                     await session.commit()
 
 

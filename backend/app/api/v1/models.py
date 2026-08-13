@@ -14,6 +14,10 @@ router = APIRouter(prefix="/model-configs", tags=["settings"])
 
 
 def read(item: ModelConfig) -> dict:
+    capabilities = item.capabilities_json or {}
+    roles = capabilities.get("roles") if isinstance(capabilities, dict) else None
+    if not isinstance(roles, list) or not roles:
+        roles = ["worker"]
     return {
         "id": item.id,
         "name": item.name,
@@ -38,7 +42,8 @@ def read(item: ModelConfig) -> dict:
         "context_token_limit": item.context_token_limit,
         "last_test_at": item.last_test_at.isoformat() if item.last_test_at else None,
         "last_test_ok": item.last_test_ok,
-        "capabilities": item.capabilities_json or {},
+        "capabilities": capabilities,
+        "roles": [str(role) for role in roles if str(role) in {"worker", "coordinator_reason"}],
     }
 
 
@@ -59,8 +64,9 @@ async def create_model_config(
         model_name=payload.model_name,
         encrypted_api_key=encrypt_api_key(payload.api_key or ""),
         enabled=payload.enabled,
+        capabilities_json={"roles": list(payload.roles)},
         **payload.model_dump(
-            exclude={"name", "provider_type", "base_url", "model_name", "api_key", "enabled"}
+            exclude={"name", "provider_type", "base_url", "model_name", "api_key", "enabled", "roles"}
         ),
     )
     session.add(item)
@@ -86,8 +92,11 @@ async def update_model_config(
         payload.model_name,
         payload.enabled,
     )
+    capabilities = dict(item.capabilities_json or {})
+    capabilities["roles"] = list(payload.roles)
+    item.capabilities_json = capabilities
     for key, value in payload.model_dump(
-        exclude={"name", "provider_type", "base_url", "model_name", "api_key", "enabled"}
+        exclude={"name", "provider_type", "base_url", "model_name", "api_key", "enabled", "roles"}
     ).items():
         setattr(item, key, value)
     if payload.api_key:
@@ -121,6 +130,7 @@ async def test_model_config(config_id: str, session: AsyncSession = Depends(get_
     import time
 
     started = time.perf_counter()
+    configured_roles = read(item)["roles"]
     capabilities: dict[str, object] = {
         "reachable": False,
         "normal_chat": False,
@@ -138,6 +148,7 @@ async def test_model_config(config_id: str, session: AsyncSession = Depends(get_
         "quota_state": "unknown",
         "rate_limit_state": "unknown",
         "retry_after": None,
+        "roles": configured_roles,
     }
     headers = {"Authorization": f"Bearer {decrypt_api_key(item.encrypted_api_key)}"}
     try:

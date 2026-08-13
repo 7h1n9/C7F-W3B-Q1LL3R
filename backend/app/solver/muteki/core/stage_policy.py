@@ -44,7 +44,7 @@ class StagePolicy:
     def can_transition(self, from_stage: str | MutekiPhase, to_stage: str | MutekiPhase) -> bool:
         source, target = str(from_stage), str(to_stage)
         transitions = {
-            "prepare": {"race", "finalize"},
+            "prepare": {"race", "coordinator", "finalize"},
             "race": {"coordinator", "finalize"},
             "coordinator": {"coordinator", "finalize"},
             "finalize": {"finalize"},

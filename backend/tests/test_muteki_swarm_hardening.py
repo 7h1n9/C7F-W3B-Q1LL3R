@@ -55,7 +55,7 @@ def test_stage_policy_enforces_roles_and_transitions() -> None:
     assert policy.get_allowed_roles("coordinator") == ("bootstrap", "explore", "review")
     assert policy.can_transition("prepare", "race") is True
     assert policy.can_transition("race", "coordinator") is True
-    assert policy.can_transition("prepare", "coordinator") is False
+    assert policy.can_transition("prepare", "coordinator") is True
     assert policy.can_spawn("coordinator", "review") is True
     assert policy.can_spawn("race", "review") is False
 

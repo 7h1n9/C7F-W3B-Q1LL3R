@@ -22,19 +22,54 @@ from app.models.run import (
     ToolCall,
 )
 from app.models.solver_state import SolverState
-from app.orchestration.state_machine import RunStatus, transition
+from app.orchestration.state_machine import TERMINAL, RunStatus, transition
 from app.services.continuations import continuation_service
 from app.services.events import event_service
 from app.services.execution_recovery import execution_recovery_guard
+from app.services.reports import report_service
 from app.services.run_attempts import run_attempt_service
 from app.services.run_finalizer import run_finalizer
 from app.services.stage_decider import stage_decider
 from app.services.supervisor_progress import supervisor_progress_evaluator
 from app.services.user_input_consumer import consume_user_inputs
 from app.services.writeup_builder import writeup_builder
+from app.solver.muteki.adapter.cost_bridge import load_muteki_usage
 
 USER_VISIBLE_TERMINAL = {"WAITING_USER", "COMPLETED_SOLVED", "COMPLETED_UNSOLVED", "CANCELLED"}
+MUTEKI_ATTEMPT_HEARTBEAT_SECONDS = 15.0
+MUTEKI_CANCEL_GRACE_SECONDS = 30.0
 logger = logging.getLogger(__name__)
+
+
+async def _reconcile_muteki_run_counters(session, run: SolveRun) -> None:
+    """Project native Worker ledger counts onto the existing Run row.
+
+    A native Worker is represented by one application ToolCall even when its
+    sandbox executes multiple internal commands.  This projection is
+    idempotent and deliberately runs after the lifecycle finalizer as well as
+    before report generation, so legacy ORM commits cannot erase it.
+    """
+
+    native_tool_calls = int(
+        await session.scalar(
+            select(func.count())
+            .select_from(ToolCall)
+            .where(
+                ToolCall.run_id == run.id,
+                ToolCall.execution_layer == "muteki_native",
+            )
+        )
+        or 0
+    )
+    if not native_tool_calls:
+        return
+    run.tool_call_count = max(int(run.tool_call_count or 0), native_tool_calls)
+    run.run_total_logical_tool_calls = max(
+        int(run.run_total_logical_tool_calls or 0), native_tool_calls
+    )
+    run.attempt_logical_tool_calls = max(
+        int(run.attempt_logical_tool_calls or 0), native_tool_calls
+    )
 
 
 @dataclass(frozen=True)
@@ -54,6 +89,12 @@ class RunOutcome:
 class RunSupervisor:
     def __init__(self) -> None:
         self.run_supervisor_lock: dict[str, asyncio.Lock] = {}
+        # Muteki owns a long-lived Coordinator/Worker task.  Keep the task
+        # handle here so the API can cancel the canonical runtime before it
+        # terminalizes the outer SolveRun row.  This mirrors Muteki's own
+        # Swarm ``finally`` boundary: cancellation must enter the runtime so
+        # Coordinator.finalize() and Sandbox teardown can run.
+        self._active_run_tasks: dict[str, asyncio.Task] = {}
         self._wake_queue: asyncio.Queue[tuple[str, str, str | None]] | None = None
         self._worker_task: asyncio.Task | None = None
         self._queued_runs: set[str] = set()
@@ -65,6 +106,12 @@ class RunSupervisor:
         self._worker_task = asyncio.create_task(self._worker_loop(), name="run-supervisor-worker")
 
     async def stop_worker(self) -> None:
+        # The official Muteki Swarm tears down every run-scoped Sandbox from
+        # its outer ``finally``.  Mirror that boundary when FastAPI itself is
+        # shutting down so a supervisor task cannot outlive the service.
+        for run_id in list(self._active_run_tasks):
+            with contextlib.suppress(Exception):
+                await self.cancel_muteki(run_id)
         task = self._worker_task
         self._worker_task = None
         self._wake_queue = None
@@ -73,6 +120,37 @@ class RunSupervisor:
             task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await task
+
+    async def reap_terminal_muteki_containers(self, runs) -> int:
+        """Reap containers left by a previous process after terminalization.
+
+        This is intentionally a startup reconciliation pass, not a periodic
+        Docker scan.  The persisted Run status is the durable ownership
+        decision; official ``teardown_container`` is idempotent and also
+        sweeps old per-worker leftovers for that exact Run ID.
+        """
+
+        terminal_runs = [
+            run
+            for run in runs
+            if str(getattr(run, "solver_mode", "")).lower() == "muteki"
+            and str(getattr(run, "status", "")) in {status.value for status in TERMINAL}
+        ]
+        if not terminal_runs:
+            return 0
+        try:
+            from muteki.solver.container_exec import teardown_container
+        except Exception:
+            logger.exception("Official Muteki container teardown is unavailable")
+            return 0
+        reaped = 0
+        for run in terminal_runs:
+            try:
+                await asyncio.to_thread(teardown_container, str(run.id), remove=True)
+                reaped += 1
+            except Exception:
+                logger.exception("Terminal Muteki container reconciliation failed run_id=%s", run.id)
+        return reaped
 
     async def enqueue(self, run_id: str, *, reason: str) -> None:
         await self.start_worker()
@@ -171,6 +249,60 @@ class RunSupervisor:
         if not lock.locked() and self.run_supervisor_lock.get(run_id) is lock:
             self.run_supervisor_lock.pop(run_id, None)
 
+    def _register_current_run_task(self, run_id: str) -> asyncio.Task | None:
+        task = asyncio.current_task()
+        if task is not None:
+            self._active_run_tasks[run_id] = task
+        return task
+
+    def _unregister_run_task(self, run_id: str, task: asyncio.Task | None) -> None:
+        if task is not None and self._active_run_tasks.get(run_id) is task:
+            self._active_run_tasks.pop(run_id, None)
+
+    async def cancel_muteki(
+        self,
+        run_id: str,
+        *,
+        grace_seconds: float = MUTEKI_CANCEL_GRACE_SECONDS,
+    ) -> bool:
+        """Cancel and reap one canonical Muteki run before lifecycle close.
+
+        The outer API must not mark a native Run terminal while its
+        Coordinator is still able to append Graph events.  Cancelling the
+        supervisor task first enters the official Swarm/Worker ``finally``
+        paths; the idempotent container teardown below also covers an orphan
+        left by a process restart where this supervisor has no task handle.
+        """
+
+        task = self._active_run_tasks.get(run_id)
+        current = asyncio.current_task()
+        if task is not None and task is not current and not task.done():
+            task.cancel()
+            try:
+                await asyncio.wait_for(
+                    asyncio.shield(task),
+                    timeout=max(0.1, float(grace_seconds)),
+                )
+            except asyncio.CancelledError:
+                # The cancelled Muteki task is expected to propagate
+                # CancelledError after its finally blocks have completed.
+                pass
+            except asyncio.TimeoutError:
+                logger.warning("Muteki task did not stop within grace run_id=%s", run_id)
+            except Exception:
+                logger.exception("Muteki task failed while being cancelled run_id=%s", run_id)
+
+        # Official Muteki teardown is idempotent and is the only container
+        # cleanup authority.  It is also required for orphaned tasks from a
+        # previous API process which cannot be present in this registry.
+        try:
+            from muteki.solver.container_exec import teardown_container
+
+            await asyncio.to_thread(teardown_container, run_id, remove=True)
+        except Exception:
+            logger.exception("Muteki container teardown failed run_id=%s", run_id)
+        return task is not None
+
     async def _worker_loop(self) -> None:
         assert self._wake_queue is not None
         while True:
@@ -180,9 +312,28 @@ class RunSupervisor:
                 if continuation_id is not None:
                     await self._execute_continuation(continuation_id)
                 elif reason in {"USER_INPUT_RECEIVED", "USER_INPUT_CONSUMED"}:
-                    await self.run_after_user_input_background(run_id)
+                    task = asyncio.create_task(
+                        self.run_after_user_input_background(run_id),
+                        name=f"muteki-user-input-run-{run_id}",
+                    )
+                    try:
+                        await task
+                    except asyncio.CancelledError:
+                        # Cancelling the child Run must not terminate the
+                        # supervisor queue.  A cancellation of the queue
+                        # itself still propagates during service shutdown.
+                        if asyncio.current_task() and asyncio.current_task().cancelling():
+                            raise
                 else:
-                    await self.run_background(run_id)
+                    task = asyncio.create_task(
+                        self.run_background(run_id),
+                        name=f"muteki-run-{run_id}",
+                    )
+                    try:
+                        await task
+                    except asyncio.CancelledError:
+                        if asyncio.current_task() and asyncio.current_task().cancelling():
+                            raise
             except Exception:
                 logger.exception("Supervisor wakeup failed run_id=%s reason=%s", run_id, reason)
             finally:
@@ -406,6 +557,8 @@ class RunSupervisor:
         # and route only the new mode to SolverRuntimeService.
         selected = await session.get(SolveRun, run_id)
         if selected is not None and selected.solver_mode == "muteki":
+            if RunStatus(selected.status) in TERMINAL:
+                return await self._outcome(session, selected)
             return await self._run_muteki(session, selected)
         if selected is not None and selected.solver_mode == "solver_v2":
             from app.solver.service import solver_runtime_service
@@ -581,6 +734,7 @@ class RunSupervisor:
         from app.orchestration.state_machine import RunStatus, transition
         from app.solver.muteki.runtime import MutekiRuntime
 
+        run_id = str(run.id)
         challenge = await session.get(Challenge, run.challenge_id)
         if challenge is None:
             raise ValueError("CHALLENGE_NOT_FOUND")
@@ -588,24 +742,65 @@ class RunSupervisor:
             transition(run, RunStatus.RUNNING)
             await session.commit()
         attempt = lease = None
+        attempt_id = lease_id = None
+        heartbeat_task: asyncio.Task | None = None
         try:
             attempt, lease = await run_attempt_service.begin(session, run)
-            from app.services.tool_manifest import refresh_runtime_tool_manifest
-
-            await refresh_runtime_tool_manifest(session, run, attempt, challenge, mcp_tools=[])
+            attempt_id = str(attempt.id) if attempt is not None else None
+            lease_id = str(lease.id) if lease is not None else None
+            # The official Muteki Worker emits a 15-second liveness heartbeat
+            # while its long-lived Sandbox/CLI turn is running.  The outer
+            # application lease must receive the same signal through an
+            # independent DB session; the runtime owns the session passed to
+            # Muteki and may spend many minutes inside one Worker turn.
+            heartbeat_task = asyncio.create_task(
+                self._heartbeat_muteki_attempt(
+                    run_id=run_id,
+                    attempt_id=attempt_id,
+                    lease_id=lease_id,
+                ),
+                name=f"muteki-attempt-heartbeat-{run_id}",
+            )
+            # Canonical Muteki native Workers use their own official Worker
+            # image/SharedGraph boundary and do not execute through the legacy
+            # Runner tool catalog.  Applying the legacy manifest gate here can
+            # pause a valid native run because optional legacy tools (for
+            # example sqlmap_detect) are absent even though Muteki never needs
+            # them.  Solver v2/legacy paths keep their existing manifest gate.
             await session.commit()
             result = await MutekiRuntime(session, run, challenge).run_once(
-                max_rounds=min(100, max(1, int(run.max_agent_steps or 10))),
+                # Muteki's Coordinator is graph/event driven.  The persisted
+                # Agent-step limit belongs to Worker/CLI turns and must not
+                # truncate the outer OODA loop after a few tool intents.  The
+                # Run-level total-runtime limit remains the safety boundary.
+                max_rounds=None,
                 max_workers=10,
             )
             await session.refresh(run)
+            # Native Muteki Workers are one durable application ToolCall even
+            # though their internal CLI may issue several sandbox commands.
+            # Reconcile the existing Run counters from that authoritative
+            # ledger before report generation and attempt finalization.
+            await _reconcile_muteki_run_counters(session, run)
             if result.status == RunStatus.COMPLETED_SOLVED.value:
+                # The canonical graph owns Prepare/Race/Coordinator/Finalize
+                # phases.  Persist the outer lifecycle's terminal reporting
+                # phase explicitly so an initial INTAKE value is not retained
+                # merely because it is a valid legacy solver phase.
+                run.current_phase = RunStatus.REPORTING.value
                 transition(run, RunStatus.REPORTING)
                 transition(run, RunStatus.COMPLETED_SOLVED)
             elif result.status == RunStatus.COMPLETED_UNSOLVED.value:
+                run.current_phase = RunStatus.REPORTING.value
                 transition(run, RunStatus.REPORTING)
                 transition(run, RunStatus.COMPLETED_UNSOLVED)
+            elif result.status == RunStatus.TIMEOUT.value:
+                run.current_phase = RunStatus.REPORTING.value
+                transition(run, RunStatus.REPORTING)
+                transition(run, RunStatus.TIMEOUT)
             else:
+                if RunStatus(run.status) == RunStatus.RUNNING:
+                    transition(run, RunStatus.REPORTING)
                 transition(run, RunStatus.FAILED_ENGINE)
                 run.last_error_code = result.reason or "MUTEKI_RUNTIME_ERROR"
             evidence_refs = list(
@@ -617,6 +812,7 @@ class RunSupervisor:
                     )
                 ).all()
             )
+            usage = await load_muteki_usage(session, run_id)
             run.report_json = {
                 "generated": True,
                 "engine": "muteki",
@@ -630,7 +826,22 @@ class RunSupervisor:
                 "completed_stages": ["prepare", "race", "coordinator", "finalize"],
                 "tool_call_count": int(run.tool_call_count or 0),
             }
+            if usage.calls:
+                run.report_json.update(
+                    {
+                        "cost_usd": round(usage.cost_usd, 10),
+                        "total_tokens": usage.tokens,
+                        "input_tokens": usage.input_tokens,
+                        "output_tokens": usage.output_tokens,
+                        "llm_calls": usage.calls,
+                    }
+                )
             await session.commit()
+            if result.status in {
+                RunStatus.COMPLETED_SOLVED.value,
+                RunStatus.COMPLETED_UNSOLVED.value,
+            }:
+                await report_service.generate_muteki(session, run, result)
         except Exception as error:
             await session.rollback()
             run = await session.get(SolveRun, run.id)
@@ -638,28 +849,111 @@ class RunSupervisor:
                 raise
             if RunStatus(run.status) not in {RunStatus.COMPLETED_SOLVED, RunStatus.COMPLETED_UNSOLVED}:
                 if RunStatus(run.status) != RunStatus.FAILED_ENGINE:
+                    # Muteki failures can occur after the supervisor has
+                    # entered RUNNING but before the canonical runtime has
+                    # established its own solver phase.  REPORTING is the
+                    # lifecycle bridge that legally closes that run; a direct
+                    # RUNNING -> FAILED_ENGINE transition is rejected by the
+                    # shared state machine and would leave a zombie RUNNING
+                    # row with no lease or active task.
+                    if RunStatus(run.status) == RunStatus.RUNNING:
+                        transition(run, RunStatus.REPORTING)
                     transition(run, RunStatus.FAILED_ENGINE)
                 run.last_error_code = "MUTEKI_RUNTIME_ERROR"
                 run.last_error_message = str(error)[:4000]
                 await session.commit()
             result = type("MutekiFailure", (), {"status": RunStatus.FAILED_ENGINE.value, "reason": "MUTEKI_RUNTIME_ERROR", "flag_found": False})()
         finally:
+            if heartbeat_task is not None:
+                heartbeat_task.cancel()
+                await asyncio.gather(heartbeat_task, return_exceptions=True)
             if attempt is not None or lease is not None:
-                await run_attempt_service.finish(session, run, attempt, lease)
-        await event_service.append(session, run.id, "run.completed" if result.status.startswith("COMPLETED") else "run.failed", {"engine": "muteki", "status": run.status, "reason": result.reason, "flag_verified": result.flag_found})
+                # ToolGateway and the error handler both commit.  Re-load the
+                # lifecycle rows before final accounting so an expired ORM
+                # instance cannot trigger a synchronous lazy load after a
+                # failed worker (MissingGreenlet on asyncmy).
+                await session.rollback()
+                current_run = await session.get(SolveRun, run_id, populate_existing=True)
+                current_attempt = await session.get(RunAttempt, attempt_id, populate_existing=True) if attempt_id else None
+                current_lease = await session.get(RunExecutionLease, lease_id, populate_existing=True) if lease_id else None
+                if current_run is not None:
+                    run = current_run
+                await run_attempt_service.finish(session, run, current_attempt, current_lease)
+                if current_run is not None:
+                    await session.refresh(current_run)
+                    await _reconcile_muteki_run_counters(session, current_run)
+                    await session.commit()
+        await event_service.append(session, run_id, "run.completed" if result.status.startswith("COMPLETED") else "run.failed", {"engine": "muteki", "status": run.status, "reason": result.reason, "flag_verified": result.flag_found})
         return await self._outcome(session, run)
+
+    async def _heartbeat_muteki_attempt(
+        self,
+        *,
+        run_id: str,
+        attempt_id: str | None,
+        lease_id: str | None,
+        interval_seconds: float = MUTEKI_ATTEMPT_HEARTBEAT_SECONDS,
+    ) -> None:
+        """Keep the outer Run lease alive during a canonical Muteki session.
+
+        Muteki deliberately keeps one Sandbox and SharedGraph alive across
+        Race/Coordinator turns.  ``RunAttemptService.begin`` creates the
+        application lease before that session starts, so without this small
+        bridge a healthy native Worker can look like a crashed process to the
+        supervisor after the lease TTL.  The heartbeat has no solver or tool
+        semantics: it only renews existing lifecycle rows and updates the
+        ordinary ``updated_at`` view timestamp for observers.
+        """
+
+        if not attempt_id or not lease_id:
+            return
+        interval = max(0.1, float(interval_seconds))
+        while True:
+            await asyncio.sleep(interval)
+            try:
+                async with SessionLocal() as heartbeat_session:
+                    current_run = await heartbeat_session.get(SolveRun, run_id)
+                    if current_run is None or str(current_run.status) in USER_VISIBLE_TERMINAL:
+                        return
+                    attempt = await heartbeat_session.get(RunAttempt, attempt_id)
+                    lease = await heartbeat_session.get(RunExecutionLease, lease_id)
+                    if attempt is None or lease is None or attempt.status != "RUNNING":
+                        return
+                    await run_attempt_service.heartbeat(
+                        heartbeat_session,
+                        attempt,
+                        lease,
+                    )
+                    # ``heartbeat`` intentionally only touches attempt/lease
+                    # rows.  Project the same liveness to the Run list/detail
+                    # view without changing any lifecycle status.
+                    current_run.updated_at = datetime.now(UTC)
+                    await heartbeat_session.commit()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                # Liveness is observability/recovery support.  A transient DB
+                # failure must not cancel the canonical Muteki Coordinator;
+                # the next interval retries with a fresh session.
+                logger.debug(
+                    "Muteki attempt heartbeat failed for run %s",
+                    run_id,
+                    exc_info=True,
+                )
 
     async def run_background(self, run_id: str, user_message: str | None = None) -> RunOutcome:
         lock = self.run_supervisor_lock.setdefault(run_id, asyncio.Lock())
         if lock.locked():
             return RunOutcome(run_id, "RUNNING", "", "RUN_ALREADY_RUNNING")
         await lock.acquire()
+        task = self._register_current_run_task(run_id)
         from app.core.database import SessionLocal
 
         async with SessionLocal() as session:
             try:
                 return await self.continue_until_terminal(session, run_id, user_message)
             finally:
+                self._unregister_run_task(run_id, task)
                 self._release_run_lock(run_id, lock)
 
     async def run_after_user_input_background(self, run_id: str) -> RunOutcome:
@@ -667,6 +961,7 @@ class RunSupervisor:
         if lock.locked():
             return RunOutcome(run_id, "RUNNING", "", "RUN_ALREADY_RUNNING")
         await lock.acquire()
+        task = self._register_current_run_task(run_id)
         from app.core.database import SessionLocal
 
         async with SessionLocal() as session:
@@ -685,6 +980,7 @@ class RunSupervisor:
                     return await self._mark_user_input_no_progress(session, run, current)
                 return RunOutcome.from_run(run)
             finally:
+                self._unregister_run_task(run_id, task)
                 self._release_run_lock(run_id, lock)
 
 

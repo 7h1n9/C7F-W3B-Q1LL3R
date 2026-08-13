@@ -21,7 +21,7 @@ markers = [
 ]
 
 [tool.setuptools.packages.find]
-include = ["app*"]
+include = ["app*", "muteki*"]
 
 [tool.ruff]
 line-length = 100

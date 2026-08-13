@@ -237,11 +237,19 @@ class GatewayWorker(Worker):
     ) -> None:
         self.session = session
         self.run = run
+        self._run_id = str(run.id)
         self.challenge = challenge
         self.gateway = gateway or tool_gateway
         self.evidence_service = EvidenceLedgerService()
 
     async def execute(self, action: ActionIntent) -> WorkerResult:
+        # ToolGateway and evidence persistence commit between Muteki turns.
+        # Refresh the durable Run before reading it again; otherwise a session
+        # configured with expire-on-commit can try to lazy-load ORM state from
+        # synchronous graph/worker code and raise MissingGreenlet.
+        fresh_run = await self.session.get(SolveRun, self._run_id)
+        if fresh_run is not None:
+            self.run = fresh_run
         role, task_kind = _agent_role(action.action_name)
         task = await self._start_agent_task(action, role=role, task_kind=task_kind)
         arguments = dict(action.parameters)
@@ -311,12 +319,18 @@ class GatewayWorker(Worker):
             return WorkerResult(
                 success=False,
                 action_name=action.action_name,
-                output={"status": "FAILED", "error_code": "SOLVER_GATEWAY_WORKER_ERROR"},
+                output={
+                    "status": "FAILED",
+                    "error_code": "SOLVER_GATEWAY_WORKER_ERROR",
+                    "error_type": type(error).__name__,
+                },
                 metadata={
                     "backend": "gateway",
                     "status": "FAILED",
                     "error_code": "SOLVER_GATEWAY_WORKER_ERROR",
-                    "error": str(error)[:1000],
+                    # Keep a bounded diagnostic for the graph/recovery path;
+                    # raw tool output and request bodies are never included.
+                    "error_reason": str(error).replace("\n", " ")[:800],
                     "agent_task_id": task.id,
                 },
             )
@@ -566,10 +580,16 @@ class GatewayWorker(Worker):
     @staticmethod
     def _normalize_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
         result = dict(payload)
-        model_view = result.get("model_view") if isinstance(result.get("model_view"), Mapping) else {}
+        model_view: Mapping[str, Any] = {}
+        for view_key in ("model_view", "tool_model_view"):
+            candidate = result.get(view_key)
+            if isinstance(candidate, Mapping):
+                model_view = candidate
+                break
         facts = dict(model_view.get("extracted_facts") or {})
         result.update(facts)
-        result["body_excerpt"] = model_view.get("content_excerpt")
+        if model_view.get("content_excerpt") is not None:
+            result["body_excerpt"] = model_view.get("content_excerpt")
         # Runner script execution returns a bounded JSON result on stdout.
         # The generic Gateway contract may classify that response as FAILED
         # because it expects result.json, but the structured stdout is still
