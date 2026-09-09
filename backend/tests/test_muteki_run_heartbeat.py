@@ -45,7 +45,7 @@ async def test_muteki_attempt_heartbeat_renews_outer_lease(monkeypatch) -> None:
         attempt = RunAttempt(
             run_id=run.id,
             attempt_number=1,
-            engine_type="codex_sdk",
+            engine_type="codex_cli",
             status="RUNNING",
             started_at=now,
             heartbeat_at=now,

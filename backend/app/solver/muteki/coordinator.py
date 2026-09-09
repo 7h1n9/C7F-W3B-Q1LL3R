@@ -5,7 +5,9 @@ import inspect
 import json
 import os
 import re
+import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING, Mapping
 
 from .adapter.official_observation import (
@@ -58,6 +60,24 @@ _RACE_LANES: tuple[dict[str, str], ...] = (
     },
 )
 
+_CONTAINER_WORKSPACE = "/home/kali/workspace"
+_ACTIVE_INTENT_STATUSES = {"open", "claimed", "in_progress", "dispatched"}
+
+
+def _container_graph_path(graph_path: str | Path) -> str:
+    """Map the host graph path to the path visible inside the Worker container."""
+
+    path = Path(graph_path)
+    if path.parent.name.casefold() == "graph":
+        relative = Path("graph") / path.name
+    else:
+        try:
+            root = path.parent.parent.resolve()
+            relative = path.resolve().relative_to(root)
+        except (OSError, ValueError):
+            relative = Path("graph") / path.name
+    return f"{_CONTAINER_WORKSPACE}/{relative.as_posix()}"
+
 
 @dataclass(frozen=True, slots=True)
 class CoordinatorConfig:
@@ -71,7 +91,7 @@ class CoordinatorConfig:
     review_interval: int = 3
     stage_policy: StagePolicy | dict | None = None
     worker_backend: str = "callback"
-    worker_timeout_seconds: int = 900
+    worker_timeout_seconds: int = 480
     # Per-Worker CLI turns remain the native Muteki Worker budget.  The
     # Coordinator-wide spawn budget below is separate, just like upstream.
     worker_max_turns: int = 80
@@ -85,6 +105,15 @@ class CoordinatorConfig:
     # exactly at the Worker deadline is not misclassified as a Coordinator
     # timeout.
     worker_wait_grace_seconds: float = 5.0
+    # Upstream Muteki's barren_limit: after this many consecutive worker
+    # completions with NO new fact (incl. candidates) and NO new flag, the
+    # coordinator stops spawning new workers instead of burning tokens.
+    # 0 disables.  (upstream default: 8)
+    barren_limit: int = 8
+    # No-progress wall-clock window: if no new fact/flag has been published
+    # for this many seconds, the coordinator treats the run as stalled and
+    # stops. 0 disables.  (upstream default: 1800)
+    no_progress_timeout: float = 0.0
     official_account_root: str | None = None
     # Official Muteki keeps re-bootstrap bounded by Coordinator policy.  The
     # compatibility runtime exposes the same safety boundary.  Zero means
@@ -117,6 +146,7 @@ class MutekiCoordinator:
         official_worker_adapter: OfficialWorkerAdapter | None = None,
         official_worker_evidence_bridge=None,
         official_worker_usage_bridge=None,
+        insight_bus=None,
     ) -> None:
         self.graph = graph
         self.reason = reason
@@ -149,6 +179,7 @@ class MutekiCoordinator:
         self.control_receiver = control_receiver
         self.official_worker: OfficialWorkerAdapter | None = official_worker_adapter
         self.official_worker_usage_bridge = official_worker_usage_bridge
+        self.insight_bus = insight_bus
         if self.config.worker_backend in {"upstream_local", "upstream_container"}:
             if self.official_worker is None:
                 native_graph = None
@@ -204,6 +235,8 @@ class MutekiCoordinator:
         self._reason_health_retry_task: asyncio.Task[None] | None = None
         self._reason_health_retry_attempts = 0
         self._engine_cursor = 0
+        self._barren_workers = 0
+        self._last_progress_t = 0.0
 
     @property
     def stop_reason(self) -> str | None:
@@ -347,6 +380,17 @@ class MutekiCoordinator:
                 ):
                     await self._dispatch_bootstrap()
                 await self._wait_for_worker_round()
+                if (
+                    self.config.barren_limit > 0
+                    and self._barren_workers >= self.config.barren_limit
+                ):
+                    self._stop_requested = True
+                    self._stop_reason = f"BARREN_LIMIT:{self._barren_workers}"
+                    self.graph.add_dead_end(
+                        actor="coordinator",
+                        description=f"BARREN_LIMIT {self._barren_workers} fruitless Worker rounds",
+                    )
+                    return
                 if self.config.review_interval > 0 and tick % self.config.review_interval == 0:
                     await self._dispatch_review()
                 await asyncio.sleep(0)
@@ -368,6 +412,8 @@ class MutekiCoordinator:
             self._schedule_health_retry()
             self._schedule_reason_health_retry()
             return
+        fact_count_before = len(self.graph.facts())
+        flag_count_before = len(self.graph.flags(verified_only=True))
         try:
             await asyncio.wait_for(
                 self.pool.wait(),
@@ -380,6 +426,30 @@ class MutekiCoordinator:
         except asyncio.TimeoutError:
             self.graph.add_dead_end(actor="coordinator", description="WORKER_TIMEOUT")
             await self._recover_timed_out_workers()
+        # Track progress: a Worker round that publishes a new verified fact or
+        # verified flag counts as progress.  REVIEW_NEEDED / dead-end markers
+        # from the review worker are NOT real progress.
+        new_facts = self.graph.facts()
+        new_flags = self.graph.flags(verified_only=True)
+        made_progress = (
+            len(new_facts) > fact_count_before
+            or len(new_flags) > flag_count_before
+        )
+        if made_progress:
+            # Check if the NEW facts are all REVIEW_NEEDED markers (no-op)
+            if len(new_facts) > fact_count_before and len(new_facts) - fact_count_before > 0:
+                added = new_facts[fact_count_before:]
+                real_progress = any(
+                    not str(f.content).startswith("REVIEW_NEEDED")
+                    for f in added
+                )
+                if not real_progress:
+                    made_progress = False
+        if made_progress:
+            self._barren_workers = 0
+            self._last_progress_t = time.monotonic()
+        else:
+            self._barren_workers += 1
         self._release_completed_semantics()
         self._schedule_health_retry()
         self._schedule_reason_health_retry()
@@ -842,6 +912,17 @@ class MutekiCoordinator:
                 engine_attempt_id=engine_attempt_id,
                 actor="coordinator",
             )
+        container_paths = self.config.worker_backend == "upstream_container"
+        worker_workspace = (
+            _CONTAINER_WORKSPACE
+            if container_paths
+            else str(self.graph.db_path.parent.parent)
+        )
+        worker_blackboard_db = (
+            _container_graph_path(self.graph.db_path)
+            if container_paths
+            else str(self.graph.db_path)
+        )
         job = WorkerJob(
             worker_id=worker_id,
             role=role,
@@ -856,12 +937,17 @@ class MutekiCoordinator:
             branch_id=branch_id,
             engine_attempt_id=engine_attempt_id,
             environment={
-                "MUTEKI_BLACKBOARD_DB": str(self.graph.db_path),
+                **dict(profile.environment),
                 "MUTEKI_WORKER_ID": worker_id,
                 "MUTEKI_INTENT_ID": str(intent_id or ""),
                 "MUTEKI_CHALLENGE_ID": self.graph.challenge_id,
-                "MUTEKI_WORKSPACE": str(self.graph.db_path.parent.parent),
-                **dict(profile.environment),
+                "MUTEKI_BLACKBOARD_DB": worker_blackboard_db,
+                "MUTEKI_WORKSPACE": worker_workspace,
+                "MUTEKI_BLACKBOARD_SCRIPT": (
+                    "/usr/local/bin/blackboard.py"
+                    if container_paths
+                    else os.environ.get("MUTEKI_BLACKBOARD_SCRIPT", "blackboard.py")
+                ),
             },
         )
         spawned = await self.pool.spawn(job)
@@ -1362,11 +1448,83 @@ class MutekiCoordinator:
             raise RuntimeError("Muteki control receiver is not configured")
         await self.control_receiver.broadcast(command, payload)
 
+    def _close_active_intents(self, final_reason: str) -> dict[str, int | str]:
+        """Close open/claimed intents before the Run becomes terminal.
+
+        This is deliberately synchronous and runs before the first await in
+        ``finalize`` so a cancelled/timeout task still leaves the Blackboard
+        with an explicit terminal state for every active direction.
+        """
+
+        intents_reader = getattr(self.graph, "intents", None)
+        conclude_intent = getattr(self.graph, "conclude_intent", None)
+        if not callable(intents_reader):
+            return {
+                "active_intents": 0,
+                "closed_intents": 0,
+                "open_intents": 0,
+                "claimed_intents": 0,
+                "intent_result": "none",
+            }
+        try:
+            intents = list(intents_reader())
+        except Exception:
+            intents = []
+        active = [
+            item
+            for item in intents
+            if str(getattr(item, "status", "") or "").casefold()
+            in _ACTIVE_INTENT_STATUSES
+        ]
+        result = "timed_out" if "TIMEOUT" in str(final_reason).upper() else "cancelled"
+        closed = 0
+        if callable(conclude_intent):
+            for item in active:
+                intent_id = str(getattr(item, "intent_id", "") or "")
+                if not intent_id:
+                    continue
+                try:
+                    conclude_intent(
+                        actor="coordinator",
+                        intent_id=intent_id,
+                        result=result,
+                    )
+                    closed += 1
+                except Exception:
+                    continue
+        open_count = sum(
+            1
+            for item in active
+            if str(getattr(item, "status", "") or "").casefold() == "open"
+        )
+        summary: dict[str, int | str] = {
+            "active_intents": len(active),
+            "closed_intents": closed,
+            "open_intents": open_count,
+            "claimed_intents": len(active) - open_count,
+            "intent_result": result,
+        }
+        try:
+            self.graph.emit_event(
+                actor="coordinator",
+                event_type=EventType.COORDINATOR_DIRECTIVE,
+                payload={
+                    "directive": "finalize_active_intents",
+                    "reason_code": str(final_reason)[:120],
+                    **summary,
+                },
+            )
+        except Exception:
+            pass
+        return summary
+
     async def finalize(self, *, reason: str) -> None:
         if self._finalized:
             return
         self._finalized = True
         self._change_phase(MutekiPhase.FINALIZE)
+        final_reason = self._stop_reason or reason
+        intent_closure = self._close_active_intents(final_reason)
         # Cancel the native official Worker first.  Cancelling the pool task
         # first only cancels the asyncio wrapper; a CLI/RCP process running in
         # ``to_thread`` can then outlive the run and write late Blackboard
@@ -1388,8 +1546,17 @@ class MutekiCoordinator:
         if self.official_worker is not None:
             await self.official_worker.stop()
         self.graph.release_claims(actor="coordinator")
-        final_reason = self._stop_reason or reason
-        self.graph.emit_event(actor="coordinator", event_type=EventType.RUN_FINISHED, payload={"reason": final_reason})
+        verified_flags = self.graph.flags(verified_only=True)
+        self.graph.emit_event(
+            actor="coordinator",
+            event_type=EventType.RUN_FINISHED,
+            payload={
+                "reason": final_reason,
+                "flag_found": bool(verified_flags),
+                "verified_flag_count": len(verified_flags),
+                **intent_closure,
+            },
+        )
 
     def _change_phase(self, phase: MutekiPhase) -> None:
         if self.phase is phase:

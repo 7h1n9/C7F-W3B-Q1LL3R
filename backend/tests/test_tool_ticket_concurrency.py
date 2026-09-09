@@ -21,7 +21,7 @@ async def test_ten_tool_tickets_share_the_master_lease(tmp_path: Path) -> None:
         run = SolveRun(challenge_id="challenge", workspace_path=str(tmp_path), status="EXECUTING", current_phase="EXECUTING")
         session.add(run)
         await session.flush()
-        attempt = RunAttempt(run_id=run.id, attempt_number=1, engine_type="codex_sdk", status="RUNNING")
+        attempt = RunAttempt(run_id=run.id, attempt_number=1, engine_type="codex_cli", status="RUNNING")
         session.add(attempt)
         await session.flush()
         from datetime import UTC, datetime, timedelta

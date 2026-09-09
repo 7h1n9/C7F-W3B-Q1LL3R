@@ -9,6 +9,7 @@ from datetime import UTC, datetime
 from sqlalchemy import func, select
 
 from app.core.database import SessionLocal
+from app.core.exceptions import DomainError
 from app.models.challenge import Challenge
 from app.models.multi_agent import AgentTask, EvidenceLedger, PlannerProposal, VerifiedFact
 from app.models.run import (
@@ -38,6 +39,8 @@ from app.solver.muteki.adapter.cost_bridge import load_muteki_usage
 USER_VISIBLE_TERMINAL = {"WAITING_USER", "COMPLETED_SOLVED", "COMPLETED_UNSOLVED", "CANCELLED"}
 MUTEKI_ATTEMPT_HEARTBEAT_SECONDS = 15.0
 MUTEKI_CANCEL_GRACE_SECONDS = 30.0
+MUTEKI_NATIVE_TERMINAL_EVENT = "muteki.run_finished"
+MUTEKI_TERMINAL_RECONCILE_EVENT = "run.muteki_terminal_reconciled"
 logger = logging.getLogger(__name__)
 
 
@@ -127,14 +130,22 @@ class RunSupervisor:
         This is intentionally a startup reconciliation pass, not a periodic
         Docker scan.  The persisted Run status is the durable ownership
         decision; official ``teardown_container`` is idempotent and also
-        sweeps old per-worker leftovers for that exact Run ID.
+        sweeps old per-worker leftovers for that exact Run ID.  A previous
+        process may also have left a RUNNING/PAUSED_RECOVERY Run without a
+        live task; those containers are safe to reap because resume recreates
+        the run-scoped Sandbox.
         """
 
+        reapable_statuses = {status.value for status in TERMINAL} | {
+            RunStatus.RUNNING.value,
+            RunStatus.PAUSED_RECOVERY.value,
+        }
         terminal_runs = [
             run
             for run in runs
             if str(getattr(run, "solver_mode", "")).lower() == "muteki"
-            and str(getattr(run, "status", "")) in {status.value for status in TERMINAL}
+            and str(getattr(run, "status", "")) in reapable_statuses
+            and str(getattr(run, "id", "")) not in self._active_run_tasks
         ]
         if not terminal_runs:
             return 0
@@ -151,6 +162,155 @@ class RunSupervisor:
             except Exception:
                 logger.exception("Terminal Muteki container reconciliation failed run_id=%s", run.id)
         return reaped
+
+    async def reconcile_muteki_native_terminal(self, session, run: SolveRun) -> RunOutcome | None:
+        """Project a durable native Muteki terminal event onto the outer Run.
+
+        Native Muteki can emit ``muteki.run_finished`` and tear down its
+        Sandbox before the supervisor commits the outer terminal status.  The
+        event stream is the durable handoff: when it is present and no other
+        process owns a live lease, close the outer Run from that evidence
+        instead of replaying the native runtime.
+        """
+
+        if run is None or str(run.solver_mode or "").lower() != "muteki":
+            return None
+        if RunStatus(run.status) in TERMINAL:
+            return None
+        run_id = str(run.id)
+        active_task = self._active_run_tasks.get(run_id)
+        current_task = asyncio.current_task()
+        if active_task is not None and not active_task.done() and active_task is not current_task:
+            return None
+
+        now = datetime.now(UTC)
+        lease = await session.scalar(
+            select(RunExecutionLease).where(RunExecutionLease.run_id == run.id)
+        )
+        if lease is not None:
+            expires_at = (
+                lease.expires_at.replace(tzinfo=UTC)
+                if lease.expires_at.tzinfo is None
+                else lease.expires_at
+            )
+            if lease.owner_instance_id != run_attempt_service.owner_instance_id and expires_at > now:
+                return None
+
+        event = await session.scalar(
+            select(RunEvent)
+            .where(
+                RunEvent.run_id == run.id,
+                RunEvent.event_type == MUTEKI_NATIVE_TERMINAL_EVENT,
+            )
+            .order_by(RunEvent.sequence.desc())
+        )
+        if event is None:
+            return None
+
+        latest_attempt = await session.scalar(
+            select(RunAttempt)
+            .where(RunAttempt.run_id == run.id)
+            .order_by(RunAttempt.attempt_number.desc())
+        )
+        event_created_at = (
+            event.created_at.replace(tzinfo=UTC)
+            if event.created_at.tzinfo is None
+            else event.created_at
+        )
+        if latest_attempt is not None and latest_attempt.started_at is not None:
+            attempt_started_at = (
+                latest_attempt.started_at.replace(tzinfo=UTC)
+                if latest_attempt.started_at.tzinfo is None
+                else latest_attempt.started_at
+            )
+            if event_created_at < attempt_started_at:
+                return None
+
+        payload = event.payload_json if isinstance(event.payload_json, dict) else {}
+        nested = payload.get("payload") if isinstance(payload.get("payload"), dict) else {}
+        flag_found = nested.get("flag_found", payload.get("flag_found"))
+        if flag_found is None:
+            verified_candidate = await session.scalar(
+                select(FlagCandidate.id).where(
+                    FlagCandidate.run_id == run.id,
+                    FlagCandidate.verified.is_(True),
+                )
+            )
+            flag_found = verified_candidate is not None
+        if flag_found is None:
+            report = run.report_json if isinstance(run.report_json, dict) else {}
+            flag_found = bool(report.get("flag_verified"))
+        target = RunStatus.COMPLETED_SOLVED if bool(flag_found) else RunStatus.COMPLETED_UNSOLVED
+        reason = str(nested.get("reason") or payload.get("reason") or "MUTEKI_NATIVE_FINALIZED")
+
+        current_status = RunStatus(run.status)
+        if current_status == RunStatus.RUNNING:
+            transition(run, RunStatus.REPORTING)
+        elif current_status == RunStatus.REPORTING:
+            pass
+        elif current_status in {
+            RunStatus.PAUSED_RECOVERY,
+            RunStatus.PAUSED_CHECKPOINT,
+            RunStatus.PAUSED_DEPLOYMENT,
+            RunStatus.WAITING_USER,
+        }:
+            transition(run, RunStatus.PLANNING)
+            transition(run, RunStatus.REPORTING)
+        else:
+            try:
+                transition(run, RunStatus.REPORTING)
+            except DomainError:
+                run.status = RunStatus.REPORTING.value
+        transition(run, target)
+        run.current_phase = "REPORTING"
+        run.last_error_code = (
+            "MUTEKI_NATIVE_FINALIZED_RECONCILED_SOLVED"
+            if target == RunStatus.COMPLETED_SOLVED
+            else "MUTEKI_NATIVE_FINALIZED_RECONCILED_UNSOLVED"
+        )
+        run.last_error_message = reason[:4000]
+        checkpoint = dict(run.recovery_checkpoint_json or {})
+        checkpoint["muteki_native_terminal"] = {
+            "event_id": str(event.id),
+            "event_sequence": int(event.sequence),
+            "reason": reason,
+            "flag_found": bool(flag_found),
+            "reconciled_at": now.isoformat(),
+            "outer_status": target.value,
+        }
+        checkpoint["current_phase"] = "REPORTING"
+        run.recovery_checkpoint_json = checkpoint
+        await event_service.append(
+            session,
+            run.id,
+            MUTEKI_TERMINAL_RECONCILE_EVENT,
+            {
+                "run_id": run.id,
+                "event_id": str(event.id),
+                "event_sequence": int(event.sequence),
+                "reason": reason,
+                "flag_found": bool(flag_found),
+                "status": target.value,
+            },
+        )
+        await run_finalizer.reconcile(session, run)
+        await session.refresh(run)
+        return RunOutcome.from_run(run)
+
+    async def reconcile_muteki_native_terminals(self, session, runs) -> int:
+        """Reconcile every persisted native-terminal Muteki Run once."""
+
+        reconciled = 0
+        for candidate in list(runs):
+            run_id = str(getattr(candidate, "id", "") or "")
+            if not run_id:
+                continue
+            run = await session.get(SolveRun, run_id, populate_existing=True)
+            if run is None:
+                continue
+            if await self.reconcile_muteki_native_terminal(session, run) is not None:
+                reconciled += 1
+        return reconciled
 
     async def enqueue(self, run_id: str, *, reason: str) -> None:
         await self.start_worker()
@@ -304,9 +464,14 @@ class RunSupervisor:
         return task is not None
 
     async def _worker_loop(self) -> None:
-        assert self._wake_queue is not None
+        # Keep the queue object local for the lifetime of this loop.  Shutdown
+        # clears ``self._wake_queue`` before cancelling the task; using the
+        # attribute in ``finally`` then loses the queue item accounting and
+        # masks the original cancellation with AttributeError.
+        queue = self._wake_queue
+        assert queue is not None
         while True:
-            run_id, reason, continuation_id = await self._wake_queue.get()
+            run_id, reason, continuation_id = await queue.get()
             self._queued_runs.discard(run_id)
             try:
                 if continuation_id is not None:
@@ -337,7 +502,7 @@ class RunSupervisor:
             except Exception:
                 logger.exception("Supervisor wakeup failed run_id=%s reason=%s", run_id, reason)
             finally:
-                self._wake_queue.task_done()
+                queue.task_done()
 
     def _asset_mysql(self, challenge: Challenge | None) -> bool:
         metadata = (challenge.metadata_json or {}) if challenge else {}
@@ -557,9 +722,14 @@ class RunSupervisor:
         # and route only the new mode to SolverRuntimeService.
         selected = await session.get(SolveRun, run_id)
         if selected is not None and selected.solver_mode == "muteki":
-            if RunStatus(selected.status) in TERMINAL:
+            reconciled = await self.reconcile_muteki_native_terminal(session, selected)
+            if reconciled is not None:
+                return reconciled
+            selected = await session.get(SolveRun, run_id, populate_existing=True)
+            if selected is not None and RunStatus(selected.status) in TERMINAL:
                 return await self._outcome(session, selected)
-            return await self._run_muteki(session, selected)
+            if selected is not None:
+                return await self._run_muteki(session, selected)
         if selected is not None and selected.solver_mode == "solver_v2":
             from app.solver.service import solver_runtime_service
 

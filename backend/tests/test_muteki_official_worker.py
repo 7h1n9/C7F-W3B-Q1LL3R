@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import threading
 from pathlib import Path
 from types import SimpleNamespace
@@ -10,8 +11,8 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.models import Base
-from app.models.multi_agent import EvidenceLedger
-from app.models.run import Artifact, SolveRun
+from app.models.multi_agent import AgentTask, AgentTaskResult, EvidenceLedger, VerifiedFact
+from app.models.run import Artifact, Observation, SolveRun, ToolCall
 from app.solver.muteki import (
     EngineProfile,
     MutekiCoordinator,
@@ -20,6 +21,7 @@ from app.solver.muteki import (
     MutekiWorkerPool,
 )
 from app.solver.muteki.adapter.official_evidence import SqlAlchemyOfficialEvidenceBridge
+from app.solver.muteki.outcomes import DeadEndKind, DeadEndSignal
 from app.solver.muteki.worker.official_worker import (
     OfficialWorkerAdapter,
     OfficialWorkerConfig,
@@ -756,6 +758,42 @@ def test_official_worker_empty_bridge_result_fails_closed(tmp_path, monkeypatch)
     assert result.evidence_refs == ()
 
 
+def test_official_worker_bridge_ingests_failed_dead_end_with_artifact(tmp_path, monkeypatch) -> None:
+    seen: list[str] = []
+    artifact_path = tmp_path / ".muteki-artifacts" / "chat-worker-1" / "http-evidence.json"
+    artifact_path.parent.mkdir(parents=True)
+    artifact_path.write_text('{"records":[{"method":"GET","url":"http://target/"}]}', encoding="utf-8")
+    dead_end = DeadEndSignal(
+        kind=DeadEndKind.ROUTE_DEAD_END,
+        reason="route rejected",
+    )
+
+    class Bridge:
+        async def ingest(self, *, run_id, worker_id, intent_id, result):
+            seen.append(result.status)
+            return ["evidence-dead-end"]
+
+    adapter = OfficialWorkerAdapter(evidence_bridge=Bridge())
+    monkeypatch.setattr(
+        adapter,
+        "_execute_sync",
+        lambda _job: OfficialWorkerResult(
+            False,
+            "ROUTE_DEAD_END",
+            "codex",
+            evidence_artifact_path=str(artifact_path),
+            dead_end_signal=dead_end,
+        ),
+    )
+
+    result = asyncio.run(adapter.execute(_job(tmp_path)))
+
+    assert seen == ["ROUTE_DEAD_END"]
+    assert result.success is False
+    assert result.dead_end_signal == dead_end
+    assert result.evidence_refs == ("evidence-dead-end",)
+
+
 def test_coordinator_rejects_native_success_without_evidence_reference() -> None:
     class Graph:
         def __init__(self):
@@ -956,6 +994,260 @@ def test_sqlalchemy_native_evidence_bridge_consumes_official_artifact(tmp_path) 
             # path; the graph never receives the source content.
             assert stored.exists()
             assert stored.read_text(encoding="utf-8") == "official artifact content"
+
+        await engine.dispose()
+
+    asyncio.run(run_case())
+
+
+def test_sqlalchemy_native_evidence_bridge_projects_structured_http_records(tmp_path) -> None:
+    async def run_case() -> None:
+        engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+        async with engine.begin() as connection:
+            await connection.run_sync(Base.metadata.create_all)
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        workspace = tmp_path / "workspace-structured"
+        workspace.mkdir()
+        native_artifact = workspace / ".muteki-artifacts" / "chat-worker-native" / "http-evidence.json"
+        native_artifact.parent.mkdir(parents=True)
+        records = [
+            {
+                "tool": "http_request",
+                "method": "GET",
+                "url": "http://target.test/first",
+                "status_code": 200,
+                "final_url": "http://target.test/first",
+                "headers": {"Content-Type": "text/html", "Set-Cookie": "session=secret-one"},
+                "body": "secret-body-one",
+            },
+            {
+                "tool": "http_session_request",
+                "method": "POST",
+                "url": "http://target.test/second",
+                "status_code": 403,
+                "final_url": "http://target.test/denied",
+                "headers": {"Content-Type": "application/json"},
+                "body": "secret-body-two",
+            },
+        ]
+        native_artifact.write_text(
+            json.dumps(
+                {
+                    "worker_id": "worker-native",
+                    "intent_id": "intent-native",
+                    "records": records,
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        async with factory() as session:
+            run = SolveRun(challenge_id="challenge-structured", workspace_path=str(workspace))
+            session.add(run)
+            await session.flush()
+            bridge = SqlAlchemyOfficialEvidenceBridge(session, run, workspace)
+            result = OfficialWorkerResult(
+                True,
+                "COMPLETED",
+                "codex",
+                evidence_artifact_path=str(native_artifact),
+                metadata={"num_turns": 2},
+            )
+            refs = await bridge.ingest(
+                run_id=str(run.id),
+                worker_id="worker-native",
+                intent_id="intent-native",
+                result=result,
+            )
+            repeated = await bridge.ingest(
+                run_id=str(run.id),
+                worker_id="worker-native",
+                intent_id="intent-native",
+                result=result,
+            )
+
+            assert refs == repeated
+            assert len(refs) == 2
+
+            tool_calls = list(
+                (
+                    await session.scalars(
+                        select(ToolCall).where(
+                            ToolCall.run_id == str(run.id),
+                            ToolCall.execution_layer == "muteki_native",
+                        )
+                    )
+                ).all()
+            )
+            tool_calls.sort(key=lambda item: item.arguments_json["record_index"])
+            artifacts = list(
+                (
+                    await session.scalars(
+                        select(Artifact).where(
+                            Artifact.run_id == str(run.id),
+                            Artifact.artifact_type == "muteki_native_http_record",
+                        )
+                    )
+                ).all()
+            )
+            observations = list(
+                (
+                    await session.scalars(
+                        select(Observation).where(
+                            Observation.run_id == str(run.id),
+                            Observation.observation_type == "MUTEKI_NATIVE_HTTP_OBSERVATION",
+                        )
+                    )
+                ).all()
+            )
+            evidence_rows = list(
+                (
+                    await session.scalars(
+                        select(EvidenceLedger).where(
+                            EvidenceLedger.run_id == str(run.id),
+                            EvidenceLedger.evidence_type == "MUTEKI_NATIVE_HTTP",
+                        )
+                    )
+                ).all()
+            )
+            tasks = list(
+                (
+                    await session.scalars(
+                        select(AgentTask).where(
+                            AgentTask.run_id == str(run.id),
+                            AgentTask.context_json["projection"].as_string()
+                            == "structured_http",
+                        )
+                    )
+                ).all()
+            )
+            task_results = list(
+                (
+                    await session.scalars(
+                        select(AgentTaskResult).where(
+                            AgentTaskResult.task_id == tasks[0].id,
+                        )
+                    )
+                ).all()
+            )
+            verified_facts = list(
+                (
+                    await session.scalars(
+                        select(VerifiedFact).where(VerifiedFact.run_id == str(run.id))
+                    )
+                ).all()
+            )
+
+            assert len(tool_calls) == 2
+            assert len(artifacts) == 2
+            assert len(observations) == 2
+            assert len(evidence_rows) == 2
+            assert len(tasks) == 1
+            assert len(task_results) == 1
+            assert verified_facts == []
+            assert set(task_results[0].evidence_ids_json) == set(refs)
+
+            artifacts_by_tool = {str(item.tool_call_id): item for item in artifacts}
+            observations_by_tool = {str(item.tool_call_id): item for item in observations}
+            evidence_by_tool = {str(item.tool_call_id): item for item in evidence_rows}
+            task_id = str(tasks[0].id)
+            for tool_call in tool_calls:
+                tool_call_id = str(tool_call.id)
+                artifact = artifacts_by_tool[tool_call_id]
+                observation = observations_by_tool[tool_call_id]
+                evidence = evidence_by_tool[tool_call_id]
+
+                assert artifact.tool_call_id == tool_call.id
+                assert evidence.artifact_id == artifact.id
+                assert evidence.tool_call_id == tool_call.id
+                assert evidence.agent_task_id == task_id
+                assert evidence.source_chain == [str(artifact.id), str(tool_call.id), task_id]
+                assert "headers" not in observation.facts_json
+                assert "body" not in observation.facts_json
+                assert "secret-body-one" not in json.dumps(observation.facts_json)
+                assert "secret-body-two" not in json.dumps(observation.facts_json)
+                stored = (workspace / artifact.file_path).read_text(encoding="utf-8")
+                assert "headers" in stored
+                assert "body" in stored
+
+            await session.refresh(run)
+            assert run.tool_call_count == 2
+            assert run.run_total_logical_tool_calls == 2
+            assert run.run_total_agent_steps == 2
+
+        await engine.dispose()
+
+    asyncio.run(run_case())
+
+
+def test_structured_http_projection_is_scoped_by_intent(tmp_path) -> None:
+    async def run_case() -> None:
+        engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+        async with engine.begin() as connection:
+            await connection.run_sync(Base.metadata.create_all)
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        workspace = tmp_path / "workspace-intents"
+        workspace.mkdir()
+        native_artifact = workspace / ".muteki-artifacts" / "http-evidence.json"
+        native_artifact.parent.mkdir()
+        native_artifact.write_text(
+            json.dumps(
+                {
+                    "records": [
+                        {
+                            "tool": "http_request",
+                            "method": "GET",
+                            "url": "http://target.test/shared",
+                            "status_code": 200,
+                            "final_url": "http://target.test/shared",
+                        }
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        async with factory() as session:
+            run = SolveRun(challenge_id="challenge-intents", workspace_path=str(workspace))
+            session.add(run)
+            await session.flush()
+            bridge = SqlAlchemyOfficialEvidenceBridge(session, run, workspace)
+            result = OfficialWorkerResult(
+                True,
+                "COMPLETED",
+                "codex",
+                evidence_artifact_path=str(native_artifact),
+            )
+
+            first = await bridge.ingest(
+                run_id=str(run.id),
+                worker_id="worker-native",
+                intent_id="intent-a",
+                result=result,
+            )
+            second = await bridge.ingest(
+                run_id=str(run.id),
+                worker_id="worker-native",
+                intent_id="intent-b",
+                result=result,
+            )
+
+            assert first != second
+            artifacts = list(
+                (
+                    await session.scalars(
+                        select(Artifact).where(
+                            Artifact.run_id == str(run.id),
+                            Artifact.artifact_type == "muteki_native_http_record",
+                        )
+                    )
+                ).all()
+            )
+            assert len(artifacts) == 2
+            assert {str(item.file_path).split("/")[3] for item in artifacts} == {
+                "intent-a",
+                "intent-b",
+            }
 
         await engine.dispose()
 

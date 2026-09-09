@@ -1,4 +1,8 @@
 import json
+import os
+import shutil
+import subprocess
+import time
 
 import httpx
 from fastapi import APIRouter, Depends
@@ -23,7 +27,16 @@ def read(item: ModelConfig) -> dict:
         "name": item.name,
         "provider_type": item.provider_type,
         "base_url": item.base_url,
+        "wire_api": (
+            (item.capabilities_json or {}).get("wire_api")
+            or ("responses" if item.provider_type == "codex_cli" and item.base_url else None)
+        ),
         "model_name": item.model_name,
+        "reasoning_effort": (
+            capabilities.get("reasoning_effort", "medium")
+            if item.provider_type == "codex_cli"
+            else None
+        ),
         "enabled": item.enabled,
         "api_key_configured": bool(item.encrypted_api_key),
         "action_protocol": item.action_protocol,
@@ -57,16 +70,21 @@ async def list_model_configs(session: AsyncSession = Depends(get_session)) -> di
 async def create_model_config(
     payload: ModelConfigWrite, session: AsyncSession = Depends(get_session)
 ) -> dict:
+    capabilities = {"roles": list(payload.roles)}
+    if payload.provider_type == "codex_cli":
+        capabilities["reasoning_effort"] = payload.reasoning_effort or "medium"
+        if payload.base_url:
+            capabilities["wire_api"] = payload.wire_api or "responses"
     item = ModelConfig(
         name=payload.name,
         provider_type=payload.provider_type,
-        base_url=str(payload.base_url).rstrip("/"),
+        base_url=str(payload.base_url).rstrip("/") if payload.base_url else None,
         model_name=payload.model_name,
-        encrypted_api_key=encrypt_api_key(payload.api_key or ""),
+        encrypted_api_key=encrypt_api_key(payload.api_key or "") if (payload.provider_type == "openai_compatible" or (payload.provider_type == "codex_cli" and payload.base_url)) else None,
         enabled=payload.enabled,
-        capabilities_json={"roles": list(payload.roles)},
+        capabilities_json=capabilities,
         **payload.model_dump(
-            exclude={"name", "provider_type", "base_url", "model_name", "api_key", "enabled", "roles"}
+            exclude={"name", "provider_type", "base_url", "wire_api", "model_name", "api_key", "enabled", "roles", "reasoning_effort"}
         ),
     )
     session.add(item)
@@ -85,22 +103,36 @@ async def update_model_config(
         raise DomainError(
             "MODEL_CONFIG_NOT_FOUND", "Model configuration not found.", status_code=404
         )
+    was_codex_cli = item.provider_type == "codex_cli"
     item.name, item.provider_type, item.base_url, item.model_name, item.enabled = (
         payload.name,
         payload.provider_type,
-        str(payload.base_url).rstrip("/"),
+        str(payload.base_url).rstrip("/") if payload.base_url else None,
         payload.model_name,
         payload.enabled,
     )
     capabilities = dict(item.capabilities_json or {})
     capabilities["roles"] = list(payload.roles)
+    if payload.provider_type == "codex_cli":
+        capabilities["reasoning_effort"] = payload.reasoning_effort or "medium"
+        if payload.base_url:
+            capabilities["wire_api"] = payload.wire_api or "responses"
+        else:
+            capabilities.pop("wire_api", None)
+    else:
+        capabilities.pop("reasoning_effort", None)
+        capabilities.pop("wire_api", None)
     item.capabilities_json = capabilities
     for key, value in payload.model_dump(
-        exclude={"name", "provider_type", "base_url", "model_name", "api_key", "enabled", "roles"}
+        exclude={"name", "provider_type", "base_url", "wire_api", "model_name", "api_key", "enabled", "roles", "reasoning_effort"}
     ).items():
         setattr(item, key, value)
-    if payload.api_key:
+    if payload.provider_type == "codex_cli" and not payload.base_url:
+        item.encrypted_api_key = None
+    elif payload.api_key:
         item.encrypted_api_key = encrypt_api_key(payload.api_key)
+    elif payload.provider_type == "codex_cli" and (not was_codex_cli or not item.encrypted_api_key):
+        item.encrypted_api_key = None
     await session.commit()
     return {"data": read(item)}
 
@@ -127,7 +159,6 @@ async def test_model_config(config_id: str, session: AsyncSession = Depends(get_
         raise DomainError(
             "MODEL_CONFIG_NOT_FOUND", "Model configuration not found.", status_code=404
         )
-    import time
 
     started = time.perf_counter()
     configured_roles = read(item)["roles"]
@@ -150,6 +181,91 @@ async def test_model_config(config_id: str, session: AsyncSession = Depends(get_
         "retry_after": None,
         "roles": configured_roles,
     }
+    if item.provider_type == "codex_cli":
+        capabilities["model"] = str(item.model_name or "")
+        capabilities["reasoning_effort"] = (item.capabilities_json or {}).get("reasoning_effort", "medium")
+        if item.base_url:
+            from muteki.solver.cli_driver import driver_for
+
+            api_key = decrypt_api_key(item.encrypted_api_key) if item.encrypted_api_key else ""
+            profile = {
+                "engine": "codex",
+                "transport": "codex_cli",
+                "credential_mode": "api",
+                "base_url": item.base_url,
+                "wire_api": (item.capabilities_json or {}).get("wire_api") or "responses",
+                "model": item.model_name or "",
+                "reasoning_effort": (item.capabilities_json or {}).get("reasoning_effort") or "medium",
+            }
+            probe_env = dict(os.environ)
+            probe_env["OPENAI_API_KEY"] = api_key
+            ok, detail = driver_for(profile).health_detail(env=probe_env)
+            capabilities.update(
+                {
+                    "reachable": ok,
+                    "normal_chat": ok,
+                    "cli_available": ok,
+                    "wire_api": str(profile["wire_api"]),
+                    "error_code": None if ok else "CODEX_CLI_ENDPOINT_UNAVAILABLE",
+                    "error": "" if ok else (detail or "Codex API endpoint probe failed")[:400],
+                    "latency": round((time.perf_counter() - started) * 1000),
+                    "latency_ms": round((time.perf_counter() - started) * 1000),
+                    "recommended_protocol": "codex_cli",
+                }
+            )
+            item.capabilities_json = capabilities
+            item.supports_json_schema = False
+            item.supports_json_object = False
+            item.supports_native_tool_call = True
+            item.last_test_at = __import__("datetime").datetime.now(__import__("datetime").UTC)
+            item.last_test_ok = ok
+            await session.commit()
+            return {"data": {"ok": ok, "message": "Codex API（Responses）能力测试完成" if ok else "Codex API 测试失败", "capabilities": capabilities}}
+        executable = os.environ.get("MUTEKI_CODEX_BIN", "").strip() or shutil.which("codex")
+        version = ""
+        error = ""
+        if executable:
+            try:
+                completed = subprocess.run(
+                    [executable, "--version"],
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    timeout=20,
+                    check=False,
+                )
+                version = (completed.stdout or completed.stderr or "").strip()[-300:]
+                capabilities["cli_available"] = completed.returncode == 0
+                if completed.returncode != 0:
+                    error = version or f"codex exited with {completed.returncode}"
+            except (OSError, subprocess.SubprocessError) as exc:
+                error = type(exc).__name__
+        else:
+            error = "codex executable not found"
+        capabilities.update(
+            {
+                "reachable": bool(executable and capabilities.get("cli_available")),
+                "normal_chat": bool(executable and capabilities.get("cli_available")),
+                "cli_executable": executable or "",
+                "cli_version": version,
+                "model": item.model_name,
+                "reasoning_effort": (item.capabilities_json or {}).get("reasoning_effort", "medium"),
+                "error_code": None if executable and capabilities.get("cli_available") else "CODEX_CLI_UNAVAILABLE",
+                "error": error,
+                "latency": round((time.perf_counter() - started) * 1000),
+                "latency_ms": round((time.perf_counter() - started) * 1000),
+                "recommended_protocol": "codex_cli",
+            }
+        )
+        item.capabilities_json = capabilities
+        item.supports_json_schema = False
+        item.supports_json_object = False
+        item.supports_native_tool_call = True
+        item.last_test_at = __import__("datetime").datetime.now(__import__("datetime").UTC)
+        item.last_test_ok = bool(capabilities["reachable"])
+        await session.commit()
+        return {"data": {"ok": item.last_test_ok, "message": "Codex CLI 能力测试完成", "capabilities": capabilities}}
     headers = {"Authorization": f"Bearer {decrypt_api_key(item.encrypted_api_key)}"}
     try:
         async with httpx.AsyncClient(timeout=item.request_timeout_seconds, trust_env=False) as client:

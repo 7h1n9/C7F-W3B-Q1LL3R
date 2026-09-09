@@ -63,7 +63,7 @@ async def test_backend_manifest_accepts_runner_mysql_metadata(monkeypatch: pytes
     run = SimpleNamespace(
         id="run-1",
         role_snapshot_json={"tools": ["http_request", "sql_boolean_compare", "mysql_metadata_discovery"]},
-        engine_type="codex_sdk",
+        engine_type="codex_cli",
     )
     attempt = SimpleNamespace(id="attempt-1", runtime_build_manifest_json={})
     challenge = SimpleNamespace(

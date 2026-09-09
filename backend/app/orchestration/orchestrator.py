@@ -14,11 +14,6 @@ from app.core.config import get_settings
 from app.core.database import SessionLocal
 from app.core.exceptions import DomainError
 from app.engines import (
-    BridgeConfigurationError,
-    BridgeRateLimitError,
-    BridgeUnavailableError,
-    CodexSdkEngine,
-    MockSolveEngine,
     ModelProviderError,
     ModelRateLimitError,
     ModelUnavailableError,
@@ -53,8 +48,6 @@ from app.services.action_fingerprint import fingerprint_action
 from app.services.action_quality import action_quality_gate, recovery_planner
 from app.services.attack_chain import classify_rejection
 from app.services.automation_policy import automation_policy_engine
-from app.services.codex_materializer import codex_materializer, logical_tool_budget_ref
-from app.services.codex_preflight import codex_preflight_service
 from app.services.context_builder import context_builder
 from app.services.crypto import decrypt_api_key
 from app.services.events import event_service
@@ -115,6 +108,18 @@ def _tool_rate_limit_status(payload: dict) -> int | None:
     return None
 
 
+def __logical_tool_budget_ref(payload: dict) -> str | None:
+    """Return one canonical budget key for a tool invocation event."""
+    logical_id = payload.get("logical_tool_call_id")
+    if logical_id:
+        return f"logical:{logical_id}"
+    tool_name = str(payload.get("tool") or "")
+    if tool_name.startswith("ctfctl."):
+        return None
+    tool_ref = payload.get("tool_call_id")
+    return f"legacy:{tool_ref}" if tool_ref else None
+
+
 class SolveOrchestrator:
     def __init__(self, engine_factory=None) -> None:
         self.engine_factory = engine_factory
@@ -161,33 +166,6 @@ class SolveOrchestrator:
     async def build_engine(self, run: SolveRun, session, attempt=None, lease=None) -> object:
         if self.engine_factory:
             return self.engine_factory(run)
-        if run.engine_type == "codex_sdk":
-            challenge = await session.get(Challenge, run.challenge_id)
-            return CodexSdkEngine(
-                get_settings().codex_bridge_url,
-                run.workspace_path,
-                # MCP credentials are bound to the Attempt/Lease at thread
-                # creation. A persisted thread belongs to an older attempt
-                # and must never be resumed with a new lease.
-                thread_id=None,
-                scope={
-                    "run_id": run.id,
-                    "challenge_id": run.challenge_id,
-                    "workspace_root": run.workspace_path,
-                    "allowed_hosts": list(challenge.allowed_hosts or []) if challenge else [],
-                    "attempt_id": attempt.id if attempt else None,
-                    "lease_token": lease.lease_token if lease else None,
-                    "master_lease_token": lease.lease_token if lease else None,
-                    # multi_agent_v1 owns the tool loop in the backend.  The
-                    # role model only emits a contract/RoleAction and must
-                    # never depend on an MCP catalog or preflight cache.
-                    "execution_mode": "controller_tool_loop",
-                    "mcp_enabled": False,
-                    "mcp_required": False,
-                    "recovery_checkpoint": run.recovery_checkpoint_json or {},
-                    "available_tools": [],
-                },
-            )
         if run.engine_type == "openai_compatible":
             config = (
                 await session.get(ModelConfig, run.model_config_id) if run.model_config_id else None
@@ -206,7 +184,7 @@ class SolveOrchestrator:
                 retry_base_seconds=config.retry_base_seconds,
                 rate_limit_cooldown_seconds=config.rate_limit_cooldown_seconds,
             )
-        return MockSolveEngine()
+        raise ValueError(f"unsupported engine type: {run.engine_type}")
 
     async def _transition(self, session, run: SolveRun, target: RunStatus) -> None:
         if RunStatus(run.status) == target:
@@ -634,8 +612,6 @@ class SolveOrchestrator:
                 if not run:
                     return
                 await run_finalizer.reconcile(session, run)
-                if run.engine_type == "codex_sdk" and run.solver_mode != "multi_agent_v1":
-                    await solver_state_service.ensure_confirmed_boolean_checkpoint(session, run)
                 try:
                     existing_lease = await session.scalar(
                         select(RunExecutionLease).where(RunExecutionLease.run_id == run.id)
@@ -666,8 +642,8 @@ class SolveOrchestrator:
                             "attempt.tool_manifest_refreshed",
                             {"manifest_id": manifest.id, "manifest_sha256": manifest.manifest_sha256, "missing_expected_tools": manifest.missing_expected_tools},
                         )
-                        if attempt.tool_manifest_status == "DRIFT" and run.engine_type == "codex_sdk":
-                            await event_service.append(session, run.id, "run.configuration_blocked", {"code": "TOOL_CATALOG_DRIFT", "missing_expected_tools": manifest.missing_expected_tools, "action": "restart_backend_runner_bridge"})
+                        if attempt.tool_manifest_status == "DRIFT":
+                            await event_service.append(session, run.id, "run.configuration_blocked", {"code": "TOOL_CATALOG_DRIFT", "missing_expected_tools": manifest.missing_expected_tools, "action": "restart_backend_runner"})
                             return
                     heartbeat_task = asyncio.create_task(self._lease_heartbeat_loop(run.id, attempt.id, lease.id))
                     if run.status == RunStatus.PAUSED_DEPLOYMENT:
@@ -700,7 +676,7 @@ class SolveOrchestrator:
                             {"code": "DATABASE_ERROR", "message": str(error)[:1000]},
                         )
                     return
-                if run.status == RunStatus.CREATED and run.engine_type != "mock":
+                if run.status == RunStatus.CREATED:
                     try:
                         await runner_client.sync_workspace(run.id, Path(run.workspace_path))
                     except Exception as error:
@@ -728,27 +704,29 @@ class SolveOrchestrator:
                 if "run" in locals() and RunStatus(run.status) not in TERMINAL:
                     if isinstance(error, ModelRateLimitError):
                         code = "MODEL_RATE_LIMITED"
-                    elif isinstance(error, BridgeRateLimitError):
-                        code = "CODEX_BRIDGE_RATE_LIMITED"
                     elif isinstance(error, ModelUnavailableError):
                         code = "MODEL_UNAVAILABLE"
                     elif isinstance(error, ModelProviderError):
                         code = error.code
-                    elif isinstance(error, BridgeConfigurationError):
-                        code = error.code
-                    elif isinstance(error, BridgeUnavailableError):
-                        code = "CODEX_STREAM_INTERRUPTED"
                     elif isinstance(error, DomainError):
                         code = error.code
                     else:
                         code = "ENGINE_ERROR"
                     run.last_error_code, run.last_error_message = code, str(error)[:4000]
-                    target = RunStatus.PAUSED_RATE_LIMIT if isinstance(error, ModelRateLimitError) else RunStatus.PAUSED_RECOVERY if isinstance(error, BridgeUnavailableError) or code == "CODEX_STREAM_INTERRUPTED" else RunStatus.WAITING_CONFIGURATION if isinstance(error, (BridgeConfigurationError, DomainError) and code == "RUN_CONFIGURATION_BLOCKED") else RunStatus.FAILED_ENGINE
+                    target = (
+                        RunStatus.PAUSED_RATE_LIMIT
+                        if isinstance(error, ModelRateLimitError)
+                        else RunStatus.WAITING_CONFIGURATION
+                        if isinstance(error, DomainError) and code == "RUN_CONFIGURATION_BLOCKED"
+                        else RunStatus.FAILED_ENGINE
+                    )
                     await self._transition(session, run, target)
                     await event_service.append(
                         session,
                         run_id,
-                        "run.paused_recovery" if isinstance(error, BridgeUnavailableError) or code == "CODEX_STREAM_INTERRUPTED" else "run.configuration_blocked" if isinstance(error, BridgeConfigurationError) or code == "RUN_CONFIGURATION_BLOCKED" else "run.failed",
+                        "run.configuration_blocked"
+                        if isinstance(error, DomainError) and code == "RUN_CONFIGURATION_BLOCKED"
+                        else "run.failed",
                         {"code": code, "message": str(error)[:1000]},
                     )
             finally:
@@ -1709,7 +1687,7 @@ class SolveOrchestrator:
         seen_tool_refs = {
             tool_ref
             for event in existing_events
-            if (tool_ref := logical_tool_budget_ref(event.payload_json or {}))
+            if (tool_ref := _logical_tool_budget_ref(event.payload_json or {}))
         }
         max_tool_calls = max(1, int(run.max_tool_calls or 1))
         existing_tool_count = max(
@@ -1750,7 +1728,7 @@ class SolveOrchestrator:
             )
             async for item in iterator:
                 if item.event_type in {"tool.requested", "tool.started", "tool.completed", "tool.failed"}:
-                    tool_ref = logical_tool_budget_ref(item.payload)
+                    tool_ref = _logical_tool_budget_ref(item.payload)
                     if tool_ref:
                         if tool_ref not in seen_tool_refs:
                             if len(turn_tool_refs) >= max_tools_per_turn:
@@ -1908,7 +1886,6 @@ class SolveOrchestrator:
                         return
             run.active_turn_id = None
             await session.commit()
-            await codex_materializer.sync(session, run)
             interval = max(1, int(run.agent_checkpoint_interval or 30))
             if run.agent_step_count and run.agent_step_count % interval == 0:
                 await self._transition(session, run, RunStatus.PAUSED_CHECKPOINT)
@@ -1971,8 +1948,6 @@ class SolveOrchestrator:
                 )
                 continue
             if current_status in TERMINAL or current_status in {RunStatus.WAITING_USER, RunStatus.WAITING_CONFIGURATION}:
-                return
-            if run.engine_type != "codex_sdk":
                 return
             if auto_turns >= max_auto_turns:
                 await self._transition(session, run, RunStatus.WAITING_USER)

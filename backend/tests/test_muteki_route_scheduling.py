@@ -50,6 +50,50 @@ def test_multi_engine_race_assigns_complementary_lanes(tmp_path) -> None:
     }
 
 
+def test_healthy_multi_engine_race_starts_all_engines_concurrently(tmp_path) -> None:
+    graph = MutekiGraph(tmp_path / "race-concurrency.sqlite", challenge_id="race-concurrency")
+    active = 0
+    max_active = 0
+    started: list[str] = []
+    release = asyncio.Event()
+
+    async def external_runner(job):
+        nonlocal active, max_active
+        started.append(job.engine_id)
+        active += 1
+        max_active = max(max_active, active)
+        try:
+            await release.wait()
+        finally:
+            active -= 1
+
+    async def scenario() -> None:
+        pool = MutekiWorkerPool(
+            graph,
+            lambda _job: None,
+            max_workers=2,
+            external_runner=external_runner,
+        )
+        coordinator = MutekiCoordinator(
+            graph,
+            MutekiReason(),
+            pool,
+            [EngineProfile("codex"), EngineProfile("openai-compatible:test")],
+            config={"max_workers": 2},
+        )
+        race = asyncio.create_task(coordinator._race())
+        for _ in range(50):
+            if len(started) == 2:
+                break
+            await asyncio.sleep(0.01)
+        assert started == ["codex", "openai-compatible:test"]
+        assert max_active == 2
+        release.set()
+        await race
+
+    asyncio.run(scenario())
+
+
 def test_profile_selection_rotates_fairly(tmp_path) -> None:
     graph = MutekiGraph(tmp_path / "fair.sqlite", challenge_id="fair")
     pool = MutekiWorkerPool(graph, lambda _job: None, max_workers=1)

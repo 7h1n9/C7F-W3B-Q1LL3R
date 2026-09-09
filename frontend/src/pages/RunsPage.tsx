@@ -137,7 +137,6 @@ export function RunsPage() {
             {
               title: "引擎",
               dataIndex: "engine_type",
-              render: (engine: string) => (engine === "mock" ? "模拟引擎" : engine),
             },
             {
               title: "架构",
@@ -168,6 +167,15 @@ export function RunsPage() {
             },
             { title: "启动时间", dataIndex: "started_at", render: formatTime },
             { title: "结束时间", dataIndex: "finished_at", render: formatTime },
+            {
+              title: "评分",
+              render: (_, run) =>
+                run.score?.total_score !== undefined && run.score?.total_score !== null ? (
+                  <span className="id-code">{Number(run.score.total_score).toFixed(1)}</span>
+                ) : (
+                  "—"
+                ),
+            },
             {
               title: "操作",
               render: (_, run) => (

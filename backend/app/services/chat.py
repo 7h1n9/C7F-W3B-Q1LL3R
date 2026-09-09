@@ -107,7 +107,13 @@ class ChatService:
                 status_code=422,
             )
         config = await session.get(ModelConfig, conversation.model_config_id)
-        if not config or not config.enabled or not config.base_url or not config.model_name:
+        if (
+            not config
+            or not config.enabled
+            or config.provider_type == "codex_cli"
+            or not config.base_url
+            or not config.model_name
+        ):
             raise DomainError(
                 "CHAT_MODEL_UNAVAILABLE",
                 "The selected model configuration is unavailable.",

@@ -1,16 +1,15 @@
 param(
     [switch]$SkipDocker,
-    [switch]$UseMockCodex,
     [switch]$Restart,
     [switch]$Install,
     [int]$BackendPort = 8000,
     # Kept for compatibility with existing callers. Muteki runs do not start
     # or probe the legacy Kali Runner.
     [int]$RunnerPort = 8091,
-    [int]$BridgePort = 8090,
     [int]$FrontendPort = 5173,
     [string]$DatabaseUrl = "",
-    [string]$RunnerUrl = "http://192.168.236.128:8091"
+    [string]$RunnerUrl = "http://192.168.236.128:8091",
+    [string]$MutekiWorkerImage = "muteki-worker:codex-0.147.0"
 )
 
 $ErrorActionPreference = "Stop"
@@ -21,7 +20,6 @@ $activateScript = Join-Path $venvDir "Scripts\Activate.ps1"
 $pythonExe = Join-Path $venvDir "Scripts\python.exe"
 $backendDir = Join-Path $repoRoot "backend"
 $frontendDir = Join-Path $repoRoot "frontend"
-$bridgeDir = Join-Path $repoRoot "codex-bridge"
 $logsRoot = Join-Path $repoRoot "logs\services"
 $pidsRoot = Join-Path $repoRoot "data\pids"
 
@@ -254,7 +252,6 @@ function Start-BackgroundService {
 $runnerToken = "development-runner-token"
 $frontendApiBase = "http://127.0.0.1:$BackendPort/api/v1"
 $backendRunnerUrl = $RunnerUrl.TrimEnd('/')
-$backendBridgeUrl = "http://127.0.0.1:$BridgePort"
 $backendCorsOrigins = "http://localhost:5173,http://127.0.0.1:5173"
 $backendEncryptionKey = "development-only-change-me"
 $ctfctlAccessKey = "development-ctfctl-access-key"
@@ -306,14 +303,12 @@ Set-EnvValue -Name "APP_DATABASE_URL" -Value $databaseUrl
 Set-EnvValue -Name "APP_WORKSPACE_ROOT" -Value "../data/workspaces"
 Set-EnvValue -Name "APP_RUNNER_URL" -Value $backendRunnerUrl
 Set-EnvValue -Name "APP_RUNNER_API_TOKEN" -Value $runnerToken
-Set-EnvValue -Name "APP_CODEX_BRIDGE_URL" -Value $backendBridgeUrl
 Set-EnvValue -Name "APP_CORS_ORIGINS" -Value $backendCorsOrigins
 Set-EnvValue -Name "APP_ENCRYPTION_KEY" -Value $backendEncryptionKey
 Set-EnvValue -Name "APP_CTFCTL_INTERNAL_ACCESS_KEY" -Value $ctfctlAccessKey
 Set-EnvValue -Name "APP_ALLOWED_SERVICE_CIDRS" -Value $backendAllowedCidrs
 Set-EnvValue -Name "APP_ENVIRONMENT" -Value "development"
 Set-EnvValue -Name "CTFCTL_BACKEND_URL" -Value "http://127.0.0.1:$BackendPort"
-Set-EnvValue -Name "CODEX_BRIDGE_URL" -Value "http://127.0.0.1:$BridgePort"
 Set-EnvValue -Name "BACKEND_HOST" -Value "127.0.0.1"
 Set-EnvValue -Name "BACKEND_PORT" -Value "$BackendPort"
 # Official Muteki RCP: the run-scoped Worker container dials the host control
@@ -321,6 +316,7 @@ Set-EnvValue -Name "BACKEND_PORT" -Value "$BackendPort"
 # authorization remains the per-run token handshake, not an open worker port.
 Set-EnvValue -Name "MUTEKI_CONTROL_BIND" -Value "0.0.0.0"
 Set-EnvValue -Name "MUTEKI_CONTROL_PORT" -Value "9100"
+Set-EnvValue -Name "MUTEKI_WORKER_IMAGE" -Value $MutekiWorkerImage
 
 Set-EnvValue -Name "RUNNER_WORKSPACE_ROOT" -Value "../data/workspaces"
 Set-EnvValue -Name "RUNNER_MAX_OUTPUT_BYTES" -Value "1048576"
@@ -328,9 +324,6 @@ Set-EnvValue -Name "RUNNER_JOB_TIMEOUT_SECONDS" -Value "30"
 Set-EnvValue -Name "RUNNER_API_TOKEN" -Value $runnerToken
 Set-EnvValue -Name "RUNNER_ENVIRONMENT" -Value "development"
 
-Set-EnvValue -Name "CODEX_BRIDGE_PORT" -Value "$BridgePort"
-Set-EnvValue -Name "CODEX_MODEL" -Value "gpt-5.6-luna"
-Set-EnvValue -Name "CODEX_MOCK_MODE" -Value ($(if ($UseMockCodex) { "true" } else { "false" }))
 Set-EnvValue -Name "CTFCTL_ACCESS_KEY" -Value $ctfctlAccessKey
 Set-EnvValue -Name "VITE_API_BASE_URL" -Value $frontendApiBase
 
@@ -356,10 +349,6 @@ if (-not (Test-Path (Join-Path $frontendDir "node_modules"))) {
     Invoke-CommandInDirectory -Name "frontend deps" -WorkingDirectory $frontendDir -Command $npmExe -Arguments @("install")
 }
 
-if (-not (Test-Path (Join-Path $bridgeDir "node_modules"))) {
-    Invoke-CommandInDirectory -Name "bridge deps" -WorkingDirectory $bridgeDir -Command $npmExe -Arguments @("install")
-}
-
 Write-Host "[migrate] applying backend migrations..."
 Invoke-CommandInDirectory -Name "backend migrate" -WorkingDirectory $backendDir -Command $pythonExe -Arguments @("-m", "alembic", "upgrade", "head")
 
@@ -368,7 +357,6 @@ Invoke-CommandInDirectory -Name "backend migrate" -WorkingDirectory $backendDir 
 # but Start-All must not install, start, stop, or health-check that service.
 Write-Host "[runner] legacy Kali Runner is optional and not managed by Start-All."
 Start-BackgroundService -Name "backend" -Port $BackendPort -WorkingDirectory $backendDir -Command $pythonExe -Arguments @("-m", "uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", "$BackendPort") -HealthyUri "http://127.0.0.1:$BackendPort/api/v1/health/ready" -ProcessPattern "app\.main:app.*--port\s+$BackendPort"
-Start-BackgroundService -Name "bridge" -Port $BridgePort -WorkingDirectory $bridgeDir -Command $npmExe -Arguments @("run", "dev") -HealthyUri "http://127.0.0.1:$BridgePort/health" -ProcessPattern "codex-bridge.*(dist[\\/]server\.js|src[\\/]server\.ts)"
 
 Start-BackgroundService -Name "frontend" -Port $FrontendPort -WorkingDirectory $frontendDir -Command $npmExe -Arguments @("run", "dev", "--", "--host", "127.0.0.1", "--port", "$FrontendPort") -HealthyUri "http://127.0.0.1:$FrontendPort" -ProcessPattern "frontend[\\/]node_modules.*vite"
 
@@ -377,7 +365,6 @@ Write-Host "[state]"
 Write-Host "  docker mysql : $([bool]$dockerUsed)"
 Write-Host "  backend      : http://127.0.0.1:$BackendPort/api/v1/health/ready"
 Write-Host "  runner       : optional legacy service (not managed)"
-Write-Host "  bridge       : http://127.0.0.1:$BridgePort/health"
 Write-Host "  frontend     : http://127.0.0.1:$FrontendPort"
 Write-Host "  logs         : $logsRoot"
 Stop-Transcript | Out-Null

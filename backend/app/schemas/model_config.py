@@ -1,15 +1,20 @@
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, HttpUrl
+from pydantic import BaseModel, ConfigDict, Field, HttpUrl, model_validator
+
+ReasoningEffort = Literal["none", "low", "medium", "high", "xhigh", "max", "ultra"]
+WireApi = Literal["responses", "chat_completions"]
 
 
 class ModelConfigWrite(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="ignore")
 
     name: str = Field(min_length=1, max_length=200)
-    provider_type: str = Field(default="openai_compatible", pattern="^openai_compatible$")
-    base_url: HttpUrl
-    model_name: str = Field(min_length=1, max_length=255)
+    provider_type: Literal["openai_compatible", "codex_cli"] = "openai_compatible"
+    base_url: HttpUrl | None = None
+    wire_api: WireApi | None = None
+    model_name: str = Field(min_length=1, max_length=255, pattern=r"^\S+$")
+    reasoning_effort: ReasoningEffort | None = None
     api_key: str | None = Field(default=None, min_length=1, max_length=1000)
     enabled: bool = True
     roles: list[Literal["worker", "coordinator_reason"]] = Field(default_factory=lambda: ["worker"], max_length=2)
@@ -24,6 +29,23 @@ class ModelConfigWrite(BaseModel):
     requests_per_minute: int = Field(default=60, ge=1, le=10000)
     max_concurrency: int = Field(default=2, ge=1, le=32)
     context_token_limit: int = Field(default=128000, ge=1024, le=1000000)
+
+    @model_validator(mode="after")
+    def validate_provider_contract(self) -> "ModelConfigWrite":
+        if self.provider_type == "openai_compatible" and self.base_url is None:
+            raise ValueError("openai_compatible model requires base_url")
+        if self.provider_type == "codex_cli" and any(role != "worker" for role in self.roles):
+            raise ValueError("codex_cli models are Worker-only")
+        if self.provider_type == "codex_cli" and self.reasoning_effort is None:
+            self.reasoning_effort = "medium"
+        if self.provider_type == "codex_cli":
+            if self.base_url is not None and self.api_key is None:
+                raise ValueError("codex_cli API endpoint requires api_key")
+            if self.base_url is not None and self.wire_api is None:
+                self.wire_api = "responses"
+        else:
+            self.wire_api = None
+        return self
 
 
 class ModelConfigUpdate(ModelConfigWrite):

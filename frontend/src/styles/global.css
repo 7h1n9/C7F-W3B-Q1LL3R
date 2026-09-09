@@ -109,6 +109,20 @@ body::before { position: fixed; inset: 0; z-index: -1; content: ""; opacity: .58
 .muteki-usage-row strong, .muteki-usage-row small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .muteki-usage-row small { margin-top: 2px; color: #91aea8; font-size: 9px; }
 .muteki-usage-empty { padding: 10px 12px; color: #91aea8; font-size: 10px; }
+.muteki-score-card { margin-top: 14px; background: #ffffffdc !important; border: 1px solid #c8ece5 !important; border-radius: 12px !important; box-shadow: 0 8px 22px rgba(16, 109, 96, .08); }
+.muteki-score-card .ant-card-head { min-height: 46px; padding: 0 18px; background: linear-gradient(90deg, #ffffffa6, #f2fffbaa); border-bottom-color: #d7eee9; }
+.muteki-score-card .ant-card-head-title { color: #145b52; font-weight: 700; }
+.muteki-score-grid { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 10px; }
+.muteki-score-total { display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 10px 6px; color: #0b574c; background: linear-gradient(135deg, #e8fff8, #c9f6e9); border: 1px solid #b5ecdd; border-radius: 9px; }
+.muteki-score-total strong { font-size: 26px; line-height: 1.1; color: #066b58; }
+.muteki-score-total span { margin-top: 3px; color: #5f8b82; font-size: 11px; }
+.muteki-score-metric { display: flex; flex-direction: column; justify-content: center; min-width: 0; padding: 8px 10px; background: #f6fffc; border: 1px solid #d9f1ea; border-radius: 9px; }
+.muteki-score-metric span { color: #6f938b; font-size: 11px; }
+.muteki-score-metric strong { margin: 3px 0 1px; overflow: hidden; color: #104f46; font-size: 15px; text-overflow: ellipsis; white-space: nowrap; }
+.muteki-score-metric small { color: #9bb2ad; font-size: 10px; }
+.muteki-score-empty { margin-top: 10px; padding: 8px 10px; color: #a06a18; font-size: 12px; background: #fff6e3; border: 1px solid #f1dfae; border-radius: 8px; }
+.muteki-score-reason { display: flex; gap: 10px; margin-top: 10px; padding: 9px 12px; color: #4b6f68; font-size: 12px; line-height: 1.7; background: #f2fffb; border: 1px solid #d5f0e8; border-radius: 9px; }
+.muteki-score-reason span { flex: none; color: #0d806c; font-weight: 700; }
 .muteki-status-main { grid-column: 1 / -1; display: flex; align-items: center; gap: 9px; min-height: 44px; padding: 8px 13px; border-bottom: 1px solid #dcefe9; }
 .muteki-stat { display: flex; align-items: center; gap: 9px; min-height: 62px; padding: 10px 13px; border-right: 1px solid #dcefe9; }
 .muteki-status-main { flex-wrap: wrap; color: #2b665d; }

@@ -1,4 +1,4 @@
-import type { ApiEnvelope, Challenge, ChallengeConversation, ChallengeMessage, FlagCandidate, ModelConfig, MutekiGraphState, MutekiBoardSemantic, RunDiagnostics, RunEvent, RunHealth, RunUsage, RunUserInput, Skill, SolveRun, SolverState } from "../types/api";
+import type { ApiEnvelope, Challenge, ChallengeConversation, ChallengeMessage, ChallengePrediction, FlagCandidate, ModelConfig, MutekiGraphState, MutekiBoardSemantic, RunDiagnostics, RunEvent, RunHealth, RunScore, RunUsage, RunUserInput, Skill, SolveRun, SolverState } from "../types/api";
 
 const base = import.meta.env.VITE_API_BASE_URL ?? "/api/v1";
 const runEventTypes = [
@@ -26,6 +26,7 @@ const runEventTypes = [
   "muteki.coordinator_directive", "muteki.operator_directive", "muteki.operator_directive_status",
   "muteki.hitl_classified", "muteki.intent_state_changed", "muteki.graph_compacted",
   "cost.update", "muteki.cost.update",
+  "run.score.computed",
 ];
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   let response: Response;
@@ -85,9 +86,23 @@ export const api = {
     }
     return { filename: response.headers.get("content-disposition")?.match(/filename="([^"]+)"/)?.[1] ?? `muteki-${id}-answer-poc.md`, content: await response.text() };
   },
+  downloadMutekiPocBundle: async (id: string) => {
+    const response = await fetch(`${base}/runs/${id}/muteki-poc/download`);
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({}));
+      throw new Error(error.message || `PoC 包导出失败（HTTP ${response.status}）`);
+    }
+    return {
+      filename: response.headers.get("content-disposition")?.match(/filename="([^"]+)"/)?.[1] ?? `muteki-${id}-poc.zip`,
+      blob: await response.blob(),
+    };
+  },
   getRunDiagnostics: (id: string) => request<RunDiagnostics>(`/runs/${id}/diagnostics`),
   getRunHealth: (id: string) => request<RunHealth>(`/runs/${id}/health`),
   getRunUsage: (id: string) => request<RunUsage>(`/runs/${id}/usage`),
+  getRunScore: (id: string) => request<RunScore | null>(`/runs/${id}/score`),
+  getChallengePrediction: (id: string) => request<ChallengePrediction | null>(`/challenges/${id}/prediction`),
+  refreshChallengePrediction: (id: string) => request<ChallengePrediction>(`/challenges/${id}/predictions`, { method: "POST" }),
   listRunDiagnostics: (limit = 25) => request<Array<{ run_id: string } & RunDiagnostics>>(`/diagnostics/runs?limit=${limit}`),
   createRun: (challengeId: string, payload: Record<string, unknown>) => request<SolveRun>(`/challenges/${challengeId}/runs`, { method: "POST", body: JSON.stringify(payload) }),
   startRun: (id: string) => request<{ run_id: string; status: string }>(`/runs/${id}/start`, { method: "POST" }),
@@ -100,8 +115,8 @@ export const api = {
   updateModelConfig: (id: string, payload: Record<string, unknown>) => request<unknown>(`/model-configs/${id}`, { method: "PUT", body: JSON.stringify(payload) }),
   deleteModelConfig: (id: string) => request<void>(`/model-configs/${id}`, { method: "DELETE" }),
   testModelConfig: (id: string) => request<{ ok: boolean; message: string }>(`/model-configs/${id}/test`, { method: "POST" }),
-  getSystemSettings: () => request<{ runner_url: string; runner_allowed_cidrs: string; runner_token_configured: boolean; runner: { reachable: boolean; details: Record<string, unknown> | string }; codex_bridge_url: string; codex_bridge: { reachable: boolean; details: Record<string, unknown> | string } }>("/system-settings"),
-  updateSystemSettings: (payload: { runner_url: string; codex_bridge_url: string }) => request<unknown>("/system-settings", { method: "PUT", body: JSON.stringify(payload) }),
+  getSystemSettings: () => request<{ runner_url: string; runner_allowed_cidrs: string; runner_token_configured: boolean; runner: { reachable: boolean; details: Record<string, unknown> | string } }>("/system-settings"),
+  updateSystemSettings: (payload: { runner_url: string }) => request<unknown>("/system-settings", { method: "PUT", body: JSON.stringify(payload) }),
   getToolCalls: (id: string) => request<Array<Record<string, unknown>>>(`/runs/${id}/tool-calls`),
   getObservations: (id: string) => request<Array<Record<string, unknown>>>(`/runs/${id}/observations`),
   getArtifacts: (id: string) => request<Array<{ id: string; path: string; type: string; summary: string; size: number }>>(`/runs/${id}/artifacts`),

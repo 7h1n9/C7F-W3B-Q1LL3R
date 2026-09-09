@@ -1,7 +1,5 @@
 param(
     [int]$BackendPort = 8000,
-    [int]$RunnerPort = 8091,
-    [int]$BridgePort = 8090,
     [int]$FrontendPort = 5173
 )
 
@@ -10,9 +8,7 @@ $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $pidsRoot = Join-Path $repoRoot "data\pids"
 $services = @{
     backend = @{ Port = $BackendPort; Pattern = "app\.main:app.*--port\s+$BackendPort" }
-    bridge = @{ Port = $BridgePort; Pattern = "codex-bridge.*(dist[\\/]server\.js|src[\\/]server\.ts)" }
     frontend = @{ Port = $FrontendPort; Pattern = "frontend[\\/]node_modules.*vite" }
-    runner = @{ Port = $RunnerPort; Pattern = "app\.main:app.*--port\s+$RunnerPort" }
 }
 
 function Get-Listeners([int]$Port) {
@@ -42,7 +38,7 @@ function Stop-ServiceTree([string]$Name, [int]$Port, [string]$Pattern) {
     if (Test-Path -LiteralPath $pidPath) { Remove-Item -LiteralPath $pidPath -Force -ErrorAction SilentlyContinue }
 }
 
-foreach ($name in @("backend", "bridge", "frontend", "runner")) {
+foreach ($name in @("backend", "frontend")) {
     $item = $services[$name]
     Stop-ServiceTree $name $item.Port $item.Pattern
 }

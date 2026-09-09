@@ -3,13 +3,51 @@ export interface Skill { id: string; name: string; display_name: string; descrip
 export interface ChallengeConversation { id: string; challenge_id: string; model_config_id?: string | null; title: string; status: string; created_at: string; updated_at: string }
 export interface ChallengeMessage { id: string; conversation_id: string; role: "user" | "assistant" | "system"; content: string; status: string; error_message?: string | null; created_at: string }
 export type SolverMode = "single_agent" | "multi_agent_v1" | "solver_v2" | "muteki";
-export interface WorkerEngineSelection { engine_type: "mock" | "codex_sdk" | "openai_compatible"; engine_id?: string; model_config_id?: string | null }
-export interface ModelConfig { id: string; name: string; provider_type: string; base_url?: string; model_name?: string; enabled: boolean; api_key_configured: boolean; roles?: Array<"worker" | "coordinator_reason">; action_protocol?: string; structured_output_mode?: string; request_timeout_seconds?: number; max_output_tokens?: number; temperature?: number; max_retries?: number; retry_base_seconds?: number; rate_limit_cooldown_seconds?: number; requests_per_minute?: number; max_concurrency?: number; context_token_limit?: number; capabilities?: Record<string, unknown>; last_test_at?: string | null; last_test_ok?: boolean | null }
-export interface SolveRun { id: string; challenge_id: string; challenge_name?: string | null; title?: string | null; challenge_type?: string | null; target_summary?: string | null; engine_type: string; solver_mode: SolverMode; model_config_id?: string | null; model_name?: string | null; reason_model_config_id?: string | null; reason_model_name?: string | null; worker_engines?: WorkerEngineSelection[]; role_name?: string | null; role_version?: string | null; role_snapshot_json: Record<string, unknown>; status: string; current_phase: string; workspace_path: string; max_agent_steps: number; max_tool_calls: number; max_context_observations: number; max_runtime_seconds: number; max_total_runtime_seconds?: number; agent_checkpoint_interval?: number; context_revision?: number; infrastructure_retry_count?: number; agent_step_count: number; tool_call_count: number; run_total_agent_steps?: number; run_total_logical_tool_calls?: number; attempt_agent_steps?: number; attempt_logical_tool_calls?: number; checkpoint_segment_steps?: number; current_attempt_number?: number; last_error_code?: string | null; last_error_message?: string | null; active_skill_names?: string[]; diagnostic_tags?: string[]; diagnostic_summary?: string | null; started_at?: string | null; finished_at?: string | null; created_at: string; updated_at: string }
+export interface WorkerEngineSelection { engine_type: "codex_cli" | "openai_compatible"; engine_id?: string; model_config_id?: string | null }
+export interface ModelConfig { id: string; name: string; provider_type: "openai_compatible" | "codex_cli" | string; base_url?: string | null; wire_api?: "responses" | "chat_completions" | null; model_name?: string; reasoning_effort?: "none" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra" | null; enabled: boolean; api_key_configured: boolean; roles?: Array<"worker" | "coordinator_reason">; action_protocol?: string; structured_output_mode?: string; request_timeout_seconds?: number; max_output_tokens?: number; temperature?: number; max_retries?: number; retry_base_seconds?: number; rate_limit_cooldown_seconds?: number; requests_per_minute?: number; max_concurrency?: number; context_token_limit?: number; capabilities?: Record<string, unknown>; last_test_at?: string | null; last_test_ok?: boolean | null }
+export interface SolveRun { id: string; challenge_id: string; challenge_name?: string | null; title?: string | null; challenge_type?: string | null; target_summary?: string | null; engine_type: string; solver_mode: SolverMode; model_config_id?: string | null; model_name?: string | null; reason_model_config_id?: string | null; reason_model_name?: string | null; worker_engines?: WorkerEngineSelection[]; role_name?: string | null; role_version?: string | null; role_snapshot_json: Record<string, unknown>; status: string; current_phase: string; workspace_path: string; max_agent_steps: number; max_tool_calls: number; max_context_observations: number; max_runtime_seconds: number; max_total_runtime_seconds?: number; agent_checkpoint_interval?: number; context_revision?: number; infrastructure_retry_count?: number; agent_step_count: number; tool_call_count: number; run_total_agent_steps?: number; run_total_logical_tool_calls?: number; attempt_agent_steps?: number; attempt_logical_tool_calls?: number; checkpoint_segment_steps?: number; current_attempt_number?: number; last_error_code?: string | null; last_error_message?: string | null; active_skill_names?: string[]; diagnostic_tags?: string[]; diagnostic_summary?: string | null; score?: RunScore | null; started_at?: string | null; finished_at?: string | null; created_at: string; updated_at: string }
 export interface FlagCandidate { id: string; candidate: string; verified: boolean; review_state: "OPEN" | "VALID" | "INVALID"; pattern_matched: boolean }
 export interface RunEvent { id: string; run_id: string; sequence: number; event_type: string; payload_json: Record<string, unknown>; created_at: string }
 export interface RunUsageRow { model: string; role: string; source: string; calls: number; input_tokens: number; output_tokens: number; total_tokens: number; cost_usd: number }
 export interface RunUsage { total: RunUsageRow; models: RunUsageRow[] }
+export interface ChallengePrediction {
+  id: string;
+  challenge_id: string;
+  prediction_version: number;
+  status: "PENDING" | "RUNNING" | "COMPLETED" | "FAILED";
+  fingerprint: string;
+  predicted_solve_seconds?: number | null;
+  predicted_tokens?: number | null;
+  predicted_tool_calls?: number | null;
+  difficulty?: string | null;
+  confidence?: number | null;
+  rationale_zh?: string | null;
+  model?: string | null;
+  usage: { input_tokens?: number; output_tokens?: number; total_tokens?: number };
+  error_code?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+export interface RunScore {
+  id: string;
+  run_id: string;
+  challenge_id: string;
+  prediction_snapshot: Record<string, unknown>;
+  actual_seconds?: number | null;
+  actual_tokens?: number | null;
+  solved: boolean;
+  time_ratio?: number | null;
+  token_ratio?: number | null;
+  time_points?: number | null;
+  token_points?: number | null;
+  solved_points?: number | null;
+  total_score?: number | null;
+  formula_version: string;
+  score_status: string;
+  error_code?: string | null;
+  created_at: string;
+  updated_at: string;
+}
 export interface MutekiBoardSemantic { status: "idle" | "running" | "completed" | "failed"; model?: string; revision?: number; fingerprint?: string; items?: Array<{ card_id: string; summary_zh: string; category: string; importance: "high" | "medium" | "low" }>; usage?: { input_tokens?: number; output_tokens?: number; total_tokens?: number }; error_code?: string; updated_at?: string }
 export interface MutekiGraphState { available: boolean; run_id: string; revision: number; facts: Array<{ sequence: number; content: string; verified: boolean; evidence_refs: string[]; source_worker_id?: string; created_at?: string }>; key_conditions?: Array<{ sequence: number; content: string; summary_zh: string; verified: boolean; evidence_refs: string[]; confidence?: number; source_worker_id?: string }>; board_semantic?: MutekiBoardSemantic; intents: Array<{ id: string; description: string; status: "open" | "claimed" | "done"; worker?: string | null; result?: string; sequence?: number }>; dead_ends: Array<{ sequence: number; description: string }>; flags: Array<{ sequence: number; flag: string; verified: boolean; evidence_refs: string[] }>; pocs?: Array<{ poc_id: string; name?: string; path?: string; entry_command?: string; status?: string; note?: string; artifact_id?: string }>; reason?: string }
 export interface RunUserInput { id: string; content: string; input_type: string; status: string; revision: number; created_at: string; consumed_at?: string | null }

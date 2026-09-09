@@ -13,11 +13,11 @@ def test_single_agent_remains_an_explicit_compatibility_mode() -> None:
 def test_worker_engine_aliases_are_normalized_at_api_boundary() -> None:
     run = RunCreate(
         worker_engines=[
-            {"engine_type": "codex-sdk"},
+            {"engine_type": "codex-api", "model_config_id": "codex-config"},
             {"engine_type": "openai-compatible", "model_config_id": "deepseek-worker"},
         ]
     )
-    assert [item.engine_type for item in run.worker_engines] == ["codex_sdk", "openai_compatible"]
+    assert [item.engine_type for item in run.worker_engines] == ["codex_cli", "openai_compatible"]
 
 
 def test_legacy_solver_modes_are_not_available_for_new_runs() -> None:

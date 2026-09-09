@@ -1,7 +1,6 @@
 param(
     [int]$Port = 8000,
     [string]$RunnerUrl = "http://192.168.236.128:8091",
-    [string]$BridgeUrl = "http://127.0.0.1:8090",
     [switch]$Reload
 )
 
@@ -21,7 +20,6 @@ if (-not (Test-Path -LiteralPath $pythonExe)) {
 . $activateScript
 
 $env:APP_RUNNER_URL = $RunnerUrl
-$env:APP_CODEX_BRIDGE_URL = $BridgeUrl
 $backendDir = (Resolve-Path (Join-Path $PSScriptRoot "..\backend")).Path
 Push-Location $backendDir
 try {

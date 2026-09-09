@@ -51,6 +51,7 @@ from app.models.run import (
     ToolRequestFingerprint,
     WebResearchRecord,
 )
+from app.models.scoring import ChallengePrediction, RunScore
 from app.models.skill import ChallengeSkillBinding, ModelSkillBinding, RunSkillSnapshot, Skill
 from app.models.solver_state import SolverState
 
@@ -67,6 +68,8 @@ __all__ = [
     "ToolInvocationTicket",
     "ToolRequestFingerprint",
     "WebResearchRecord",
+    "ChallengePrediction",
+    "RunScore",
     "RunAttempt",
     "RunContinuation",
     "RunCompactionCheckpoint",

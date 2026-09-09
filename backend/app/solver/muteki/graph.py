@@ -1,6 +1,7 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
+import re
 import sqlite3
 import threading
 import uuid
@@ -139,7 +140,16 @@ class MutekiGraph:
                 elif kind == EventType.DEAD_END:
                     self._db.execute("INSERT OR IGNORE INTO dead_ends VALUES (?, ?, ?, ?)", (row["sequence"], payload.get("description", ""), row["actor"], row["timestamp"]))
                 elif kind == EventType.INTENT_PROPOSED:
-                    self._db.execute("INSERT OR IGNORE INTO intents VALUES (?, ?, 'open', NULL, NULL, ?, ?)", (payload.get("intent_id", ""), payload.get("description", ""), row["timestamp"], _dump(payload.get("payload", {}))))
+                    p = payload.get("payload", {}) or {}
+                    self._db.execute(
+                        "INSERT OR IGNORE INTO intents(intent_id, description, status, claimed_by, lease_until, created_at, payload_json, dispatch_state, route_hash, branch_id, engine_attempt_id) "
+                        "VALUES (?, ?, 'open', NULL, NULL, ?, ?, 'active', ?, ?, ?)",
+                        (payload.get("intent_id", ""), payload.get("description", ""),
+                         row["timestamp"], _dump(p),
+                         str(p.get("route_hash") or ""),
+                         str(p.get("branch_id") or ""),
+                         str(p.get("engine_attempt_id") or "")),
+                    )
                 elif kind == EventType.INTENT_CLAIMED:
                     self._db.execute("UPDATE intents SET status='claimed', claimed_by=?, lease_until=? WHERE intent_id=?", (row["actor"], payload.get("lease_until"), payload.get("intent_id")))
                 elif kind == EventType.INTENT_CONCLUDED:
@@ -210,11 +220,123 @@ class MutekiGraph:
                 claimed_by TEXT,
                 lease_until REAL
             );
+            CREATE TABLE IF NOT EXISTS intent_products (
+                intent_id TEXT NOT NULL,
+                fact_seq INTEGER NOT NULL,
+                PRIMARY KEY (intent_id, fact_seq)
+            );
+            CREATE TABLE IF NOT EXISTS activity_locks (
+                activity_key TEXT PRIMARY KEY,
+                challenge_id TEXT NOT NULL,
+                worker TEXT NOT NULL,
+                lease_until REAL NOT NULL,
+                claimed_ts REAL NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS lanes (
+                lane_key TEXT PRIMARY KEY,
+                challenge_id TEXT NOT NULL,
+                label TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'open',
+                locked_by TEXT,
+                lease_until REAL
+            );
+            CREATE TABLE IF NOT EXISTS routes (
+                route_hash TEXT PRIMARY KEY,
+                challenge_id TEXT NOT NULL,
+                label TEXT,
+                status TEXT NOT NULL DEFAULT 'open',
+                reason TEXT,
+                until_policy TEXT,
+                suppressed_seq INTEGER,
+                reopened_seq INTEGER,
+                created_seq INTEGER
+            );
+            CREATE TABLE IF NOT EXISTS fact_reviews (
+                fact_seq INTEGER NOT NULL,
+                status TEXT NOT NULL DEFAULT 'unresolved',
+                reason TEXT,
+                verification_intent_id TEXT,
+                challenged_seq INTEGER,
+                revalidated_seq INTEGER,
+                created_seq INTEGER,
+                PRIMARY KEY (fact_seq, status)
+            );
+            CREATE TABLE IF NOT EXISTS branches (
+                branch_id TEXT PRIMARY KEY,
+                parent_id TEXT,
+                title TEXT,
+                assumption TEXT,
+                prove_or_disprove TEXT,
+                status TEXT NOT NULL DEFAULT 'open',
+                created_seq INTEGER
+            );
+            CREATE TABLE IF NOT EXISTS fact_states (
+                fact_seq INTEGER PRIMARY KEY,
+                state TEXT NOT NULL,
+                retired_seq INTEGER,
+                created_seq INTEGER
+            );
+            CREATE TABLE IF NOT EXISTS operator_directives (
+                directive_id TEXT PRIMARY KEY,
+                challenge_id TEXT NOT NULL,
+                action TEXT NOT NULL DEFAULT 'note',
+                text TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'active',
+                priority INTEGER NOT NULL DEFAULT 0,
+                bound_worker TEXT,
+                received_seq INTEGER
+            );
+            CREATE TABLE IF NOT EXISTS fact_pins (
+                fact_seq INTEGER PRIMARY KEY,
+                pinned_seq INTEGER
+            );
+            CREATE TABLE IF NOT EXISTS fact_merges (
+                from_seq INTEGER NOT NULL,
+                into_seq INTEGER NOT NULL,
+                merged_seq INTEGER,
+                PRIMARY KEY (from_seq, into_seq)
+            );
+            CREATE TABLE IF NOT EXISTS hitl_requests (
+                request_id TEXT PRIMARY KEY,
+                challenge_id TEXT NOT NULL,
+                worker TEXT NOT NULL,
+                need TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'open',
+                created_seq INTEGER
+            );
+            CREATE TABLE IF NOT EXISTS resource_locks (
+                lock_id TEXT PRIMARY KEY,
+                challenge_id TEXT NOT NULL,
+                resource_key TEXT NOT NULL,
+                scope TEXT NOT NULL,
+                risk_class TEXT,
+                status TEXT NOT NULL DEFAULT 'requested',
+                owner_worker TEXT,
+                owner_intent TEXT,
+                lease_until REAL,
+                created_seq INTEGER,
+                released_seq INTEGER,
+                conflict_policy TEXT NOT NULL DEFAULT 'exclusive',
+                cooldown_s REAL NOT NULL DEFAULT 0
+            );
+            CREATE TABLE IF NOT EXISTS compact_epochs (
+                epoch INTEGER PRIMARY KEY,
+                cutover_seq INTEGER,
+                created_seq INTEGER
+            );
             """
         )
         columns = {str(row[1]) for row in self._db.execute("PRAGMA table_info(intents)").fetchall()}
         if "payload_json" not in columns:
             self._db.execute("ALTER TABLE intents ADD COLUMN payload_json TEXT NOT NULL DEFAULT '{}'" )
+        if "dispatch_state" not in columns:
+            self._db.execute("ALTER TABLE intents ADD COLUMN dispatch_state TEXT NOT NULL DEFAULT 'active'")
+        if "route_hash" not in columns:
+            self._db.execute("ALTER TABLE intents ADD COLUMN route_hash TEXT NOT NULL DEFAULT ''")
+        if "branch_id" not in columns:
+            self._db.execute("ALTER TABLE intents ADD COLUMN branch_id TEXT NOT NULL DEFAULT ''")
+        if "engine_attempt_id" not in columns:
+            self._db.execute("ALTER TABLE intents ADD COLUMN engine_attempt_id TEXT NOT NULL DEFAULT ''")
         self._db.commit()
 
     def _append(
@@ -281,7 +403,15 @@ class MutekiGraph:
         intent_id = intent_id or f"intent_{uuid.uuid4().hex}"
         with self._lock:
             event = self._append(actor, EventType.INTENT_PROPOSED, {"intent_id": intent_id, "description": description, "payload": payload or {}})
-            self._db.execute("INSERT INTO intents VALUES (?, ?, 'open', NULL, NULL, ?, ?)", (intent_id, description, event.timestamp, _dump(payload or {})))
+            p = dict(payload or {})
+            self._db.execute(
+                "INSERT INTO intents(intent_id, description, status, claimed_by, lease_until, created_at, payload_json, dispatch_state, route_hash, branch_id, engine_attempt_id) "
+                "VALUES (?, ?, 'open', NULL, NULL, ?, ?, 'active', ?, ?, ?)",
+                (intent_id, description, event.timestamp, _dump(p),
+                 str(p.get("route_hash") or ""),
+                 str(p.get("branch_id") or ""),
+                 str(p.get("engine_attempt_id") or "")),
+            )
             self._db.commit()
         return intent_id
 
@@ -478,3 +608,435 @@ class MutekiGraph:
             "pocs": [{"id": item.poc_id, "content": item.content, "source_worker_id": item.source_worker_id} for item in self.list_pocs()],
             "resources": [{"resource_id": item.resource_id, "claimed_by": item.claimed_by, "lease_until": item.lease_until} for item in self.resource_claims()],
         }
+
+    # 鈹€鈹€ review / route / branch / activity / directive methods 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+
+    def add_review_finding(
+        self,
+        *,
+        actor: str,
+        kind: str = "finding",
+        severity: str = "info",
+        summary: str,
+        route_hash: str = "",
+        evidence_seqs: list[int] | None = None,
+        intent_ids: list[str] | None = None,
+        recommended_actions: list[str] | None = None,
+    ) -> int:
+        """Emit a Review-Arbiter finding (route loops, false facts, etc.)."""
+        with self._lock:
+            event = self._append(
+                actor,
+                EventType.REVIEW_FINDING,
+                {"kind": kind, "severity": severity, "summary": summary, "route_hash": route_hash, "evidence_seqs": evidence_seqs or [], "intent_ids": intent_ids or [], "recommended_actions": recommended_actions or []},
+            )
+            self._db.commit()
+            return event.sequence
+
+    def challenge_fact(
+        self,
+        *,
+        actor: str,
+        fact_seq: int,
+        reason: str,
+        verification_goal: str = "",
+    ) -> int:
+        """Mark a fact challenged so workers stop relying on it until reverified."""
+        with self._lock:
+            event = self._append(
+                actor,
+                EventType.FACT_CHALLENGED,
+                {"fact_seq": int(fact_seq), "reason": reason, "verification_goal": verification_goal},
+            )
+            self._db.execute(
+                "INSERT OR REPLACE INTO fact_reviews(fact_seq, status, reason, verification_intent_id, challenged_seq, revalidated_seq, created_seq) VALUES (?, 'challenged', ?, ?, ?, NULL, ?)",
+                (int(fact_seq), reason, verification_goal or None, event.sequence, event.sequence),
+            )
+            self._db.commit()
+            return event.sequence
+
+    def revalidate_fact(self, *, actor: str, fact_seq: int) -> int:
+        """Mark a previously challenged fact verified again."""
+        with self._lock:
+            event = self._append(actor, EventType.FACT_REVALIDATED, {"fact_seq": int(fact_seq)})
+            self._db.execute(
+                "UPDATE fact_reviews SET status='revalidated', revalidated_seq=? WHERE fact_seq=?",
+                (event.sequence, int(fact_seq)),
+            )
+            self._db.commit()
+            return event.sequence
+
+    def reject_fact(self, *, actor: str, fact_seq: int, reason: str = "") -> int:
+        """Terminal fact lifecycle: rejected (no longer evidence)."""
+        with self._lock:
+            event = self._append(actor, EventType.FACT_REJECTED, {"fact_seq": int(fact_seq), "reason": reason})
+            self._db.execute(
+                "INSERT OR REPLACE INTO fact_states(fact_seq, state, retired_seq, created_seq) VALUES (?, 'rejected', ?, ?)",
+                (int(fact_seq), event.sequence, event.sequence),
+            )
+            self._db.commit()
+            return event.sequence
+
+    def suppress_route(
+        self,
+        *,
+        actor: str,
+        route_hash: str,
+        label: str = "",
+        reason: str = "",
+        until_policy: str = "",
+    ) -> int:
+        """Mark a route suppressed so workers stop repeating it (review-arbiter)."""
+        with self._lock:
+            event = self._append(
+                actor,
+                EventType.ROUTE_SUPPRESSED,
+                {"route_hash": route_hash, "label": label, "reason": reason, "until_policy": until_policy},
+            )
+            self._db.execute(
+                "INSERT INTO routes(route_hash, challenge_id, label, status, reason, until_policy, suppressed_seq, reopened_seq, created_seq) VALUES (?, ?, ?, 'suppressed', ?, ?, ?, NULL, ?) "
+                "ON CONFLICT(route_hash) DO UPDATE SET status='suppressed', reason=excluded.reason, until_policy=excluded.until_policy, suppressed_seq=excluded.suppressed_seq, reopened_seq=NULL",
+                (route_hash, self.challenge_id, label, reason, until_policy or None, event.sequence, event.sequence),
+            )
+            self._db.commit()
+            return event.sequence
+
+    def reopen_route(self, *, actor: str, route_hash: str, reason: str = "") -> int:
+        with self._lock:
+            event = self._append(actor, EventType.ROUTE_REOPENED, {"route_hash": route_hash, "reason": reason})
+            self._db.execute(
+                "UPDATE routes SET status='open', reason=?, reopened_seq=?, until_policy=NULL WHERE route_hash=?",
+                (reason, event.sequence, route_hash),
+            )
+            self._db.commit()
+            return event.sequence
+
+    def routes(self) -> list[dict]:
+        rows = self._db.execute(
+            "SELECT route_hash, label, status, reason, until_policy FROM routes "
+            "ORDER BY COALESCE(suppressed_seq, reopened_seq, 0), route_hash"
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def split_branch(
+        self,
+        *,
+        actor: str,
+        title: str,
+        branches: list[dict],
+        parent_id: str = "",
+    ) -> dict:
+        """Fork a branch hypothesis so workers prove/disprove it cleanly."""
+        branch_id = f"br-{uuid.uuid4().hex[:12]}"
+        with self._lock:
+            event = self._append(actor, EventType.BRANCH_SPLIT, {"branch_id": branch_id, "title": title, "parent_id": parent_id, "branches": branches})
+            row = self._db.execute("SELECT COALESCE(MAX(created_seq), 0) FROM branches").fetchone()
+            created_seq = event.sequence
+            if branches:
+                for b in branches:
+                    bid = str(b.get("id") or f"br-{uuid.uuid4().hex[:12]}")
+                    self._db.execute(
+                        "INSERT OR IGNORE INTO branches(branch_id, parent_id, title, assumption, prove_or_disprove, status, created_seq) VALUES (?, ?, ?, ?, ?, 'open', ?)",
+                        (bid, branch_id, title, b.get("assumption", ""), b.get("prove_or_disprove", ""), created_seq),
+                    )
+            else:
+                self._db.execute(
+                    "INSERT OR IGNORE INTO branches(branch_id, parent_id, title, assumption, prove_or_disprove, status, created_seq) VALUES (?, ?, ?, ?, ?, 'open', ?)",
+                    (branch_id, parent_id or None, title, "", "", created_seq),
+                )
+            self._db.commit()
+            return {"branch_id": branch_id}
+
+    def resolve_branch(self, *, actor: str, branch_id: str, accepted: bool) -> int:
+        status = "accepted" if accepted else "refuted"
+        with self._lock:
+            event = self._append(actor, EventType.BRANCH_RESOLVED, {"branch_id": branch_id, "accepted": bool(accepted)})
+            self._db.execute("UPDATE branches SET status=? WHERE branch_id=?", (status, branch_id))
+            self._db.commit()
+            return event.sequence
+
+    def branches(self) -> list[dict]:
+        rows = self._db.execute(
+            "SELECT branch_id, parent_id, title, assumption, prove_or_disprove, status FROM branches ORDER BY created_seq, branch_id"
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def add_coordinator_directive(self, *, actor: str, action: str, directive: str) -> int:
+        with self._lock:
+            event = self._append(
+                actor,
+                EventType.COORDINATOR_DIRECTIVE,
+                {"action": action or "note", "directive": directive},
+            )
+            self._db.commit()
+            return event.sequence
+
+    def add_operator_directive(
+        self,
+        *,
+        actor: str,
+        directive_id: str | None = None,
+        action: str = "note",
+        text: str,
+        priority: int = 0,
+        bound_worker: str = "",
+    ) -> str:
+        directive_id = directive_id or f"dir-{uuid.uuid4().hex[:12]}"
+        with self._lock:
+            event = self._append(actor, EventType.OPERATOR_DIRECTIVE, {"directive_id": directive_id, "action": action, "text": text, "priority": priority, "bound_worker": bound_worker})
+            self._db.execute(
+                "INSERT INTO operator_directives(directive_id, challenge_id, action, text, status, priority, bound_worker, received_seq) VALUES (?, ?, ?, ?, 'active', ?, ?, ?)",
+                (directive_id, self.challenge_id, action, text, int(priority), bound_worker or None, event.sequence),
+            )
+            self._db.commit()
+            return directive_id
+
+    def directives(self) -> list[dict]:
+        rows = self._db.execute(
+            "SELECT directive_id, action, text, status, priority, bound_worker FROM operator_directives "
+            "WHERE challenge_id=? AND status NOT IN ('superseded','expired','rejected') "
+            "ORDER BY priority DESC, received_seq",
+            (self.challenge_id,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def directive_status(self, directive_id: str) -> dict | None:
+        row = self._db.execute(
+            "SELECT directive_id, action, text, status, bound_worker FROM operator_directives "
+            "WHERE challenge_id=? AND directive_id=?",
+            (self.challenge_id, str(directive_id)),
+        ).fetchone()
+        return dict(row) if row else None
+
+    def claim_activity(self, *, worker: str, key: str, lease_s: float = 600.0) -> bool:
+        norm = re.sub(r"[\s/]+", ":", str(key).strip().lower())
+        norm = re.sub(r":+", ":", norm).strip(":")
+        if not norm:
+            return True
+        now = datetime.now(UTC).timestamp()
+        with self._lock:
+            self._db.execute(
+                "CREATE TABLE IF NOT EXISTS activity_locks (activity_key TEXT PRIMARY KEY, challenge_id TEXT NOT NULL, worker TEXT NOT NULL, lease_until REAL NOT NULL, claimed_ts REAL NOT NULL)"
+            )
+            cur = self._db.execute(
+                "INSERT INTO activity_locks(activity_key, challenge_id, worker, lease_until, claimed_ts) VALUES (?,?,?,?,?) "
+                "ON CONFLICT(activity_key) DO UPDATE SET worker=excluded.worker, lease_until=excluded.lease_until, claimed_ts=excluded.claimed_ts "
+                "WHERE activity_locks.lease_until < ?",
+                (norm, self.challenge_id, worker, now + max(1.0, float(lease_s)), now, now),
+            )
+            self._db.commit()
+            return cur.rowcount == 1
+
+    def list_activities(self) -> list[dict]:
+        now = datetime.now(UTC).timestamp()
+        rows = self._db.execute(
+            "SELECT activity_key, worker FROM activity_locks WHERE challenge_id=? AND lease_until > ? ORDER BY claimed_ts",
+            (self.challenge_id, now),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def intent_products(self, intent_id: str) -> list[int]:
+        rows = self._db.execute(
+            "SELECT fact_seq FROM intent_products WHERE intent_id=? ORDER BY fact_seq", (str(intent_id),)
+        ).fetchall()
+        return [int(r["fact_seq"]) for r in rows]
+
+    def retired_fact_seqs(self) -> set[int]:
+        try:
+            rows = self._db.execute(
+                "SELECT fact_seq FROM fact_states WHERE state IN ('rejected','merged','superseded') OR retired_seq IS NOT NULL"
+            ).fetchall()
+        except Exception:
+            return set()
+        return {int(r["fact_seq"]) for r in rows}
+
+    def lock_lane(self, *, actor: str, lane_key: str, risk_class: str = "", owner_worker: str = "", owner_intent: str = "", lease_s: float = 900.0) -> dict:
+        now = datetime.now(UTC).timestamp()
+        owner = (owner_worker or actor or "coordinator").strip()
+        with self._lock:
+            self._db.execute(
+                "CREATE TABLE IF NOT EXISTS lanes (lane_key TEXT PRIMARY KEY, challenge_id TEXT NOT NULL, label TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'open', locked_by TEXT, lease_until REAL)"
+            )
+            self._db.execute("INSERT OR IGNORE INTO lanes(lane_key, challenge_id, label) VALUES (?, ?, ?)", (lane_key, self.challenge_id, ""))
+            row = self._db.execute(
+                "SELECT locked_by, lease_until FROM lanes WHERE lane_key=?", (lane_key,)
+            ).fetchone()
+            if row:
+                held_by = str(row["locked_by"] or "")
+                lease_until = float(row["lease_until"] or 0.0)
+                if held_by and held_by != owner and lease_until > now:
+                    return {"lane_key": lane_key, "seq": 0, "acquired": False, "held_by": held_by}
+            cur = self._db.execute(
+                "UPDATE lanes SET locked_by=?, lease_until=?, status='locked' WHERE lane_key=? AND (locked_by IS NULL OR lease_until<? OR locked_by=?)",
+                (owner, now + max(1.0, float(lease_s)), lane_key, now, owner),
+            )
+            if cur.rowcount == 1:
+                self._append(actor, EventType.LANE_LOCKED, {"lane_key": lane_key, "lease_until": now + max(1.0, float(lease_s))})
+                self._db.commit()
+                return {"lane_key": lane_key, "seq": 0, "acquired": True}
+            self._db.rollback()
+            return {"lane_key": lane_key, "seq": 0, "acquired": False}
+
+    def release_lane(self, *, actor: str, lane_key: str, by_worker: str = "") -> dict:
+        releaser = (by_worker or actor or "").strip()
+        with self._lock:
+            cur = self._db.execute(
+                "UPDATE lanes SET locked_by=NULL, lease_until=NULL, status='open' WHERE lane_key=? AND (locked_by=? OR locked_by IS NULL)",
+                (lane_key, releaser),
+            )
+            if cur.rowcount == 1:
+                self._append(actor, EventType.LANE_RELEASED, {"lane_key": lane_key, "released_by": releaser})
+                self._db.commit()
+                return {"lane_key": lane_key, "released": True}
+            self._db.rollback()
+            return {"lane_key": lane_key, "released": False}
+
+        rows = self._db.execute(
+            "SELECT lane_key, label, status, locked_by, lease_until FROM lanes WHERE status='locked'"
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def try_claim_activity(self, *, worker: str, key: str, lease_s: float = 600.0) -> bool:
+        """Claim an activity (route, resource) atomically. Returns True if acquired."""
+        return self.claim_activity(worker=worker, key=key, lease_s=lease_s)
+
+    def release_activity(self, *, worker: str, key: str) -> None:
+        """Release a previously claimed activity."""
+        norm = re.sub(r"[\s/]+", ":", str(key).strip().lower())
+        norm = re.sub(r":+", ":", norm).strip(":")
+        if not norm:
+            return
+        with self._lock:
+            self._db.execute(
+                "DELETE FROM activity_locks WHERE activity_key=? AND worker=?",
+                (norm, worker),
+            )
+            self._db.commit()
+
+    def is_lane_held_by_other(self, lane_key: str, by_worker: str) -> bool:
+        row = self._db.execute(
+            "SELECT locked_by, lease_until FROM lanes WHERE lane_key=?", (lane_key,)
+        ).fetchone()
+        if not row:
+            return False
+        held_by = str(row["locked_by"] or "")
+        lease_until = float(row["lease_until"] or 0.0)
+        return bool(held_by and held_by != by_worker and lease_until > datetime.now(UTC).timestamp())
+
+    def defer_intent_for_lane(self, *, actor: str, intent_id: str, lane_key: str, against_locked_seq: int = 0) -> int:
+        """Record that an intent was deferred due to a locked lane. Returns 0 (no-op)."""
+        self._append(actor, EventType.INTENT_LANE_DEFERRED, {
+            "intent_id": intent_id, "lane_key": lane_key, "against_locked_seq": against_locked_seq,
+        })
+        with self._lock:
+            self._db.commit()
+        return 0
+
+    def check_resource_conflicts(self, *, resource_key: str = "", lane_key: str = "", by_worker: str = "") -> dict:
+        """Check for resource/lane conflicts before dispatch. Returns blockers list."""
+        blockers: list[dict] = []
+        if lane_key and self.is_lane_held_by_other(lane_key, by_worker):
+            row = self._db.execute(
+                "SELECT locked_by FROM lanes WHERE lane_key=?", (lane_key,)
+            ).fetchone()
+            blockers.append({"kind": "lane", "key": lane_key, "owner": str(row["locked_by"]) if row else ""})
+        if resource_key:
+            rkey = re.sub(r"[\s/]+", ":", str(resource_key).strip().lower())
+            rkey = re.sub(r":+", ":", rkey).strip(":")
+            if rkey:
+                row = self._db.execute(
+                    "SELECT owner_worker, lease_until FROM resource_locks WHERE challenge_id=? AND resource_key=? AND status='active'",
+                    (self.challenge_id, rkey),
+                ).fetchone()
+                if row:
+                    owner = str(row["owner_worker"] or "")
+                    lease_until = float(row["lease_until"] or 0.0)
+                    if owner and owner != by_worker and lease_until > datetime.now(UTC).timestamp():
+                        blockers.append({"kind": "resource", "key": rkey, "owner": owner})
+        return {"conflict": len(blockers) > 0, "blockers": blockers}
+
+    def request_resource_lock(self, *, actor: str, resource_key: str, scope: str = "activity", risk_class: str = "",
+                               owner_worker: str = "", owner_intent: str = "",
+                               conflict_policy: str = "exclusive", lease_s: float = 600.0, cooldown_s: float = 0.0) -> dict:
+        rkey = re.sub(r"[\s/]+", ":", str(resource_key).strip().lower())
+        rkey = re.sub(r":+", ":", rkey).strip(":")
+        if not rkey:
+            return {"lock_id": "", "acquired": True, "resource_key": ""}
+        now = datetime.now(UTC).timestamp()
+        owner = (owner_worker or actor or "worker").strip()
+        lock_id = f"rl-{rkey}"
+        policy = conflict_policy if conflict_policy in {"dedupe", "exclusive", "serialize", "cooldown"} else "exclusive"
+        with self._lock:
+            row = self._db.execute(
+                "SELECT owner_worker, lease_until FROM resource_locks WHERE challenge_id=? AND lock_id=?",
+                (self.challenge_id, lock_id),
+            ).fetchone()
+            if row:
+                held_by = str(row["owner_worker"] or "")
+                lease_until = float(row["lease_until"] or 0.0)
+                if held_by and held_by != owner and lease_until > now:
+                    return {"lock_id": lock_id, "acquired": False, "held_by": held_by, "resource_key": rkey}
+            self._db.execute(
+                "INSERT INTO resource_locks(lock_id, challenge_id, resource_key, scope, risk_class, status, owner_worker, owner_intent, lease_until, conflict_policy, cooldown_s) "
+                "VALUES (?,?,?,?,?,'active',?,?,?,?,?) "
+                "ON CONFLICT(lock_id) DO UPDATE SET status='active', owner_worker=excluded.owner_worker, owner_intent=excluded.owner_intent, scope=excluded.scope, risk_class=excluded.risk_class, lease_until=excluded.lease_until, conflict_policy=excluded.conflict_policy, cooldown_s=excluded.cooldown_s",
+                (lock_id, self.challenge_id, rkey, scope, risk_class or None, owner, owner_intent or None, now + max(1.0, float(lease_s)), policy, float(cooldown_s)),
+            )
+            self._db.commit()
+        seq = self._append(actor, EventType.RESOURCE_LOCKED, {"lock_id": lock_id, "resource_key": rkey, "scope": scope, "risk_class": risk_class, "owner_worker": owner, "owner_intent": owner_intent or ""})
+        with self._lock:
+            self._db.execute(
+                "UPDATE resource_locks SET created_seq=COALESCE(created_seq,?) WHERE challenge_id=? AND lock_id=?",
+                (seq if seq > 0 else None, self.challenge_id, lock_id),
+            )
+            self._db.commit()
+        return {"lock_id": lock_id, "acquired": True, "resource_key": rkey, "owner_worker": owner, "seq": seq}
+
+    def release_resource_lock(self, *, actor: str, resource_key: str = "", lock_id: str = "", by_worker: str = "") -> dict:
+        lid = (lock_id or "").strip()
+        if not lid and resource_key:
+            rkey = re.sub(r"[\s/]+", ":", str(resource_key).strip().lower())
+            rkey = re.sub(r":+", ":", rkey).strip(":")
+            lid = f"rl-{rkey}" if rkey else ""
+        if not lid:
+            return {"lock_id": "", "released": False}
+        releaser = (by_worker or actor or "").strip()
+        now = datetime.now(UTC).timestamp()
+        with self._lock:
+            row = self._db.execute(
+                "SELECT owner_worker, lease_until, resource_key FROM resource_locks WHERE challenge_id=? AND lock_id=?",
+                (self.challenge_id, lid),
+            ).fetchone()
+            if not row:
+                return {"lock_id": lid, "released": False}
+            owner = str(row["owner_worker"] or "")
+            if owner and releaser and owner != releaser and float(row["lease_until"] or 0.0) > now:
+                return {"lock_id": lid, "released": False, "held_by": owner}
+            self._db.execute(
+                "UPDATE resource_locks SET status='released', owner_worker=NULL, lease_until=NULL WHERE challenge_id=? AND lock_id=?",
+                (self.challenge_id, lid),
+            )
+            self._db.commit()
+        seq = self._append(actor, EventType.RESOURCE_RELEASED, {"lock_id": lid, "released_by": releaser})
+        with self._lock:
+            self._db.execute(
+                "UPDATE resource_locks SET released_seq=? WHERE challenge_id=? AND lock_id=?",
+                (seq if seq > 0 else None, self.challenge_id, lid),
+            )
+            self._db.commit()
+        return {"lock_id": lid, "released": True}
+
+    def active_resource_locks(self) -> list[dict]:
+        now = datetime.now(UTC).timestamp()
+        rows = self._db.execute(
+            "SELECT lock_id, resource_key, scope, risk_class, owner_worker, owner_intent, lease_until "
+            "FROM resource_locks WHERE challenge_id=? AND status='active' AND owner_worker IS NOT NULL AND (lease_until IS NULL OR lease_until > ?) ORDER BY created_seq",
+            (self.challenge_id, now),
+        ).fetchall()
+        return [dict(row) for row in rows]
+        rows = self._db.execute(
+            "SELECT lane_key, label, status, locked_by, lease_until FROM lanes WHERE status='locked'"
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+

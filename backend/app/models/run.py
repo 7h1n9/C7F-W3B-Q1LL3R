@@ -34,7 +34,7 @@ SCRIPT_RECORD_STATUSES = frozenset(
 class SolveRun(UUIDTimestampMixin, Base):
     __tablename__ = "solve_runs"
     challenge_id: Mapped[str] = mapped_column(ForeignKey("challenges.id"), nullable=False)
-    engine_type: Mapped[str] = mapped_column(String(40), default="mock")
+    engine_type: Mapped[str] = mapped_column(String(40), default="openai_compatible")
     # New Runs default to the structured multi-agent controller.  Existing
     # rows keep their persisted mode, and single_agent remains supported as an
     # explicit compatibility mode.

@@ -1,5 +1,6 @@
 import {
   ApartmentOutlined,
+  BarChartOutlined,
   CaretRightOutlined,
   CheckCircleFilled,
   ClockCircleOutlined,
@@ -316,6 +317,14 @@ function formatDuration(startedAt?: string | null, finishedAt?: string | null): 
   return `${hours ? `${hours}:` : ""}${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
 }
 
+function formatRatio(value?: number | null): string {
+  return value === undefined || value === null ? "—" : Number(value).toFixed(2);
+}
+
+function formatScore(value?: number | null): string {
+  return value === undefined || value === null ? "—" : Number(value).toFixed(1);
+}
+
 function projectBoard(events: RunEvent[], nativeState?: MutekiGraphState): BoardState {
   const workers = new Map<string, WorkerState>();
   const intents = new Map<string, IntentState>();
@@ -512,7 +521,7 @@ function CaseBoardCanvas({ cards, fullscreen, positions, semantic, currentRevisi
         <Space size={4}>
           <Button size="small" type="text" onClick={onArrange}>自动整理</Button>
           <Button size="small" type="text" loading={semantic?.status === "running"} disabled={!cards.length || semantic?.status === "running" || semanticCurrent} onClick={onAnalyze}>
-            {semanticCurrent ? "Codex 已解析" : semantic?.status === "completed" ? "重新解析" : semantic?.status === "failed" ? "重试 AI 解析" : "AI 解析（Codex）"}
+            {semanticCurrent ? "AI 已解析" : semantic?.status === "completed" ? "重新解析" : semantic?.status === "failed" ? "重试 AI 解析" : "AI 解析"}
           </Button>
           <Button size="small" type="text" icon={fullscreen ? <FullscreenExitOutlined /> : <FullscreenOutlined />} onClick={onToggleFullscreen}>
             {fullscreen ? "退出全屏" : "全屏查看"}
@@ -617,11 +626,17 @@ export function WorkspacePage() {
   });
   const boardSemantic = mutekiState.data?.board_semantic;
   const usageSummary = useQuery({ queryKey: ["run-usage", id], queryFn: () => api.getRunUsage(id), refetchInterval: liveRefetchInterval });
+  const runScore = useQuery({ queryKey: ["run-score", id], queryFn: () => api.getRunScore(id), refetchInterval: liveRefetchInterval });
   const tools = useQuery({ queryKey: ["tool-calls", id], queryFn: () => api.getToolCalls(id), refetchInterval: liveRefetchInterval });
   const observations = useQuery({ queryKey: ["observations", id], queryFn: () => api.getObservations(id), refetchInterval: liveRefetchInterval });
   const artifacts = useQuery({ queryKey: ["artifacts", id], queryFn: () => api.getArtifacts(id), refetchInterval: liveRefetchInterval });
   const flags = useQuery({ queryKey: ["flags", id], queryFn: () => api.getFlags(id), refetchInterval: liveRefetchInterval });
-  const report = useQuery({ queryKey: ["report", id], queryFn: () => api.getReport(id), retry: false });
+  const report = useQuery({
+    queryKey: ["report", id],
+    queryFn: () => api.getReport(id),
+    retry: false,
+    refetchInterval: boardSemantic?.status === "running" ? 1500 : false,
+  });
   const board = useMemo(() => projectBoard(events, mutekiState.data), [events, mutekiState.data]);
   const keyMoments = useMemo(() => projectKeyMoments(events, runMessages.data ?? []), [events, runMessages.data]);
   const eventUsage = useMemo(() => usageFromEvents(events, report.data?.report_json), [events, report.data?.report_json]);
@@ -654,11 +669,17 @@ export function WorkspacePage() {
     mutationFn: () => api.startMutekiBoardSemanticAnalysis(id),
     onSuccess: (result) => {
       void client.invalidateQueries({ queryKey: ["muteki-state", id] });
+      void client.invalidateQueries({ queryKey: ["report", id] });
       if (result.status === "running") message.success("Codex 语义解析已在后台开始，解题流程不会中断");
       else if (result.status === "completed") message.success("分析板语义解析已完成");
     },
     onError: (error: Error) => message.error(error.message),
   });
+  useEffect(() => {
+    if (boardSemantic?.status === "completed" || boardSemantic?.status === "failed") {
+      void client.invalidateQueries({ queryKey: ["report", id] });
+    }
+  }, [boardSemantic?.status, client, id]);
   const updateCaseBoardPosition = (cardId: string, position: BoardPosition) => {
     setCaseBoardLayout((current) => ({ runId: id, positions: { ...current.positions, [cardId]: position } }));
   };
@@ -704,14 +725,14 @@ export function WorkspacePage() {
     if (!canonicalFlag || pocExporting) return;
     setPocExporting(true);
     try {
-      const result = await api.downloadMutekiPoc(id);
-      const url = URL.createObjectURL(new Blob([result.content], { type: "text/markdown;charset=utf-8" }));
+      const result = await api.downloadMutekiPocBundle(id);
+      const url = URL.createObjectURL(result.blob);
       const anchor = document.createElement("a");
       anchor.href = url;
       anchor.download = result.filename;
       anchor.click();
       URL.revokeObjectURL(url);
-      message.success("答案 PoC 已导出");
+      message.success("可复现 PoC 包已导出");
     } catch (error) {
       message.error((error as Error).message);
     } finally {
@@ -750,6 +771,11 @@ export function WorkspacePage() {
         if (types.some((type) => type === "run.completed" || type.startsWith("flag.") || type === "muteki.flag_found")) {
           void client.invalidateQueries({ queryKey: ["flags", id] });
           void client.invalidateQueries({ queryKey: ["report", id] });
+          void client.invalidateQueries({ queryKey: ["run-score", id] });
+        }
+        if (types.some((type) => type === "run.score.computed")) {
+          void client.invalidateQueries({ queryKey: ["run-score", id] });
+          void client.invalidateQueries({ queryKey: ["runs"] });
         }
       }, 220);
     });
@@ -822,6 +848,52 @@ export function WorkspacePage() {
         </div> : <div className="muteki-usage-empty">当前运行尚未收到引擎用量回报；不会用估算值冒充真实 Token。</div>}
       </details>
 
+      {runScore.data ? (
+        <Card
+          className="muteki-score-card"
+          title={<Space><BarChartOutlined /> 解题评分</Space>}
+          extra={<span className="muteki-event-count">公式 {runScore.data.formula_version}</span>}
+        >
+          <div className="muteki-score-grid">
+            <div className="muteki-score-total">
+              <strong>{formatScore(runScore.data.total_score)}</strong>
+              <span>总分</span>
+            </div>
+            <div className="muteki-score-metric">
+              <span>解出</span>
+              <strong>{runScore.data.solved ? "是" : "否"}</strong>
+            </div>
+            <div className="muteki-score-metric">
+              <span>时间比率</span>
+              <strong>{formatRatio(runScore.data.time_ratio)}</strong>
+              <small>实际 / 预测</small>
+            </div>
+            <div className="muteki-score-metric">
+              <span>Token 比率</span>
+              <strong>{formatRatio(runScore.data.token_ratio)}</strong>
+              <small>实际 / 预测</small>
+            </div>
+            <div className="muteki-score-metric">
+              <span>实际耗时</span>
+              <strong>{formatDuration(run.data?.started_at, run.data?.finished_at)}</strong>
+            </div>
+            <div className="muteki-score-metric">
+              <span>实际 Token</span>
+              <strong>{formatTokens(runScore.data.actual_tokens ?? 0)}</strong>
+            </div>
+          </div>
+          {runScore.data.score_status === "NO_PREDICTION" ? (
+            <div className="muteki-score-empty">预测未就绪，暂未评分</div>
+          ) : null}
+          {runScore.data.prediction_snapshot?.rationale_zh ? (
+            <div className="muteki-score-reason">
+              <span>预测理由</span>
+              {String(runScore.data.prediction_snapshot.rationale_zh)}
+            </div>
+          ) : null}
+        </Card>
+      ) : null}
+
       <Alert className="muteki-safety-bar" showIcon icon={<SafetyCertificateOutlined />} type="info" message="授权边界已启用：Worker 只能通过当前 Run 的 Tool Gateway 访问允许主机与工作区。" />
 
       <div className="muteki-main-layout">
@@ -886,7 +958,7 @@ export function WorkspacePage() {
                       <div className="muteki-canonical-flag-label"><CheckCircleFilled /> Verified Flag <Tag color="green">Evidence-backed</Tag></div>
                       <Typography.Text className="muteki-canonical-flag-value" copyable={{ text: canonicalFlag }}>{canonicalFlag}</Typography.Text>
                       <small>Canonical Muteki Completion result</small>
-                      <Button className="muteki-poc-export" icon={<DownloadOutlined />} loading={pocExporting} onClick={exportPoc}>导出答案 PoC</Button>
+                      <Button className="muteki-poc-export" icon={<DownloadOutlined />} loading={pocExporting} onClick={exportPoc}>导出可复现 PoC 包</Button>
                     </div>}
                     <div className="muteki-inspector-section-title">Flag Candidates</div>
                     {flagRows.length ? flagRows.map((item) => {

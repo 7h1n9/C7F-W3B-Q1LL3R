@@ -212,7 +212,7 @@ class SolverRuntimeService:
                 mcp_tools=[],
             )
             await session.commit()
-            if attempt.tool_manifest_status == "DRIFT" and run.engine_type == "codex_sdk":
+            if attempt.tool_manifest_status == "DRIFT":
                 await event_service.append(
                     session,
                     run.id,

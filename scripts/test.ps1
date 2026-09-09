@@ -19,4 +19,3 @@ Invoke-InDirectory (Join-Path $repoRoot "backend") $python @("-m", "pytest", "-q
 Invoke-InDirectory (Join-Path $repoRoot "kali-runner") $python @("-m", "ruff", "check", ".")
 Invoke-InDirectory (Join-Path $repoRoot "kali-runner") $python @("-m", "pytest", "-q")
 Invoke-InDirectory (Join-Path $repoRoot "frontend") $npm @("run", "build")
-Invoke-InDirectory (Join-Path $repoRoot "codex-bridge") $npm @("run", "build")

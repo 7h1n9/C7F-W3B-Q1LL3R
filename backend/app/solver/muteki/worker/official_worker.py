@@ -481,7 +481,9 @@ class OfficialWorkerAdapter:
         # A completed execute() has already handed its result to the
         # Coordinator's normal usage bridge.  Retain the CostController only
         # while a cancelled asyncio task may still need recovery flushing.
-        if not result.success or self.evidence_bridge is None:
+        if self.evidence_bridge is None:
+            return result
+        if not result.success and not str(result.evidence_artifact_path or "").strip():
             return result
 
         try:
@@ -547,10 +549,7 @@ class OfficialWorkerAdapter:
         consume the whole Run-level budget before the Coordinator takes over.
         """
 
-        if self._container is None:
-            return False, "WORKER_SANDBOX_NOT_READY"
         from muteki.solver.cli_driver import driver_for
-        from muteki.solver.container_exec import run_cli_container
 
         engine = str(getattr(profile, "engine_id", "codex") or "codex")
         raw_profile = getattr(profile, "driver_profile", None)
@@ -564,63 +563,76 @@ class OfficialWorkerAdapter:
         credential_engine = str(
             (driver_profile or {}).get("engine") or engine
         )
-        if self._account_root:
-            try:
-                from muteki.solver.credential_accounts import runtime_env_for_engine
 
-                credential_env = runtime_env_for_engine(
-                    credential_engine,
-                    account_root=self._account_root,
-                    container=True,
-                    env=environment,
-                ).env
-                environment.update(_safe_environment(credential_env))
-            except Exception:
-                return False, "CREDENTIAL_RESOLUTION_FAILED"
-        argv = driver.build_execute(
-            "Reply exactly OK. Do not use tools.",
-            None,
-            web_access=False,
-            kb_access=False,
-            stream=False,
-        )
-        probe_timeout = max(
-            30,
-            min(int(self.config.health_timeout_seconds), int(self.config.timeout_seconds)),
-        )
-        try:
-            result = await asyncio.to_thread(
-                run_cli_container,
-                driver,
-                argv,
-                handle=self._container,
-                cwd=str(workspace),
-                timeout=probe_timeout,
-                env=environment,
+        if self._container is not None:
+            from muteki.solver.container_exec import run_cli_container
+
+            if self._account_root:
+                try:
+                    from muteki.solver.credential_accounts import runtime_env_for_engine
+
+                    credential_env = runtime_env_for_engine(
+                        credential_engine,
+                        account_root=self._account_root,
+                        container=True,
+                        env=environment,
+                    ).env
+                    environment.update(_safe_environment(credential_env))
+                except Exception:
+                    return False, "CREDENTIAL_RESOLUTION_FAILED"
+            argv = driver.build_execute(
+                "Reply exactly OK. Do not use tools.",
+                None,
+                web_access=False,
+                kb_access=False,
+                stream=False,
             )
+            probe_timeout = max(
+                30,
+                min(int(self.config.health_timeout_seconds), int(self.config.timeout_seconds)),
+            )
+            try:
+                result = await asyncio.to_thread(
+                    run_cli_container,
+                    driver,
+                    argv,
+                    handle=self._container,
+                    cwd=str(workspace),
+                    timeout=probe_timeout,
+                    env=environment,
+                )
+            except Exception:
+                return False, "WORKER_HEALTHCHECK_FAILED"
+            if result.timed_out:
+                return False, "WORKER_HEALTHCHECK_TIMEOUT"
+
+            if bool(getattr(result, "oom_killed", False)):
+                return False, "WORKER_HEALTHCHECK_FAILED"
+            if bool(getattr(result, "cancelled", False)):
+                return False, "WORKER_HEALTHCHECK_FAILED"
+            runtime_status = getattr(result, "runtime_status", None) or {}
+            returncode = runtime_status.get("rc") if isinstance(runtime_status, Mapping) else None
+            if returncode is not None and int(returncode) != 0:
+                return False, _classify_cli_health_failure(result)
+            if hasattr(result, "success") and not bool(getattr(result, "success")):
+                return False, _classify_cli_health_failure(result)
+            if not hasattr(result, "success") and not str(getattr(result, "text", "") or "").strip():
+                return False, _classify_cli_health_failure(result)
+            return True, ""
+
+        # Local mode: run the health probe directly via subprocess
+        # Use the environment directly from the profile (the API key is already
+        # set by the model config decryption in _worker_profiles).  Do NOT call
+        # runtime_env_for_engine here — it would overwrite the model-config
+        # API key with the account store's credentials (or clear it).
+        probe_env = {**os.environ, **environment}
+        try:
+            ok, detail = await asyncio.to_thread(
+                driver.health_detail, env=probe_env
+            )
+            return ok, detail or "WORKER_HEALTHCHECK_FAILED"
         except Exception:
             return False, "WORKER_HEALTHCHECK_FAILED"
-        if result.timed_out:
-            return False, "WORKER_HEALTHCHECK_TIMEOUT"
-
-        # The official RCP path returns Muteki's ``CliResult``.  It has no
-        # ``success`` attribute; success is represented by a finished runtime
-        # status and a non-error process return code.  Keep compatibility with
-        # the older test/container adapter result without making the upstream
-        # object pretend to be a ContainerResult.
-        if bool(getattr(result, "oom_killed", False)):
-            return False, "WORKER_HEALTHCHECK_FAILED"
-        if bool(getattr(result, "cancelled", False)):
-            return False, "WORKER_HEALTHCHECK_FAILED"
-        runtime_status = getattr(result, "runtime_status", None) or {}
-        returncode = runtime_status.get("rc") if isinstance(runtime_status, Mapping) else None
-        if returncode is not None and int(returncode) != 0:
-            return False, "WORKER_HEALTHCHECK_FAILED"
-        if hasattr(result, "success") and not bool(getattr(result, "success")):
-            return False, "WORKER_HEALTHCHECK_FAILED"
-        if not hasattr(result, "success") and not str(getattr(result, "text", "") or "").strip():
-            return False, "WORKER_HEALTHCHECK_FAILED"
-        return True, ""
 
     def _execute_sync(self, job: Any) -> OfficialWorkerResult:
         cancel_event = self._cancel_event_for(job)
@@ -804,6 +816,12 @@ class OfficialWorkerAdapter:
         from muteki.solver.result import ArtifactStore
 
         engine = str(getattr(job, "engine_id", "codex") or "codex")
+        raw_driver_profile = getattr(job, "driver_profile", None)
+        driver_profile = (
+            dict(raw_driver_profile)
+            if isinstance(raw_driver_profile, Mapping) and raw_driver_profile
+            else None
+        )
         workspace = str((getattr(job, "environment", {}) or {}).get("MUTEKI_WORKSPACE") or "")
         if not workspace:
             return OfficialWorkerResult(False, "FAILED", engine, metadata={"reason": "WORKSPACE_NOT_SET"})
@@ -885,7 +903,7 @@ class OfficialWorkerAdapter:
                 from muteki.solver.credential_accounts import runtime_env_for_engine
 
                 credential_env = runtime_env_for_engine(
-                    engine,
+                    _credential_engine_name(engine, driver_profile),
                     account_root=self._account_root,
                     container=self.config.backend == "container",
                     env=environment,
@@ -912,12 +930,6 @@ class OfficialWorkerAdapter:
         # this ledger; the adapter only projects its numeric snapshot into the
         # existing durable RunEvent stream after the Worker exits.
         cost_controller = CostController()
-        raw_driver_profile = getattr(job, "driver_profile", None)
-        driver_profile = (
-            dict(raw_driver_profile)
-            if isinstance(raw_driver_profile, Mapping) and raw_driver_profile
-            else None
-        )
         solver = CliSolver(
             spec=SimpleNamespace(solver_id=str(getattr(job, "worker_id", "native-worker"))),
             challenge=challenge,
@@ -1317,6 +1329,46 @@ def _safe_environment(values: Mapping[str, Any]) -> dict[str, str]:
         for key, value in values.items()
         if str(key).startswith(allowed_prefixes) and value is not None
     }
+
+
+def _classify_cli_health_failure(result: Any) -> str:
+    """Return a safe, stable reason for a failed Codex CLI health probe.
+
+    The response body is deliberately not persisted or returned.  This only
+    classifies the small set of operator-actionable failures that otherwise
+    all appeared as ``WORKER_HEALTHCHECK_FAILED`` in the UI and audit stream.
+    """
+
+    text = " ".join(
+        str(getattr(result, name, "") or "")
+        for name in ("text", "raw_stderr")
+    ).casefold()
+    if "requires a newer version of codex" in text:
+        return "CODEX_CLI_VERSION_UNSUPPORTED"
+    if (
+        "401 unauthorized" in text
+        or "missing bearer" in text
+        or "authentication required" in text
+        or "not logged in" in text
+    ):
+        return "CODEX_CLI_AUTH_FAILED"
+    return "WORKER_HEALTHCHECK_FAILED"
+
+
+def _credential_engine_name(
+    engine_id: str,
+    driver_profile: Mapping[str, Any] | None,
+) -> str:
+    """Map a stable Worker identity to its credential transport name.
+
+    ``codex-cli:<config-id>`` is an audit/scheduling identity, not a
+    credential-store key. Muteki profiles keep the executable transport in
+    ``engine``; use that value for account projection while preserving the
+    full identity everywhere else.
+    """
+
+    profile_engine = str((driver_profile or {}).get("engine") or "").strip()
+    return profile_engine or str(engine_id or "").strip()
 
 
 def _containerize_environment(values: Mapping[str, str], handle: Any | None) -> dict[str, str]:

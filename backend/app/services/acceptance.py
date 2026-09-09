@@ -39,7 +39,7 @@ async def evaluate_asset_warranty_run(session: AsyncSession, run_id: str) -> dic
     autonomous_proof = any(item.source_is_autonomous and item.verification_source_type == "FRESH_REPRODUCTION" for item in proven)
     checks = {
         "asset_warranty_challenge": challenge_is_asset_warranty,
-        "codex_sdk": run.engine_type == "codex_sdk",
+        "codex_cli": run.engine_type == "codex_cli",
         "multi_agent_mode": run.solver_mode == "multi_agent_v1",
         "terminal_solved": run.status == "COMPLETED_SOLVED",
         "assistance_allowed": run.assistance_level in {"AUTONOMOUS", "HINT_GUIDED", "EVIDENCE_GUIDED"},

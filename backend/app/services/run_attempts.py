@@ -18,7 +18,6 @@ from app.models.run import (
 )
 from app.orchestration.state_machine import TERMINAL, RunStatus
 from app.schemas.multi_agent import AgentTaskStatus
-from app.services.codex_preflight import codex_preflight_service
 from app.services.events import event_service
 from app.services.execution_recovery import execution_recovery_guard
 from app.services.solver_state import solver_state_service
@@ -163,18 +162,6 @@ class RunAttemptService:
                 status_code=409,
             )
         await self.reclaim_expired_lease(session, run.id)
-        # The Codex preflight gate belongs to the legacy Runner/ToolGateway
-        # attempt path.  Canonical Muteki performs its own engine health check
-        # in Prepare and must be resumable from its durable SharedGraph even
-        # when an earlier legacy attempt recorded zero tool calls.
-        is_muteki = str(getattr(run, "solver_mode", "")).lower() == "muteki"
-        if not is_muteki and await self.consecutive_zero_tool_failures(session, run.id) >= 2 and not codex_preflight_service.is_ready(run.id):
-            raise DomainError(
-                "RUN_CONFIGURATION_BLOCKED",
-                "Two consecutive zero-tool engine failures require a successful Codex preflight before another Attempt.",
-                {"run_id": run.id, "required_action": "POST /api/v1/readiness/codex-preflight/run"},
-                409,
-            )
         existing = await session.scalar(
             select(RunExecutionLease).where(RunExecutionLease.run_id == run.id)
         )

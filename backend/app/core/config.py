@@ -37,7 +37,6 @@ class Settings(BaseSettings):
     workspace_root: Path = Path("../data/workspaces")
     runner_url: str = "http://192.168.236.128:8091"
     runner_api_token: str = "development-runner-token"
-    codex_bridge_url: str = "http://127.0.0.1:8090"
     # Shared only with the local run-scoped ctfctl MCP subprocess. It is not
     # included in browser responses or model context.
     ctfctl_internal_access_key: str = "development-ctfctl-access-key"
@@ -118,10 +117,10 @@ def get_settings() -> Settings:
     return Settings()
 
 
-def persist_service_urls(runner_url: str, codex_bridge_url: str) -> None:
+def persist_service_urls(runner_url: str) -> None:
     """Persist only non-secret local service endpoints for the next restart."""
     path = Path(__file__).resolve().parents[2] / ".env"
-    values = {"APP_RUNNER_URL": runner_url, "APP_CODEX_BRIDGE_URL": codex_bridge_url}
+    values = {"APP_RUNNER_URL": runner_url}
     lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
     seen: set[str] = set()
     updated: list[str] = []

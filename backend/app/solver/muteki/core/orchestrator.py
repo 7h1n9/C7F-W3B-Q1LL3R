@@ -48,6 +48,7 @@ class MutekiOrchestrator:
         max_total_workers: int | None = None,
         max_bootstrap_workers: int | None = None,
         max_idle_polls: int | None = None,
+        insight_bus=None,
     ) -> None:
         self.graph = graph
         self.reason = reason
@@ -92,8 +93,9 @@ class MutekiOrchestrator:
             ),
             official_worker_adapter=official_worker_adapter,
             official_worker_evidence_bridge=official_worker_evidence_bridge,
-                official_worker_usage_bridge=official_worker_usage_bridge,
-            )
+            official_worker_usage_bridge=official_worker_usage_bridge,
+            insight_bus=insight_bus,
+        )
 
     async def run(self, *, max_rounds: int | None = 10) -> MutekiRunResult:
         """Run the canonical loop until solved, stopped, or the outer budget ends.
@@ -117,7 +119,11 @@ class MutekiOrchestrator:
                 await self.coordinator.run(max_ticks=max(0, int(max_rounds)))
             flags = self.graph.flags(verified_only=True)
             stop_reason = self.coordinator.stop_reason
-            if stop_reason in {"RACE_WORKER_TIMEOUT", "WORKER_TIMEOUT"}:
+            if stop_reason in {
+                "RACE_WORKER_TIMEOUT",
+                "WORKER_TIMEOUT",
+                "MUTEKI_RUN_TIMEOUT",
+            }:
                 return MutekiRunResult(
                     run_id=self.graph.challenge_id,
                     challenge_id=self.graph.challenge_id,

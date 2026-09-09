@@ -1,0 +1,13 @@
+# Keep the official Muteki Worker image and update only the Codex CLI binary.
+#
+# The published image currently contains Codex CLI 0.138.0.  That version can
+# authenticate successfully but rejects newer configured models such as
+# gpt-5.6-luna before a Worker turn starts.  This small overlay keeps the
+# official Sandbox/runtime-agent contract and makes the CLI version explicit.
+
+FROM ghcr.io/fishcodetech/muteki-worker:latest
+
+ARG CODEX_CLI_VERSION=0.147.0
+
+RUN npm install --global --no-audit --no-fund "@openai/codex@${CODEX_CLI_VERSION}" \
+    && codex --version

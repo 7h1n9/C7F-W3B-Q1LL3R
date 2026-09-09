@@ -81,7 +81,7 @@ export function DashboardPage() {
     <Card className="panel-card" title="最近解题任务" extra={<Link to="/runs">查看全部</Link>} style={{ marginTop: 22 }}>
       <Table className="cyber-table" rowKey="id" dataSource={allRuns.slice(0, 8)} locale={{ emptyText: <Empty description="尚未创建解题任务" image={Empty.PRESENTED_IMAGE_SIMPLE} /> }} columns={[
         { title: "任务编号", dataIndex: "id", render: (id: string) => <span className="id-code">{id.slice(0, 8)}</span> },
-        { title: "引擎", dataIndex: "engine_type", render: (engine: string) => engine === "mock" ? "模拟演练引擎" : engine },
+        { title: "引擎", dataIndex: "engine_type" },
         { title: "当前状态", dataIndex: "status", render: (status: string) => <RunStatusTag status={status} /> },
         { title: "阶段", dataIndex: "current_phase" },
         { title: "操作", render: (_, run) => <Link to={`/runs/${run.id}`}>进入工作区</Link> },

@@ -12,11 +12,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Iterable, Mapping
 
-SUPPORTED_WORKER_ENGINE_TYPES = frozenset({"mock", "codex_sdk", "openai_compatible"})
+SUPPORTED_WORKER_ENGINE_TYPES = frozenset({"codex_cli", "openai_compatible"})
 MUTEKI_RUNTIME_HINT_KEY = "muteki_runtime"
 _ENGINE_ALIASES = {
-    "codex": "codex_sdk",
-    "codex-sdk": "codex_sdk",
+    "codex": "codex_cli",
+    "codex-sdk": "codex_cli",
+    "codex_sdk": "codex_cli",
+    "codex-cli": "codex_cli",
+    "codex-api": "codex_cli",
     "openai-compatible": "openai_compatible",
 }
 
@@ -34,8 +37,8 @@ class WorkerEngineSelection:
             raise ValueError(f"unsupported worker engine type: {self.engine_type}")
         if engine_type == "openai_compatible" and not self.model_config_id:
             raise ValueError("openai_compatible worker requires model_config_id")
-        if engine_type != "openai_compatible" and self.model_config_id:
-            raise ValueError(f"{engine_type} worker does not accept model_config_id")
+        if engine_type == "codex_cli" and not self.model_config_id:
+            raise ValueError("codex_cli worker requires model_config_id")
         object.__setattr__(self, "engine_type", engine_type)
         if self.model_config_id:
             object.__setattr__(self, "model_config_id", str(self.model_config_id))
@@ -44,12 +47,9 @@ class WorkerEngineSelection:
     def engine_id(self) -> str:
         """Return the stable Worker identity used by Coordinator scheduling."""
 
-        if self.engine_type == "codex_sdk":
-            # The vendored official driver calls this engine ``codex``.
-            return "codex"
         if self.engine_type == "openai_compatible":
             return f"openai-compatible:{self.model_config_id}"
-        return "mock"
+        return f"codex-cli:{self.model_config_id}"
 
     def to_dict(self) -> dict[str, str]:
         value = {"engine_type": self.engine_type, "engine_id": self.engine_id}
@@ -61,10 +61,10 @@ class WorkerEngineSelection:
 def normalize_worker_engines(
     selections: Iterable[Mapping[str, Any]] | None,
     *,
-    fallback_engine_type: str = "mock",
+    fallback_engine_type: str | None = None,
     fallback_model_config_id: str | None = None,
 ) -> tuple[WorkerEngineSelection, ...]:
-    """Normalize new and legacy Run selections without silently downgrading."""
+    """Normalize Worker selections, skipping removed/legacy engine types."""
 
     normalized: list[WorkerEngineSelection] = []
     for item in selections or ():
@@ -73,26 +73,43 @@ def normalize_worker_engines(
         engine_type = str(item.get("engine_type") or "").strip().casefold()
         if not engine_type:
             continue
-        normalized.append(
-            WorkerEngineSelection(
-                engine_type,
-                str(item["model_config_id"]) if item.get("model_config_id") else None,
-            )
-        )
+        model_config_id = str(item["model_config_id"]) if item.get("model_config_id") else None
+        resolved = _ENGINE_ALIASES.get(engine_type, engine_type)
+        if resolved == "mock":
+            # mock engine was removed; drop these legacy selections.
+            continue
+        if resolved == "codex_cli" and not model_config_id:
+            # Legacy codex_sdk/codex-cli without a model config cannot run.
+            continue
+        try:
+            normalized.append(WorkerEngineSelection(resolved, model_config_id))
+        except ValueError:
+            continue
     if normalized:
         return tuple(_dedupe(normalized))
-    return (
-        WorkerEngineSelection(
-            str(fallback_engine_type or "mock").strip().casefold(),
-            str(fallback_model_config_id) if fallback_model_config_id else None,
-        ),
-    )
+    if not fallback_engine_type:
+        return ()
+    fallback = str(fallback_engine_type).strip().casefold()
+    resolved = _ENGINE_ALIASES.get(fallback, fallback)
+    if resolved == "mock" or resolved not in SUPPORTED_WORKER_ENGINE_TYPES:
+        return ()
+    if resolved == "codex_cli" and not fallback_model_config_id:
+        return ()
+    try:
+        return (
+            WorkerEngineSelection(
+                resolved,
+                str(fallback_model_config_id) if fallback_model_config_id else None,
+            ),
+        )
+    except ValueError:
+        return ()
 
 
 def runtime_selection_from_hints(
     hints: Mapping[str, Any] | None,
     *,
-    fallback_engine_type: str = "mock",
+    fallback_engine_type: str | None = None,
     fallback_model_config_id: str | None = None,
 ) -> tuple[str | None, tuple[WorkerEngineSelection, ...]]:
     """Read the additive Muteki selection from existing Run hints."""

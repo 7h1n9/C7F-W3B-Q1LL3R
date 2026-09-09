@@ -5,7 +5,6 @@ from collections.abc import Mapping
 from ..action import ActionIntent
 from .adapters.runner import RunnerWorker
 from .interface import Worker, WorkerResult
-from .mock import MockWorker
 
 
 class WorkerUnavailable(RuntimeError):
@@ -17,7 +16,6 @@ class WorkerManager:
 
     def __init__(self, workers: Mapping[str, Worker] | None = None) -> None:
         self._workers: dict[str, Worker] = {
-            "mock": MockWorker(),
             "runner": RunnerWorker(),
         }
         if workers:
@@ -27,7 +25,7 @@ class WorkerManager:
         self._workers[backend] = worker
 
     async def execute(self, action: ActionIntent) -> WorkerResult:
-        backend = action.metadata.get("backend", "mock")
+        backend = action.metadata.get("backend", "runner")
         worker = self._workers.get(backend)
         if worker is None:
             raise WorkerUnavailable(

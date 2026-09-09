@@ -3,7 +3,7 @@ $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $python = (Get-Command python -ErrorAction Stop).Source
 $npm = (Get-Command npm.cmd -ErrorAction Stop).Source
 
-foreach ($name in @("backend", "kali-runner", "codex-bridge", "frontend")) {
+foreach ($name in @("backend", "kali-runner", "frontend")) {
     $envFile = Join-Path $repoRoot "$name\.env"
     $example = Join-Path $repoRoot "$name\.env.example"
     if (-not (Test-Path $envFile) -and (Test-Path $example)) {
@@ -25,4 +25,3 @@ function Invoke-InDirectory {
 Invoke-InDirectory (Join-Path $repoRoot "backend") $python @("-m", "pip", "install", "-e", ".[dev]")
 Invoke-InDirectory (Join-Path $repoRoot "kali-runner") $python @("-m", "pip", "install", "-e", ".[dev]")
 Invoke-InDirectory (Join-Path $repoRoot "frontend") $npm @("install")
-Invoke-InDirectory (Join-Path $repoRoot "codex-bridge") $npm @("install")

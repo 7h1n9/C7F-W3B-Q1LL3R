@@ -1,4 +1,4 @@
-﻿import {
+import {
   CommentOutlined,
   EditOutlined,
   EyeOutlined,
@@ -99,12 +99,13 @@ export function ChallengesPage() {
     mutationFn: (values: Record<string, unknown>) => {
       const workerTypes = Array.isArray(values.worker_engine_types) ? values.worker_engine_types.filter((item): item is string => typeof item === "string") : [];
       const workerConfigIds = Array.isArray(values.worker_model_config_ids) ? values.worker_model_config_ids.filter((item): item is string => typeof item === "string") : [];
+      const codexCliConfigId = typeof values.codex_cli_model_config_id === "string" ? values.codex_cli_model_config_id : "";
       const workerEngines = [
-        ...workerTypes.filter((type) => type !== "openai_compatible").map((engine_type) => ({ engine_type })),
         ...(workerTypes.includes("openai_compatible") ? workerConfigIds.map((model_config_id) => ({ engine_type: "openai_compatible", model_config_id })) : []),
+        ...(workerTypes.includes("codex_cli") && codexCliConfigId ? [{ engine_type: "codex_cli", model_config_id: codexCliConfigId }] : []),
       ];
-      const primary: { engine_type: string; model_config_id?: string } = workerEngines[0] ?? { engine_type: "mock" };
-      const { worker_engine_types: _types, worker_model_config_ids: _configs, ...rest } = values;
+      const primary: { engine_type: string; model_config_id?: string } = workerEngines[0] ?? { engine_type: "openai_compatible" };
+      const { worker_engine_types: _types, worker_model_config_ids: _configs, codex_cli_model_config_id: _codexConfig, ...rest } = values;
       return api.createRun(runChallenge!.id, { ...rest, engine_type: primary.engine_type, model_config_id: primary.model_config_id, worker_engines: workerEngines });
     },
     onSuccess: (run) => {
@@ -142,15 +143,15 @@ export function ChallengesPage() {
   const openRun = (challenge: Challenge) => {
     setRunChallenge(challenge);
     runForm.setFieldsValue({
-      engine_type: "mock",
+      engine_type: "openai_compatible",
       solver_mode: "muteki",
       reason_model_config_id: undefined,
-      worker_engine_types: ["mock"],
+      worker_engine_types: [],
       worker_model_config_ids: [],
       max_agent_steps: 120,
       max_tool_calls: 120,
-      max_runtime_seconds: 900,
-      max_total_runtime_seconds: 3600,
+      max_runtime_seconds: 480,
+      max_total_runtime_seconds: 1800,
       max_context_observations: 8,
     });
   };
@@ -280,8 +281,9 @@ export function ChallengesPage() {
           <Form.Item name="engine_type" hidden><Input /></Form.Item>
           <Form.Item name="solver_mode" label="解题架构" rules={[{ required: true }]}><Select options={[{ value: "muteki", label: "Muteki（Blackboard 多 Worker）" }, { value: "single_agent", label: "Single-Agent 兼容模式" }]} /></Form.Item>
           <Form.Item name="reason_model_config_id" label="Coordinator Reason 模型" extra="只负责读取 Blackboard 和规划 Intent，不执行工具"><Select allowClear placeholder="使用 Muteki 本地 Reason 回退" options={(modelConfigs.data ?? []).filter((item) => item.enabled && (item.roles ?? ["worker"]).includes("coordinator_reason")).map((item) => ({ value: item.id, label: `${item.name} · ${item.model_name ?? ""}` }))} /></Form.Item>
-          <Form.Item name="worker_engine_types" label="Worker 引擎（可多选）" extra="不同引擎会作为独立 EngineProfile 并行调度"><Checkbox.Group options={[{ value: "codex_sdk", label: "Codex SDK" }, { value: "mock", label: "Mock" }, { value: "openai_compatible", label: "OpenAI-compatible 模型" }]} /></Form.Item>
-          <Form.Item noStyle shouldUpdate={(previous, current) => previous.worker_engine_types !== current.worker_engine_types}>{({ getFieldValue }) => (getFieldValue("worker_engine_types") ?? []).includes("openai_compatible") ? <Form.Item name="worker_model_config_ids" label="OpenAI-compatible Worker 模型（可多选）" extra="例如 step-xxx、deepseek-chat；模型配置需包含 Worker 角色" rules={[{ required: true, type: "array", min: 1, message: "请选择至少一个 Worker 模型" }]}><Checkbox.Group options={(modelConfigs.data ?? []).filter((item) => item.enabled && (item.roles ?? ["worker"]).includes("worker")).map((item) => ({ value: item.id, label: `${item.name} · ${item.model_name ?? ""}` }))} /></Form.Item> : null}</Form.Item>
+          <Form.Item name="worker_engine_types" label="Worker 引擎（可多选）" extra="不同引擎会作为独立 EngineProfile 并行调度"><Checkbox.Group options={[{ value: "codex_cli", label: "Codex CLI" }, { value: "openai_compatible", label: "OpenAI-compatible 模型" }]} /></Form.Item>
+          <Form.Item noStyle shouldUpdate={(previous, current) => previous.worker_engine_types !== current.worker_engine_types}>{({ getFieldValue }) => (getFieldValue("worker_engine_types") ?? []).includes("openai_compatible") ? <Form.Item name="worker_model_config_ids" label="OpenAI-compatible Worker 模型（可多选）" extra="例如 step-xxx、deepseek-chat；模型配置需包含 Worker 角色" rules={[{ required: true, type: "array", min: 1, message: "请选择至少一个 Worker 模型" }]}><Checkbox.Group options={(modelConfigs.data ?? []).filter((item) => item.enabled && item.provider_type === "openai_compatible" && (item.roles ?? ["worker"]).includes("worker")).map((item) => ({ value: item.id, label: `${item.name} · ${item.model_name ?? ""}` }))} /></Form.Item> : null}</Form.Item>
+          <Form.Item noStyle shouldUpdate={(previous, current) => previous.worker_engine_types !== current.worker_engine_types}>{({ getFieldValue }) => (getFieldValue("worker_engine_types") ?? []).includes("codex_cli") ? <Form.Item name="codex_cli_model_config_id" label="Codex CLI Worker 模型" extra="选择 Settings 中已配置且已启用的 Codex CLI 模型；Codex CLI 只作为 Worker。" rules={[{ required: true, message: "请选择 Codex CLI 模型" }]}><Select options={(modelConfigs.data ?? []).filter((item) => item.enabled && item.provider_type === "codex_cli" && (item.roles ?? ["worker"]).includes("worker")).map((item) => ({ value: item.id, label: `${item.name} · ${item.model_name ?? ""}` }))} /></Form.Item> : null}</Form.Item>
           <Form.Item name="max_agent_steps" label="Run 累计最大 Agent 步数"><InputNumber min={1} max={300} style={{ width: "100%" }} /></Form.Item>
           <Form.Item name="max_tool_calls" label="Run 累计最大逻辑工具调用"><InputNumber min={0} max={300} style={{ width: "100%" }} /></Form.Item>
           <Form.Item name="max_runtime_seconds" label="单 Attempt 最大运行时长（秒）"><InputNumber min={10} max={3600} style={{ width: "100%" }} /></Form.Item>

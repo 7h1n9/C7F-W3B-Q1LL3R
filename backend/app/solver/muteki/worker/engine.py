@@ -44,10 +44,10 @@ def intent_prompt(intent: Intent) -> str:
 def get_engine(engine_type: str, *, cli: bool = False) -> WorkerEngine:
     """Create one of the supported engines without importing optional CLIs eagerly."""
 
-    from .engines import ClaudeEngine, CodexCliEngine, CodexEngine, CursorEngine
+    from .engines import ClaudeEngine, CodexCliEngine, CursorEngine
 
     engines = {
-        "codex": CodexCliEngine if cli else CodexEngine,
+        "codex": CodexCliEngine,
         "claude": ClaudeEngine,
         "cursor": CursorEngine,
     }

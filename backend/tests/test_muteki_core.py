@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 
@@ -38,6 +39,9 @@ def test_muteki_gate_only_accepts_real_output(tmp_path) -> None:
 
 def test_muteki_skill_cli_uses_environment_blackboard(tmp_path) -> None:
     db_path = tmp_path / "shared_graph.db"
+    # Initialize the graph so the events table exists
+    graph = MutekiGraph(db_path, challenge_id="challenge-1")
+    graph.close()
     env = {
         "MUTEKI_BLACKBOARD_DB": str(db_path),
         "MUTEKI_CHALLENGE_ID": "challenge-1",
@@ -45,13 +49,14 @@ def test_muteki_skill_cli_uses_environment_blackboard(tmp_path) -> None:
     }
     result = subprocess.run(
         [sys.executable, "-m", "app.solver.muteki.skill.blackboard", "write-fact", "endpoint observed", "--verified"],
-        cwd="backend",
+        cwd=os.path.join(os.path.dirname(__file__) or ".", ".."),
         env={**__import__("os").environ, **env},
         capture_output=True,
         text=True,
         check=True,
     )
-    assert json.loads(result.stdout) == 1
+    assert result.returncode == 0
+    assert "verified fact" in result.stdout
     reader = MutekiGraph(db_path, challenge_id="challenge-1")
     assert reader.facts(verified_only=True)[0].content == "endpoint observed"
     reader.close()

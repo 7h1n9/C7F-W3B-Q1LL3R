@@ -5,7 +5,7 @@ from dataclasses import dataclass
 
 from ..graph import Intent
 from .engine import WorkerEngine, WorkerResult
-from .engines import ClaudeEngine, CodexEngine, CursorEngine
+from .engines import ClaudeEngine, CodexCliEngine, CursorEngine
 
 
 @dataclass(frozen=True, slots=True)
@@ -22,7 +22,7 @@ class WorkerPool:
 
     def __init__(self, engines: dict[str, WorkerEngine] | None = None) -> None:
         self._engines = engines or {
-            "codex": CodexEngine(),
+            "codex": CodexCliEngine(),
             "claude": ClaudeEngine(),
             "cursor": CursorEngine(),
         }

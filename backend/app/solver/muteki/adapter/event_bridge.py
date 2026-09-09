@@ -8,7 +8,6 @@ from app.services.events import EventService
 
 from ..events import EventEnvelope
 
-
 _MUTEKI_PHASE_TO_RUN_PHASE = {
     "prepare": "PREPARE",
     "race": "RACE",

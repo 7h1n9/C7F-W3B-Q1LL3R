@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 import time
 import uuid
 from dataclasses import replace
@@ -59,17 +60,45 @@ def create_runtime_graph(
 
     selected_backend = runtime_graph_backend() if backend is None else runtime_graph_backend(backend)
     if selected_backend == "upstream":
-        return UpstreamRuntimeGraph(
+        graph: MutekiGraph | UpstreamRuntimeGraph = UpstreamRuntimeGraph(
             db_path,
             challenge=challenge,
             challenge_id=challenge_id,
             event_subscriber=event_subscriber,
         )
-    return MutekiGraph(
-        db_path,
-        challenge_id=challenge_id,
-        event_subscriber=event_subscriber,
-    )
+    else:
+        graph = MutekiGraph(
+            db_path,
+            challenge_id=challenge_id,
+            event_subscriber=event_subscriber,
+        )
+    _use_container_safe_journal_mode(graph)
+    return graph
+
+
+def _use_container_safe_journal_mode(graph: Any) -> None:
+    """Keep the worker-visible graph DB readable across the Docker bind mount.
+
+    SQLite WAL sidecars are not reliably shared across Docker Desktop bind
+    mounts.  Worker containers observed ``disk I/O error`` and
+    ``no such table: events`` when opening the live WAL graph.  DELETE mode
+    keeps the graph in one file that both the host process and the worker
+    container can open; short writes remain serialized by SQLite's busy
+    timeout.
+    """
+
+    connection = getattr(getattr(graph, "_graph", None), "_conn", None)
+    if connection is None:
+        connection = getattr(graph, "_db", None)
+    if connection is None:
+        return
+    try:
+        connection.execute("PRAGMA busy_timeout=10000")
+        connection.execute("PRAGMA journal_mode=DELETE")
+        connection.execute("PRAGMA synchronous=FULL")
+    except sqlite3.Error:
+        # A read-only or externally locked graph keeps its existing mode.
+        pass
 
 
 class UpstreamRuntimeGraph:

@@ -14,7 +14,7 @@ async def effective_tools_for(session: AsyncSession, run: SolveRun, challenge: C
     from app.models.run import AttemptToolManifest, RunExecutionLease
     lease = await session.scalar(select(RunExecutionLease).where(RunExecutionLease.run_id == run.id))
     asset_mysql = challenge.metadata_json.get("adapter") == "asset_warranty" and str(challenge.metadata_json.get("dbms") or "").lower() == "mysql"
-    if lease and run.engine_type == "codex_sdk":
+    if lease:
         manifest = await session.scalar(select(AttemptToolManifest).where(AttemptToolManifest.attempt_id == lease.attempt_id))
         if manifest is not None:
             effective = set(manifest.effective_tools or [])
@@ -66,10 +66,8 @@ async def effective_tools_for(session: AsyncSession, run: SolveRun, challenge: C
                 and item.get("self_test_ok", True)
             }
     except Exception:
-        # Keep local test/fallback engines usable when the optional Runner is down;
-        # codex attempts fail closed because their catalog must be reproducible.
-        if run.engine_type == "codex_sdk":
-            return set()
+        # Keep local test/fallback engines usable when the optional Runner is down.
+        pass
     return allowed - await forbidden_tools_for(session, run.id)
 
 

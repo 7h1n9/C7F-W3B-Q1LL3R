@@ -392,7 +392,7 @@ class CliDriver(abc.ABC):
         for attempt in range(self._HELLO_RETRIES + 1):
             try:
                 r = subprocess.run(argv, capture_output=True, text=True, encoding="utf-8", errors="replace",
-                                   timeout=self._HELLO_TIMEOUT, env=env)
+                                   timeout=self._HELLO_TIMEOUT, env=env, stdin=subprocess.DEVNULL)
             except FileNotFoundError:
                 return False, "binary not found on PATH"
             except subprocess.TimeoutExpired:
@@ -627,7 +627,8 @@ class CodexDriver(CliDriver):
         # `--json` already emits live per-step JSONL, so streaming needs no extra
         # flag — stream is accepted for interface parity.
         return [self.bin, *self._globals(web_access=web_access),
-                "exec", "--json", "--dangerously-bypass-approvals-and-sandbox",
+                "exec", "--json", "--ignore-rules",
+                "--dangerously-bypass-approvals-and-sandbox",
                 "--", prompt]
 
     def build_resume(
@@ -636,6 +637,7 @@ class CodexDriver(CliDriver):
     ) -> list[str]:
         return [self.bin, *self._globals(web_access=web_access),
                 "exec", "resume", session, "--json",
+                "--ignore-rules",
                 "--dangerously-bypass-approvals-and-sandbox",
                 "--", prompt]
 
@@ -749,7 +751,7 @@ class CodexDriver(CliDriver):
     def _hello_argv(self) -> list[str]:
         # a real one-turn exec (offline, sandboxed) — symmetric with claude/cursor
         # so the self-check actually exercises codex auth, not just `--version`.
-        return [self.bin, "exec", "--json",
+        return [self.bin, "exec", "--json", "--ignore-rules",
                 "--dangerously-bypass-approvals-and-sandbox", "--", self.HELLO_PROMPT]
 
     def _hello_ok(self, r: "subprocess.CompletedProcess") -> bool:
@@ -1009,6 +1011,29 @@ class ProfileDriver(CliDriver):
     def _with_model(self, argv: list[str]) -> list[str]:
         return _insert_model_arg(argv, self._model())
 
+    def _with_reasoning_effort(self, argv: list[str]) -> list[str]:
+        """Inject Codex's profile-scoped reasoning effort configuration.
+
+        Codex CLI accepts the same setting used by ``~/.codex/config.toml``
+        through ``-c model_reasoning_effort=\"high\"``.  Keep this at the
+        profile adapter boundary so the Coordinator and the canonical Worker
+        protocol continue to exchange only a model profile, never CLI flags.
+        Other CLI engines intentionally do not receive this Codex-only option.
+        """
+        if self.name != "codex":
+            return argv
+        effort = str(self.profile.get("reasoning_effort") or "").strip().lower()
+        if effort not in {"none", "low", "medium", "high", "xhigh", "max", "ultra"}:
+            return argv
+        if any("model_reasoning_effort" in value for value in argv):
+            return argv
+        insert_at = argv.index("exec") if "exec" in argv else 1
+        assignment = f"model_reasoning_effort={json.dumps(effort)}"
+        return [*argv[:insert_at], "-c", assignment, *argv[insert_at:]]
+
+    def _with_profile(self, argv: list[str]) -> list[str]:
+        return self._with_reasoning_effort(self._with_model(argv))
+
     def new_session(self) -> Optional[str]:
         return self.base.new_session()
 
@@ -1016,14 +1041,14 @@ class ProfileDriver(CliDriver):
         self, prompt: str, session: Optional[str], *,
         web_access: bool = True, kb_access: bool = True, stream: bool = False,
     ) -> list[str]:
-        return self._with_model(self.base.build_execute(
+        return self._with_profile(self.base.build_execute(
             prompt, session, web_access=web_access, kb_access=kb_access, stream=stream))
 
     def build_resume(
         self, prompt: str, session: str, *,
         web_access: bool = True, kb_access: bool = True, stream: bool = False,
     ) -> list[str]:
-        return self._with_model(self.base.build_resume(
+        return self._with_profile(self.base.build_resume(
             prompt, session, web_access=web_access, kb_access=kb_access, stream=stream))
 
     def parse(self, stdout: str, stderr: str) -> CliResult:
@@ -1036,7 +1061,7 @@ class ProfileDriver(CliDriver):
         return self.base.parse_stream_steps(line)
 
     def _hello_argv(self) -> list[str]:
-        return self._with_model(self.base._hello_argv())  # noqa: SLF001
+        return self._with_profile(self.base._hello_argv())  # noqa: SLF001
 
     def _hello_ok(self, r: "subprocess.CompletedProcess") -> bool:
         return self.base._hello_ok(r)  # noqa: SLF001
@@ -1715,7 +1740,7 @@ def run_cli(driver: CliDriver, argv: list[str], *, cwd: str, timeout: int,
     run_env = {**os.environ, **env} if env else None
     try:
         proc = subprocess.run(argv, cwd=cwd, capture_output=True, text=True, encoding="utf-8", errors="replace",
-                              timeout=timeout, env=run_env)
+                              timeout=timeout, env=run_env, stdin=subprocess.DEVNULL)
     except subprocess.TimeoutExpired as e:
         out = e.stdout if isinstance(e.stdout, str) else ""
         err = e.stderr if isinstance(e.stderr, str) else ""
@@ -1805,7 +1830,7 @@ def run_cli_streaming(
     # spawns curl/python/sh helpers) in its OWN process group. Killing just the
     # parent leaves a `sleep`/`curl` child holding the stdout pipe open, so the read
     # loop blocks until timeout (the deeper form of bug #2). We kill the whole GROUP.
-    proc = _sp.Popen(argv, cwd=cwd, stdout=_sp.PIPE, stderr=_sp.PIPE,
+    proc = _sp.Popen(argv, cwd=cwd, stdout=_sp.PIPE, stderr=_sp.PIPE, stdin=_sp.DEVNULL,
                      text=True, encoding="utf-8", errors="replace", bufsize=1, env=run_env,
                      start_new_session=True)  # line-buffered + own process group
     try:

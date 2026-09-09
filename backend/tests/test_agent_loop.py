@@ -59,10 +59,10 @@ def test_api_key_is_encrypted_and_round_trips() -> None:
 
 
 def test_service_settings_allow_only_local_endpoints() -> None:
-    settings = ServiceSettingsUpdate(runner_url="http://127.0.0.1:8091", codex_bridge_url="http://localhost:8090")
+    settings = ServiceSettingsUpdate(runner_url="http://127.0.0.1:8091")
     assert str(settings.runner_url).startswith("http://127.0.0.1")
     with pytest.raises(ValidationError):
-        ServiceSettingsUpdate(runner_url="http://example.com", codex_bridge_url="http://localhost:8090")
+        ServiceSettingsUpdate(runner_url="http://example.com")
 
 
 def test_local_target_is_detected_for_remote_runner() -> None:
@@ -77,7 +77,7 @@ def test_remote_local_target_override_is_configurable(monkeypatch: pytest.Monkey
     challenge = type("Challenge", (), {"target_url": "http://localhost:18001"})()
     assert target_is_local_to_backend(challenge)
     assert runner_is_remote()
-    assert not remote_local_target_blocked(challenge, "codex_sdk")
+    assert not remote_local_target_blocked(challenge, "codex_cli")
 
 
 @pytest.mark.asyncio

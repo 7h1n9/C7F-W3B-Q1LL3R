@@ -19,14 +19,12 @@ async def probe(url: str) -> dict:
 
 async def read() -> dict:
     settings = get_settings()
-    runner, bridge = await probe(settings.runner_url), await probe(settings.codex_bridge_url)
+    runner = await probe(settings.runner_url)
     return {
         "runner_url": settings.runner_url,
         "runner_allowed_cidrs": settings.allowed_service_cidrs,
         "runner_token_configured": bool(settings.runner_api_token),
         "runner": runner,
-        "codex_bridge_url": settings.codex_bridge_url,
-        "codex_bridge": bridge,
     }
 
 
@@ -37,11 +35,8 @@ async def get_system_settings() -> dict:
 
 @router.put("")
 async def update_system_settings(payload: ServiceSettingsUpdate) -> dict:
-    runner_url, bridge_url = (
-        str(payload.runner_url).rstrip("/"),
-        str(payload.codex_bridge_url).rstrip("/"),
-    )
-    persist_service_urls(runner_url, bridge_url)
+    runner_url = str(payload.runner_url).rstrip("/")
+    persist_service_urls(runner_url)
     settings = get_settings()
-    settings.runner_url, settings.codex_bridge_url = runner_url, bridge_url
+    settings.runner_url = runner_url
     return {"data": await read()}

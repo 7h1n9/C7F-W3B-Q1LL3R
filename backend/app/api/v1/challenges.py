@@ -10,7 +10,9 @@ from app.core.database import get_session
 from app.core.exceptions import DomainError
 from app.models.challenge import Challenge, ChallengeAttachment
 from app.models.run import SolveRun
+from app.models.scoring import ChallengePrediction
 from app.schemas.challenge import ChallengeInput, ChallengeRead
+from app.services.solver_scoring import get_prediction, request_prediction
 
 router = APIRouter(prefix="/challenges", tags=["challenges"])
 
@@ -30,6 +32,16 @@ async def require_challenge(challenge_id: str, session: AsyncSession) -> Challen
     if not item:
         raise DomainError("CHALLENGE_NOT_FOUND", "Challenge not found.", status_code=404)
     return item
+
+
+async def _attachments(session: AsyncSession, challenge_id: str) -> list[ChallengeAttachment]:
+    return list(
+        (
+            await session.scalars(
+                select(ChallengeAttachment).where(ChallengeAttachment.challenge_id == challenge_id)
+            )
+        ).all()
+    )
 
 
 async def _challenge_summary(session: AsyncSession, challenge: Challenge) -> dict:
@@ -104,6 +116,12 @@ async def update_challenge(
         item.status = "ACTIVE" if primary and primary.kind == "PCAP" else "DRAFT"
     await session.commit()
     await session.refresh(item)
+    try:
+        await request_prediction(
+            session, challenge=item, attachments=await _attachments(session, item.id)
+        )
+    except Exception:
+        await session.rollback()
     return {
         "data": ChallengeRead.model_validate({**read(item).model_dump(), **await _challenge_summary(session, item)})
     }
@@ -126,6 +144,10 @@ async def delete_challenge(
         ).all()
     )
     item.primary_attachment_id = None
+    await session.flush()
+    await session.execute(
+        delete(ChallengePrediction).where(ChallengePrediction.challenge_id == item.id)
+    )
     await session.flush()
     for attachment in attachments:
         raw_path = repository_root / attachment.relative_path
@@ -290,6 +312,14 @@ async def upload_attachment(
         challenge.status = "ACTIVE" if item.kind == "PCAP" else challenge.status
     await session.commit()
     await session.refresh(item)
+    try:
+        await request_prediction(
+            session,
+            challenge=challenge,
+            attachments=await _attachments(session, challenge.id),
+        )
+    except Exception:
+        await session.rollback()
     return {"data": attachment_read(item)}
 
 
@@ -321,4 +351,34 @@ async def delete_attachment(
             challenge.status = "DRAFT"
     await session.delete(item)
     await session.commit()
+    try:
+        await request_prediction(
+            session,
+            challenge=challenge,
+            attachments=await _attachments(session, challenge.id),
+        )
+    except Exception:
+        await session.rollback()
     return Response(status_code=204)
+
+
+@router.get("/{challenge_id}/prediction")
+async def get_challenge_prediction(
+    challenge_id: str, session: AsyncSession = Depends(get_session)
+) -> dict:
+    await require_challenge(challenge_id, session)
+    return {"data": await get_prediction(session, challenge_id)}
+
+
+@router.post("/{challenge_id}/predictions", status_code=202)
+async def refresh_challenge_prediction(
+    challenge_id: str, session: AsyncSession = Depends(get_session)
+) -> dict:
+    challenge = await require_challenge(challenge_id, session)
+    prediction = await request_prediction(
+        session,
+        challenge=challenge,
+        attachments=await _attachments(session, challenge_id),
+        force=True,
+    )
+    return {"data": prediction}

@@ -31,6 +31,7 @@ from app.solver.muteki.adapter.upstream_runtime_graph import (
     runtime_graph_backend,
 )
 from app.solver.muteki.core.orchestrator import MutekiOrchestrator, MutekiRunResult
+from app.solver.muteki.insight_bus import Insight, InsightBus, InsightKind
 from app.solver.muteki.events import EventType
 from app.solver.muteki.graph import MutekiGraph
 from app.solver.muteki.reason import MutekiReason
@@ -60,6 +61,8 @@ def resolve_muteki_worker_backend(configured_backend: str | None = None) -> str:
     normalized = str(value or "").strip().casefold()
     if normalized in {"", MUTEKI_CONTAINER_ONLY_BACKEND}:
         return MUTEKI_CONTAINER_ONLY_BACKEND
+    if normalized in {"upstream_local", "local"}:
+        return "upstream_local"
     raise ValueError(
         "MUTEKI_CONTAINER_ONLY: production Muteki requires "
         "APP_MUTEKI_WORKER_BACKEND=upstream_container; "
@@ -139,6 +142,7 @@ class MutekiRuntime:
         )
         self.event_bridge: EventBridge | None = None
         self._graph: MutekiGraph | None = None
+        self._insight_bus: InsightBus | None = None
         self._public_credentials: tuple[str, str] | None = None
         self._reason_model: CoordinatorReasonModel | None = None
         self._worker_models: dict[str, OpenAICompatibleEngine] = {}
@@ -164,11 +168,74 @@ class MutekiRuntime:
         # graph callbacks can be scheduled while the worker session is busy
         # collecting ToolGateway results.
         self.event_bridge = EventBridge(SessionLocal, run_id=self._run_id)
+        # Per-run worker Insight Bus: verified facts / dead-ends / flags are
+        # fanned out to every participating worker's inbox in real time so a
+        # Codex worker immediately sees what an OpenAI worker confirmed without
+        # waiting for the next Coordinator poll.  The bus is memory-only and
+        # per-Run, matching upstream Muteki's per-challenge fan-out hub.
+        self._insight_bus = InsightBus(challenge_id=self._run_id)
+
+        def _graph_to_insights(event) -> None:
+            # The graph already fans out to the audit EventBridge; mirror the
+            # same ordering here so the InsightBus is never a source of truth,
+            # just a low-latency collaboration channel for active workers.
+            try:
+                subscriber = self.event_bridge.callback()
+                if subscriber is not None and callable(subscriber):
+                    subscriber(event)
+            except Exception:
+                if self._graph is not None:
+                    with contextlib.suppress(Exception):
+                        self._graph.add_dead_end(
+                            actor="muteki-runtime",
+                            description="EVENT_BRIDGE_CALLBACK_FAILED",
+                        )
+            if self._insight_bus is None:
+                return
+            etype = str(getattr(event, "event_type", "") or "")
+            payload = dict(getattr(event, "payload", {}) or {})
+            actor = str(getattr(event, "actor", "") or "worker")
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                loop = None
+            if etype == "fact_added" or etype == EventType.FACT_ADDED:
+                text = str(payload.get("content") or payload.get("fact") or "")
+                verified = bool(getattr(event, "verified", False))
+                if text and verified and loop is not None:
+                    try:
+                        self._graph_to_insight_task = loop.create_task(
+                            self._insight_bus.fact(actor, text),
+                            name=f"muteki-insight-fact-{self._run_id}",
+                        )
+                    except Exception:
+                        pass
+            elif etype == "dead_end" or etype == EventType.DEAD_END:
+                text = str(payload.get("description") or payload.get("reason") or "")
+                if text and loop is not None:
+                    try:
+                        self._graph_to_insight_task = loop.create_task(
+                            self._insight_bus.dead_end(actor, text),
+                            name=f"muteki-insight-deadend-{self._run_id}",
+                        )
+                    except Exception:
+                        pass
+            elif etype == "flag_found" or etype == EventType.FLAG_FOUND:
+                flag = str(payload.get("flag") or "")
+                if flag and loop is not None:
+                    try:
+                        self._graph_to_insight_task = loop.create_task(
+                            self._insight_bus.flag_found(actor, flag),
+                            name=f"muteki-insight-flag-{self._run_id}",
+                        )
+                    except Exception:
+                        pass
+
         self._graph = create_runtime_graph(
             graph_path,
             challenge=self.challenge,
             challenge_id=self._run_id,
-            event_subscriber=self.event_bridge.callback(),
+            event_subscriber=_graph_to_insights,
             backend=graph_backend,
         )
         reason_provider = await self._build_reason_provider()
@@ -221,6 +288,7 @@ class MutekiRuntime:
                 ),
                 worker_max_turns=min(80, max_agent_steps),
                 max_total_workers=native_worker_budget,
+                insight_bus=self._insight_bus,
             )
             total_timeout = max(
                 1,
@@ -233,28 +301,15 @@ class MutekiRuntime:
                     ),
                 ),
             )
-            try:
-                result = await asyncio.wait_for(
-                    orchestrator.run(max_rounds=max_rounds),
-                    timeout=total_timeout,
-                )
-            except asyncio.TimeoutError:
-                # The official Coordinator/Worker owns per-turn cancellation;
-                # this outer deadline owns the whole Run.  ``wait_for``
-                # cancellation enters Coordinator.finalize(), which calls the
-                # native CliSolver.cancel() hook before container teardown.
-                self._graph.add_dead_end(
-                    actor="muteki-runtime",
-                    description="MUTEKI_RUN_TIMEOUT",
-                )
-                result = MutekiRunResult(
-                    run_id=self._run_id,
-                    challenge_id=self.challenge.id,
-                    status="TIMEOUT",
-                    flag_found=False,
-                    reason="MUTEKI_RUN_TIMEOUT",
-                    graph_path=str(graph_path),
-                )
+            result = await self._run_orchestrator_with_deadline(
+                orchestrator,
+                max_rounds=max_rounds,
+                total_timeout=total_timeout,
+            )
+            # \u00a716 distillation: on a successful solve, distill the
+            # solved graph into a reusable template and store it.
+            if result.flag_found and result.graph_path:
+                self._distill(result.graph_path, reason=str(result.reason or ""))
 
             try:
                 await asyncio.wait_for(self.event_bridge.flush(), timeout=15.0)
@@ -278,8 +333,58 @@ class MutekiRuntime:
             for model in tuple(self._worker_models.values()):
                 await model.close()
             self._worker_models.clear()
+            if self._insight_bus is not None:
+                for sid in tuple(self._insight_bus._inboxes):
+                    self._insight_bus.unsubscribe(sid)
             if self._graph is not None:
                 self._graph.close()
+
+    async def _run_orchestrator_with_deadline(
+        self,
+        orchestrator: MutekiOrchestrator,
+        *,
+        max_rounds: int | None,
+        total_timeout: int,
+    ) -> MutekiRunResult:
+        """Run the Solver Loop under the total deadline.
+
+        Reaching the deadline is a cooperative stop request, not a hard task
+        cancellation.  The Coordinator owns its terminal ``Finalize`` step in
+        the normal return path, so Runtime must await that path to completion
+        before reporting the timed-out Run.
+        """
+
+        run_task = asyncio.create_task(
+            orchestrator.run(max_rounds=max_rounds),
+            name=f"muteki-orchestrator-{self._run_id}",
+        )
+        try:
+            return await asyncio.wait_for(
+                asyncio.shield(run_task),
+                timeout=total_timeout,
+            )
+        except asyncio.TimeoutError:
+            if self._graph is not None:
+                self._graph.add_dead_end(
+                    actor="muteki-runtime",
+                    description="MUTEKI_RUN_TIMEOUT",
+                )
+            request_stop = getattr(
+                getattr(orchestrator, "coordinator", None),
+                "request_stop",
+                None,
+            )
+            if callable(request_stop):
+                request_stop("MUTEKI_RUN_TIMEOUT")
+            # Do not cancel here.  Coordinator.run owns Finalize in its
+            # ``finally`` path; cancelling can interrupt asynchronous cleanup
+            # and leaves the terminal Blackboard handoff incomplete.
+            return await run_task
+        except BaseException:
+            if not run_task.done():
+                run_task.cancel()
+                await asyncio.gather(run_task, return_exceptions=True)
+            raise
 
     async def _build_reason_provider(self):
         """Build the Coordinator Reason model separately from Worker engines."""
@@ -472,6 +577,42 @@ class MutekiRuntime:
                         "api_key_ref": "env:OPENAI_API_KEY",
                     }
                     environment["OPENAI_API_KEY"] = api_key
+                elif selection.engine_type == "codex_cli":
+                    if config.provider_type != "codex_cli":
+                        continue
+                    driver_profile = {
+                        "id": selection.engine_id,
+                        "name": selection.engine_id,
+                        "engine": "codex",
+                        "transport": "codex_cli",
+                        "protocol": "codex_cli",
+                        "model": str(config.model_name or config.name).strip(),
+                        "reasoning_effort": str(
+                            (config.capabilities_json or {}).get("reasoning_effort") or "medium"
+                        ).strip(),
+                    }
+                    base_url = str(config.base_url or "").strip()
+                    if base_url:
+                        wire_api = str((config.capabilities_json or {}).get("wire_api") or "responses").strip()
+                        driver_profile["base_url"] = base_url
+                        driver_profile["wire_api"] = wire_api
+                        driver_profile["api_key_ref"] = "env:OPENAI_API_KEY"
+                        api_key = decrypt_api_key(config.encrypted_api_key) if config.encrypted_api_key else ""
+                        if api_key:
+                            environment["OPENAI_API_KEY"] = api_key
+                        else:
+                            # Do not silently drop a selected API Worker.
+                            continue
+                    else:
+                        # Local/subscription codex CLI: use account store.
+                        codex_account_id = (
+                            os.environ.get("MUTEKI_CODEX_ACCOUNT_ID")
+                            or os.environ.get("MUTEKI_DEFAULT_ACCOUNT_ID")
+                            or "codex-main"
+                        ).strip()
+                        environment["MUTEKI_CREDENTIAL_ACCOUNT_ID"] = codex_account_id
+                        environment["MUTEKI_CODEX_ACCOUNT_ID"] = codex_account_id
+                    environment["MUTEKI_WORKER_MODEL"] = driver_profile["model"]
                 environment.update(
                     {
                         "MUTEKI_MODEL_CONFIG_ID": str(config.id),
@@ -648,6 +789,42 @@ class MutekiRuntime:
                 description="LEGACY_WORKER_ROUTE_DISABLED_CONTAINER_ONLY",
             )
         return WorkerOutcome(job.worker_id, "FAILED", result="MUTEKI_CONTAINER_ONLY")
+
+    def _distill(self, graph_path: str, reason: str = "") -> None:
+        """Distill a solved run into a reusable template (\\u00a716)."""
+        import traceback
+        from pathlib import Path
+
+        try:
+            from muteki.learning.distill import (
+                TemplateStore,
+                distill_from_events,
+                distill_and_store,
+            )
+            from muteki.swarm.shared_graph import SharedGraph
+
+            g = SharedGraph(Path(graph_path), challenge_id=self.challenge.id)
+            store = TemplateStore(
+                root=Path(self._workspace_path).resolve().parent.parent
+                / "knowledge"
+            )
+            tpl = distill_from_events(g, winner=self._run_id)
+            store.save(tpl)
+            self._graph.emit_event(
+                actor="muteki-runtime",
+                event_type=EventType.RUN_FINISHED,
+                payload={
+                    "distilled": True,
+                    "template_name": tpl.name,
+                    "template_category": tpl.category,
+                    "template_keywords": tpl.keywords[:8],
+                },
+            )
+        except Exception:
+            self._graph.add_dead_end(
+                actor="muteki-runtime",
+                description=f"DISTILL_FAILED: {traceback.format_exc()[:200]}",
+            )
 
 
 def _sensitive_argument_name(name: str) -> bool:

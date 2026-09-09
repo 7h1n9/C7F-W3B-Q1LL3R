@@ -87,6 +87,12 @@ async def create_conversation(
                 "The selected model configuration is unavailable.",
                 status_code=422,
             )
+        if model.provider_type == "codex_cli":
+            raise DomainError(
+                "CODEX_CLI_WORKER_ONLY",
+                "Codex CLI is available only as a Muteki Worker, not as a chat model.",
+                status_code=422,
+            )
     conversation = ChallengeConversation(
         challenge_id=challenge_id, model_config_id=payload.model_config_id, title=payload.title
     )

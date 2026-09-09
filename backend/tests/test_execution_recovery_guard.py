@@ -50,7 +50,7 @@ async def add_production_call(session, run, *, status="STARTED", runner_job_id="
     attempt = RunAttempt(
         run_id=run.id,
         attempt_number=1,
-        engine_type="mock",
+        engine_type="openai_compatible",
         status="RUNNING",
         heartbeat_at=now,
     )

@@ -12,6 +12,8 @@ from app.solver.muteki import (
     MutekiWorkerPool,
 )
 from app.solver.muteki.adapter.upstream_runtime_graph import UpstreamRuntimeGraph
+from app.solver.muteki.core.orchestrator import MutekiOrchestrator
+from app.solver.muteki.runtime.muteki_runtime import MutekiRuntime
 from app.solver.muteki.worker.official_worker import OfficialWorkerResult
 from app.solver.muteki.workers import WorkerJob
 
@@ -90,6 +92,56 @@ def test_race_timeout_recovers_into_coordinator_instead_of_terminating_run(tmp_p
         assert phases == ["prepare", "race", "coordinator", "finalize"]
 
     asyncio.run(scenario())
+
+
+def test_run_timeout_cooperatively_finalizes_before_returning_timeout(tmp_path) -> None:
+    graph = MutekiGraph(tmp_path / "run-timeout.sqlite", challenge_id="challenge-run-timeout")
+    worker_finished = False
+
+    async def runner(_job):
+        nonlocal worker_finished
+        await asyncio.sleep(0.05)
+        worker_finished = True
+
+    async def scenario():
+        orchestrator = MutekiOrchestrator(
+            graph,
+            MutekiReason(),
+            worker_runner=runner,
+            engines=[EngineProfile("gateway-runner")],
+            interval_seconds=0.0,
+            worker_timeout_seconds=1,
+        )
+        runtime = object.__new__(MutekiRuntime)
+        runtime._run_id = graph.challenge_id
+        runtime._graph = graph
+        return await runtime._run_orchestrator_with_deadline(
+            orchestrator,
+            max_rounds=None,
+            total_timeout=0.01,
+        )
+
+    result = asyncio.run(scenario())
+    events = graph.events_since()
+    phases = [
+        str(item.payload.get("phase"))
+        for item in events
+        if item.event_type == EventType.PHASE_CHANGED
+    ]
+    finished = [
+        item
+        for item in events
+        if item.event_type == EventType.RUN_FINISHED
+    ]
+
+    assert worker_finished
+    assert result.status == "TIMEOUT"
+    assert result.reason == "MUTEKI_RUN_TIMEOUT"
+    assert not result.flag_found
+    assert phases == ["prepare", "race", "finalize"]
+    assert len(finished) == 1
+    assert finished[0].payload["reason"] == "MUTEKI_RUN_TIMEOUT"
+    assert finished[0].payload["flag_found"] is False
 
 
 def test_total_worker_budget_matches_upstream_spawn_boundary(tmp_path) -> None:

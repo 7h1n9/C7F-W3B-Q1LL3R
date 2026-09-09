@@ -4,27 +4,27 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class WorkerEngineSelection(BaseModel):
-    engine_type: Literal["mock", "codex_sdk", "openai_compatible"]
+    engine_type: Literal["codex_cli", "openai_compatible"]
     model_config_id: str | None = None
 
     @field_validator("engine_type", mode="before")
     @classmethod
     def normalize_engine_type(cls, value: object) -> object:
-        aliases = {"codex": "codex_sdk", "codex-sdk": "codex_sdk", "openai-compatible": "openai_compatible"}
+        aliases = {"codex": "codex_cli", "codex-sdk": "codex_cli", "codex_sdk": "codex_cli", "codex-cli": "codex_cli", "codex-api": "codex_cli", "openai-compatible": "openai_compatible"}
         normalized = str(value or "").strip().casefold()
         return aliases.get(normalized, normalized)
 
     @model_validator(mode="after")
     def validate_model_binding(self) -> "WorkerEngineSelection":
-        if self.engine_type == "openai_compatible" and not self.model_config_id:
-            raise ValueError("openai_compatible worker requires model_config_id")
-        if self.engine_type != "openai_compatible" and self.model_config_id:
+        if self.engine_type in {"openai_compatible", "codex_cli"} and not self.model_config_id:
+            raise ValueError(f"{self.engine_type} worker requires model_config_id")
+        if self.engine_type not in {"openai_compatible", "codex_cli"} and self.model_config_id:
             raise ValueError(f"{self.engine_type} worker does not accept model_config_id")
         return self
 
 
 class RunCreate(BaseModel):
-    engine_type: str = Field(default="mock", pattern="^(mock|openai_compatible|codex_sdk)$")
+    engine_type: str = Field(default="openai_compatible", pattern="^(openai_compatible|codex_cli)$")
     # New Runs expose only the two currently supported execution paths.
     # Existing database rows keep their persisted legacy mode and remain
     # readable through RunRead during the migration window.
@@ -35,8 +35,8 @@ class RunCreate(BaseModel):
     max_agent_steps: int = Field(default=120, ge=1, le=300)
     max_tool_calls: int = Field(default=120, ge=0, le=300)
     max_context_observations: int = Field(default=8, ge=1, le=50)
-    max_runtime_seconds: int = Field(default=900, ge=10, le=3600)
-    max_total_runtime_seconds: int = Field(default=3600, ge=10, le=14400)
+    max_runtime_seconds: int = Field(default=480, ge=10, le=3600)
+    max_total_runtime_seconds: int = Field(default=1800, ge=10, le=14400)
     selected_skill_ids: list[str] = Field(default_factory=list, max_length=30)
     disabled_skill_ids: list[str] = Field(default_factory=list, max_length=30)
     conversation_id: str | None = None
@@ -96,6 +96,7 @@ class RunRead(BaseModel):
     active_skill_names: list[str] = Field(default_factory=list)
     diagnostic_tags: list[str] = Field(default_factory=list)
     diagnostic_summary: str | None = None
+    score: dict | None = None
     started_at: str | None
     finished_at: str | None
     created_at: str

@@ -24,7 +24,6 @@ from app.core.config import get_settings
 from app.core.database import SessionLocal
 from app.models.run import SolveRun
 
-
 SEMANTIC_CACHE_KEY = "muteki_board_semantic"
 _locks: dict[str, asyncio.Lock] = {}
 _tasks: dict[str, asyncio.Task[None]] = {}
@@ -132,14 +131,14 @@ def parse_bridge_events(events: list[dict[str, Any]], expected_ids: set[str]) ->
     ]
     raw = next((message for message in reversed(messages) if message.strip()), "")
     if not raw:
-        raise ValueError("CODEX_BOARD_EMPTY_RESPONSE")
+        raise ValueError("BOARD_SEMANTIC_EMPTY_RESPONSE")
     try:
         document = json.loads(raw)
     except json.JSONDecodeError as error:
-        raise ValueError("CODEX_BOARD_INVALID_JSON") from error
+        raise ValueError("BOARD_SEMANTIC_INVALID_JSON") from error
     rows = document.get("items") if isinstance(document, dict) else None
     if not isinstance(rows, list):
-        raise ValueError("CODEX_BOARD_ITEMS_MISSING")
+        raise ValueError("BOARD_SEMANTIC_ITEMS_MISSING")
     result: list[dict[str, str]] = []
     seen: set[str] = set()
     for row in rows:
@@ -156,7 +155,7 @@ def parse_bridge_events(events: list[dict[str, Any]], expected_ids: set[str]) ->
         result.append({"card_id": card_id, "summary_zh": summary[:180], "category": category, "importance": importance})
         seen.add(card_id)
     if not result:
-        raise ValueError("CODEX_BOARD_NO_VALID_ITEMS")
+        raise ValueError("BOARD_SEMANTIC_NO_VALID_ITEMS")
     usage = next(
         (event.get("payload", {}).get("usage") for event in reversed(events) if event.get("type") == "agent.turn_completed"),
         {},
@@ -169,38 +168,88 @@ def parse_bridge_events(events: list[dict[str, Any]], expected_ids: set[str]) ->
     }
 
 
-async def _call_codex(run_id: str, items: list[dict[str, Any]]) -> tuple[list[dict[str, str]], dict[str, int]]:
-    settings = get_settings()
-    empty_workspace = tempfile.mkdtemp(prefix="muteki-board-semantic-")
+async def _call_llm(run_id: str, items: list[dict[str, Any]]) -> tuple[list[dict[str, str]], dict[str, int]]:
+    """Use the Run's Reason model (or the first enabled openai_compatible config)
+    for board semantic analysis."""
+    from app.core.config import get_settings
+    from app.core.database import SessionLocal
+    from app.models.model_config import ModelConfig
+    from app.models.run import SolveRun
+    from app.services.crypto import decrypt_api_key
+    from app.solver.muteki.runtime.configuration import runtime_selection_from_hints
+
+    async with SessionLocal() as session:
+        run = await session.get(SolveRun, run_id)
+        if not run:
+            raise ValueError("BOARD_SEMANTIC_RUN_NOT_FOUND")
+        reason_id, _ = runtime_selection_from_hints(run.hints_json)
+        config = None
+        if reason_id:
+            config = await session.get(ModelConfig, reason_id)
+        if not config or not config.enabled or config.provider_type != "openai_compatible":
+            # Fallback to first enabled openai_compatible config
+            config = (await session.scalars(
+                select(ModelConfig).where(ModelConfig.enabled, ModelConfig.provider_type == "openai_compatible").limit(1)
+            )).first()
+        if not config or not config.encrypted_api_key or not config.base_url:
+            raise ValueError("BOARD_SEMANTIC_MODEL_UNAVAILABLE")
+        api_key = decrypt_api_key(config.encrypted_api_key)
+        model = str(config.model_name or config.name)
+        base_url = str(config.base_url).rstrip("/")
+    timeout = httpx.Timeout(connect=10, read=180, write=10, pool=10)
+    async with httpx.AsyncClient(timeout=timeout, trust_env=False) as client:
+        response = await client.post(
+            f"{base_url}/chat/completions",
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            json={
+                "model": model,
+                "messages": [{"role": "user", "content": _prompt(items)}],
+                "response_format": {"type": "json_object"},
+                "max_tokens": 1024,
+                "temperature": 0.0,
+            },
+        )
+        response.raise_for_status()
+        body = response.json()
+        message = body["choices"][0]["message"]["content"]
+        usage = body.get("usage", {})
+    return _parse_llm_message(message, {str(item["card_id"]) for item in items}), {
+        "input_tokens": int(usage.get("prompt_tokens") or 0),
+        "output_tokens": int(usage.get("completion_tokens") or 0),
+        "total_tokens": int(usage.get("total_tokens") or 0),
+    }
+
+
+def _parse_llm_message(raw: str, expected_ids: set[str]) -> list[dict[str, str]]:
+    """Extract and validate the final JSON message from LLM response."""
+    import json
+    if not raw:
+        raise ValueError("BOARD_SEMANTIC_EMPTY_RESPONSE")
     try:
-        timeout = httpx.Timeout(connect=10, read=180, write=10, pool=10)
-        async with httpx.AsyncClient(timeout=timeout, trust_env=False) as client:
-            thread_response = await client.post(
-                f"{settings.codex_bridge_url.rstrip('/')}/threads",
-                json={
-                    "run_id": f"board-semantic-{run_id}",
-                    "workspace_path": empty_workspace,
-                    "prompt": "Prepare the read-only board summary.",
-                    "scope": {"execution_mode": "board_semantic"},
-                },
-            )
-            if thread_response.is_error:
-                detail = thread_response.json() if thread_response.content else {}
-                raise ValueError(str(detail.get("code") or "CODEX_BOARD_THREAD_CREATE_FAILED"))
-            thread_id = str(thread_response.json().get("thread_id") or "")
-            if not thread_id:
-                raise ValueError("CODEX_BOARD_THREAD_MISSING")
-            response = await client.post(
-                f"{settings.codex_bridge_url.rstrip('/')}/threads/{thread_id}/run",
-                json={"prompt": _prompt(items), "output_schema": _schema()},
-            )
-            if response.is_error:
-                detail = response.json() if response.content else {}
-                raise ValueError(str(detail.get("code") or "CODEX_BOARD_RUN_FAILED"))
-            events = [json.loads(line) for line in response.text.splitlines() if line.strip()]
-    finally:
-        shutil.rmtree(empty_workspace, ignore_errors=True)
-    return parse_bridge_events(events, {str(item["card_id"]) for item in items})
+        document = json.loads(raw)
+    except json.JSONDecodeError as error:
+        raise ValueError("BOARD_SEMANTIC_INVALID_JSON") from error
+    rows = document.get("items") if isinstance(document, dict) else None
+    if not isinstance(rows, list):
+        raise ValueError("BOARD_SEMANTIC_ITEMS_MISSING")
+    result: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        card_id = str(row.get("card_id") or "")
+        summary = _redact(str(row.get("summary_zh") or "")).strip()
+        category = str(row.get("category") or "事实").strip()[:30]
+        importance = str(row.get("importance") or "medium").lower()
+        if card_id not in expected_ids or card_id in seen or not summary:
+            continue
+        if importance not in {"high", "medium", "low"}:
+            importance = "medium"
+        result.append({"card_id": card_id, "summary_zh": summary[:180], "category": category, "importance": importance})
+        seen.add(card_id)
+    if not result:
+        raise ValueError("BOARD_SEMANTIC_NO_VALID_ITEMS")
+    return result
 
 
 async def _save_cache(run_id: str, cache: dict[str, Any]) -> None:
@@ -216,12 +265,12 @@ async def _save_cache(run_id: str, cache: dict[str, Any]) -> None:
 
 async def _run_background(run_id: str, fingerprint: str, revision: int, items: list[dict[str, Any]]) -> None:
     try:
-        summaries, usage = await asyncio.wait_for(_call_codex(run_id, items), timeout=180)
+        summaries, usage = await asyncio.wait_for(_call_llm(run_id, items), timeout=180)
         await _save_cache(
             run_id,
             {
                 "status": "completed",
-                "model": "codex",
+                "model": "openai-compatible",
                 "revision": revision,
                 "fingerprint": fingerprint,
                 "items": summaries,
@@ -230,12 +279,12 @@ async def _run_background(run_id: str, fingerprint: str, revision: int, items: l
             },
         )
     except TimeoutError:
-        error_code = "CODEX_BOARD_TIMEOUT"
+        error_code = "BOARD_SEMANTIC_TIMEOUT"
         await _save_cache(
             run_id,
             {
                 "status": "failed",
-                "model": "codex",
+                "model": "openai-compatible",
                 "revision": revision,
                 "fingerprint": fingerprint,
                 "items": [],
@@ -249,7 +298,7 @@ async def _run_background(run_id: str, fingerprint: str, revision: int, items: l
             run_id,
             {
                 "status": "failed",
-                "model": "codex",
+                "model": "openai-compatible",
                 "revision": revision,
                 "fingerprint": fingerprint,
                 "items": [],
@@ -276,10 +325,10 @@ async def request_analysis(
         return existing
     task = _tasks.get(str(run.id))
     if task is not None and not task.done():
-        return existing or {"status": "running", "model": "codex", "revision": revision, "fingerprint": fingerprint, "items": []}
+        return existing or {"status": "running", "model": "openai-compatible", "revision": revision, "fingerprint": fingerprint, "items": []}
     cache = {
         "status": "running",
-        "model": "codex",
+        "model": "openai-compatible",
         "revision": revision,
         "fingerprint": fingerprint,
         "items": [],

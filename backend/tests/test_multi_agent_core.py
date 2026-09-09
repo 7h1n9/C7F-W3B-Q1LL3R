@@ -407,7 +407,7 @@ async def test_cancel_run_closes_attempt_tasks_actions_tools_and_lease(session_f
     async with session_factory() as session:
         challenge, run = await _asset_mysql_run(session)
         run.status = RunStatus.EXECUTING.value
-        attempt = RunAttempt(run_id=run.id, attempt_number=1, engine_type="mock", status="RUNNING")
+        attempt = RunAttempt(run_id=run.id, attempt_number=1, engine_type="openai_compatible", status="RUNNING")
         session.add(attempt)
         await session.flush()
         task = AgentTask(run_id=run.id, agent_role=AgentRole.EXPLOIT.value, task_kind="EXPLOIT", objective="active", status="RUNNING")

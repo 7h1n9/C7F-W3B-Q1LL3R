@@ -24,6 +24,10 @@ from app.models.run import (
 from app.orchestration.state_machine import TERMINAL, RunStatus
 from app.services.events import event_service
 from app.services.manual_writeup import ManualWriteupRenderer
+from app.services.muteki_board_semantics import SEMANTIC_CACHE_KEY
+from app.services.muteki_poc_bundle import PocBundleUnavailable, build_poc_bundle_for_run
+from app.services.muteki_recovered_trace import load_recovered_trace, merge_recovered_state
+from app.services.muteki_writeup import render_muteki_writeup
 from app.services.reproduction_commands import reproduction_command_renderer
 from app.solver.muteki.adapter.cost_bridge import load_muteki_usage
 
@@ -350,6 +354,9 @@ class ReportService:
         if existing is not None:
             return existing
 
+        challenge = await session.get(Challenge, run.challenge_id)
+        if challenge is None:
+            raise ValueError("MUTEKI_CHALLENGE_NOT_FOUND")
         evidence_refs = [
             str(item)
             for item in await session.scalars(
@@ -360,6 +367,59 @@ class ReportService:
         ]
         status = str(getattr(result, "status", run.status))
         solved = status == RunStatus.COMPLETED_SOLVED.value
+        graph_path = Path(str(getattr(result, "graph_path", "") or "")).resolve()
+        if not graph_path.is_file():
+            graph_path = Path(run.workspace_path).resolve() / "muteki" / "graph" / "upstream_shared_graph.db"
+        from app.solver.muteki.adapter.graph_snapshot import read_native_graph_snapshot
+
+        graph_state = await asyncio.to_thread(
+            read_native_graph_snapshot,
+            db_path=graph_path,
+            challenge=challenge,
+            run_id=str(run.id),
+        )
+        recovered_trace = await asyncio.to_thread(
+            load_recovered_trace,
+            workspace=str(run.workspace_path),
+            target_url=str(getattr(challenge, "target_url", "") or ""),
+        )
+        graph_state = merge_recovered_state(graph_state, recovered_trace)
+        semantic_analysis = dict((run.hints_json or {}).get(SEMANTIC_CACHE_KEY) or {})
+        calls = list(
+            (
+                await session.scalars(
+                    select(ToolCall).where(ToolCall.run_id == run.id).order_by(ToolCall.created_at)
+                )
+            ).all()
+        )
+        observations = list(
+            (
+                await session.scalars(
+                    select(Observation).where(Observation.run_id == run.id).order_by(Observation.created_at)
+                )
+            ).all()
+        )
+        evidence_rows = list(
+            (
+                await session.scalars(
+                    select(EvidenceLedger).where(EvidenceLedger.run_id == run.id).order_by(EvidenceLedger.created_at)
+                )
+            ).all()
+        )
+        recovered_evidence_refs = [
+            str(item.get("id"))
+            for item in recovered_trace.get("evidence", [])
+            if item.get("id") and str(item.get("status") or "").upper() == "VERIFIED"
+        ]
+        evidence_refs = list(dict.fromkeys([*evidence_refs, *recovered_evidence_refs]))
+        poc_bundle = None
+        try:
+            poc_bundle = await build_poc_bundle_for_run(session, run, challenge, graph_state)
+        except PocBundleUnavailable:
+            # A solved graph can be valid while not containing a replayable
+            # HTTP request.  Keep the report truthful and expose the missing
+            # condition in the WP instead of manufacturing a script.
+            poc_bundle = None
         usage = await load_muteki_usage(session, str(run.id))
         report_payload = {
             "result": "solved" if solved else "unsolved",
@@ -370,9 +430,32 @@ class ReportService:
             "flag_verified": bool(getattr(result, "flag_found", False)) if solved else False,
             "evidence_refs": evidence_refs,
             "evidence_count": len(evidence_refs),
-            "graph_path": str(getattr(result, "graph_path", "")),
+            "evidence_sources": (
+                (["evidence_ledger"] if evidence_rows else [])
+                + (["recovered_execution_record"] if recovered_evidence_refs else [])
+            ),
+            "graph_path": str(graph_path),
             "completed_stages": ["prepare", "race", "coordinator", "finalize"],
             "tool_call_count": int(run.tool_call_count or 0),
+            "graph_revision": int(graph_state.get("revision") or 0),
+            "poc_reproducible": poc_bundle is not None,
+            "poc_bundle": {
+                "path": "final/muteki-poc.zip",
+                "step_count": len(poc_bundle.request_plan),
+                "evidence_refs": list(poc_bundle.evidence_refs),
+            } if poc_bundle is not None else None,
+            "recovered_trace": {
+                "available": bool(recovered_trace.get("available")),
+                "step_count": len(recovered_trace.get("steps", []) or []),
+                "replayable_step_count": len(recovered_trace.get("replayable_steps", []) or []),
+            },
+            "semantic_analysis": {
+                "status": semantic_analysis.get("status"),
+                "model": semantic_analysis.get("model"),
+                "revision": semantic_analysis.get("revision"),
+                "item_count": len(semantic_analysis.get("items", []) or []),
+                "usage": semantic_analysis.get("usage"),
+            },
         }
         if usage.calls:
             report_payload.update(
@@ -389,20 +472,22 @@ class ReportService:
         root = Path(run.workspace_path).resolve()
         final = root / "final"
         final.mkdir(parents=True, exist_ok=True)
+        if poc_bundle is not None:
+            (final / "muteki-poc.zip").write_bytes(poc_bundle.content)
         report_json_raw = json.dumps(report_payload, ensure_ascii=False, indent=2).encode("utf-8")
         (final / "report.json").write_bytes(report_json_raw)
 
-        flag_line = "已通过 canonical graph 验证。" if solved else "未发现通过 Completion Gate 的 Flag。"
-        writeup = (
-            "# Muteki Solver Report\n\n"
-            f"- Result: {'SOLVED' if solved else 'UNSOLVED'}\n"
-            f"- Status: {status}\n"
-            f"- Reason: {report_payload['reason']}\n"
-            f"- Evidence references: {len(evidence_refs)}\n\n"
-            f"{flag_line}\n\n"
-            "The report is generated from the canonical Muteki graph and the "
-            "existing Evidence Ledger. Raw HTTP responses and secrets are not "
-            "included in this artifact.\n"
+        writeup = render_muteki_writeup(
+            challenge=challenge,
+            run=run,
+            result=result,
+            graph_state=graph_state,
+            calls=calls,
+            observations=observations,
+            evidence=evidence_rows,
+            poc_available=poc_bundle is not None,
+            recovered_trace=recovered_trace,
+            semantic_analysis=semantic_analysis,
         ).encode("utf-8")
         (final / "writeup.zh-CN.md").write_bytes(writeup)
         (final / "writeup.md").write_bytes(writeup)
@@ -427,8 +512,22 @@ class ReportService:
             summary="Sanitized Muteki completion payload",
             status="ACTIVE",
         )
+        poc_artifact = None
+        if poc_bundle is not None:
+            poc_artifact = Artifact(
+                run_id=run.id,
+                artifact_type="poc_bundle",
+                file_path="final/muteki-poc.zip",
+                mime_type="application/zip",
+                size=len(poc_bundle.content),
+                sha256=hashlib.sha256(poc_bundle.content).hexdigest(),
+                summary="Evidence-backed reusable Muteki PoC bundle",
+                status="ACTIVE",
+            )
         session.add(report_artifact)
         session.add(report_json_artifact)
+        if poc_artifact is not None:
+            session.add(poc_artifact)
         await session.commit()
         await event_service.append(
             session,

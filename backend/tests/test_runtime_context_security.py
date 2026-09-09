@@ -127,7 +127,7 @@ def make_context() -> RunContext:
         max_tool_calls=4,
         max_runtime_seconds=45,
         solver_mode="multi_agent_v1",
-        engine_type="mock",
+        engine_type="openai_compatible",
         current_phase="INTAKE",
         secret="must not be copied",
     )

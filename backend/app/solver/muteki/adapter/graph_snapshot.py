@@ -9,14 +9,13 @@ the event log.
 from __future__ import annotations
 
 import json
-from pathlib import Path
 import re
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
 from ..upstream_bridge import to_upstream_challenge
 from .upstream_events import project_upstream_events
-
 
 _KEY_CONDITION_EXCLUSIONS = (
     "hypothesis",

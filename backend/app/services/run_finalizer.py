@@ -7,6 +7,7 @@ pause state.
 """
 
 from datetime import UTC, datetime
+import logging
 
 from sqlalchemy import delete, func, select
 
@@ -32,6 +33,8 @@ from app.schemas.multi_agent import AgentTaskStatus
 from app.services.events import event_service
 from app.services.solver_self_review import solver_self_review
 from app.services.user_input_resume_guard import check_user_input_resume
+
+logger = logging.getLogger(__name__)
 
 TERMINAL_RUN_STATUSES = {
     "COMPLETED_SOLVED", "COMPLETED_UNSOLVED", "FAILED_ENGINE", "FAILED_TOOL",
@@ -294,6 +297,16 @@ class RunFinalizer:
                     "tasks_interrupted": changed["tasks_replanned"],
                     "tool_calls_closed": changed["tool_calls_closed"],
                 })
+            # Solver scoring is opportunistic and must never break the
+            # lifecycle reconciliation path.
+            try:
+                from app.core.database import SessionLocal
+                from app.services.solver_scoring import finalize_run_score
+
+                async with SessionLocal() as score_session:
+                    await finalize_run_score(score_session, run)
+            except Exception:
+                logger.exception("Solver scoring failed for run %s", run.id)
 
         # A live task/action without the execution lease is an interrupted
         # process, not a reason to leave the Run permanently paused.

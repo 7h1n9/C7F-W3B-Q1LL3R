@@ -163,13 +163,9 @@ async def test_run_list_is_lightweight_for_codex_runs(
         await connection.run_sync(Base.metadata.create_all)
     sessions = async_sessionmaker(engine, expire_on_commit=False)
 
-    async def fail_materialize(*_: object) -> None:
-        raise AssertionError("list_runs must not materialize Codex runs")
-
     async def fail_diagnostics(*_: object) -> dict:
         raise AssertionError("list_runs must not run deep diagnostics")
 
-    monkeypatch.setattr(runs_api.codex_materializer, "sync", fail_materialize)
     monkeypatch.setattr(runs_api.run_diagnostics_service, "analyze", fail_diagnostics)
 
     async with sessions() as session:
@@ -180,7 +176,8 @@ async def test_run_list_is_lightweight_for_codex_runs(
             SolveRun(
                 challenge_id=challenge.id,
                 workspace_path=str(tmp_path),
-                engine_type="codex_sdk",
+                engine_type="codex_cli",
+                model_config_id="codex-config",
                 last_error_code="CODEX_NO_PROGRESS",
                 last_error_message="paused",
             )
@@ -188,27 +185,9 @@ async def test_run_list_is_lightweight_for_codex_runs(
         await session.commit()
         payload = await runs_api.list_runs(session)
 
-    assert payload["data"][0].engine_type == "codex_sdk"
+    assert payload["data"][0].engine_type == "codex_cli"
     assert payload["data"][0].diagnostic_tags == ["CODEX_NO_PROGRESS"]
     await engine.dispose()
-
-
-@pytest.mark.asyncio
-async def test_muteki_codex_runs_skip_legacy_materializer(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    async def fail_materialize(*_: object) -> None:
-        raise AssertionError("Muteki runs must not use the legacy Codex cursor")
-
-    monkeypatch.setattr(runs_api.codex_materializer, "sync", fail_materialize)
-    run = SolveRun(
-        challenge_id="muteki-challenge",
-        workspace_path=str(tmp_path),
-        engine_type="codex_sdk",
-        solver_mode="muteki",
-    )
-
-    assert await runs_api.ensure_codex_materialized(object(), run) is run
 
 
 @pytest.mark.asyncio
@@ -230,7 +209,7 @@ async def test_codex_progress_snapshot_ignores_agent_only_events(tmp_path: Path)
         run = SolveRun(
             challenge_id=challenge.id,
             workspace_path=str(tmp_path),
-            engine_type="codex_sdk",
+            engine_type="codex_cli",
             status="PLANNING",
             current_phase="PLANNING",
         )

@@ -47,6 +47,11 @@ async def lifespan(_: FastAPI):
         await builtin_skill_sync_service.sync(session)
         await deterministic_controller.seed_policies(session)
         await run_attempt_service.cleanup_tickets(session)
+        # Native Muteki can emit muteki.run_finished and tear down its Sandbox
+        # before the outer lifecycle commit. Reconcile that durable handoff
+        # before lease cleanup changes RUNNING to PAUSED_RECOVERY.
+        persisted_runs = list((await session.scalars(select(SolveRun))).all())
+        await run_supervisor.reconcile_muteki_native_terminals(session, persisted_runs)
         await run_attempt_service.reconcile_startup(session)
         # Reconcile every persisted Run after process restart.  This also
         # removes leases left by a previously terminated process and repairs
