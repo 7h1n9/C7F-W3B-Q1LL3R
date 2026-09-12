@@ -1,3 +1,5 @@
 web_search = "live"
+sandbox_mode = "danger-full-access"
+model_verbosity = "medium"
 [sandbox_workspace_write]
 network_access = true
