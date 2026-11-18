@@ -372,30 +372,43 @@ def compose_next_direction(
             source="verified_foothold_unused",
         )
 
-    classes = tuple(dict.fromkeys(str(c).strip() for c in untried_classes if str(c).strip()))
-    if classes:
-        return NextDirection(
-            action=f"补齐未尝试的漏洞类：{'、'.join(classes)}，逐类做一次可验证探针",
-            rationale=(
-                "已尝试面里完全没覆盖这些类，覆盖缺口是明确的未知量；"
-                "补齐缺口比在已失败的方向上继续加深更有信息增益。"
-            ),
-            evidence=_bounded_evidence(classes),
-            confidence="high" if len(classes) >= 2 else "medium",
-            source="untried_class",
-        )
-
+    # A dead end is concrete evidence about *this* target; an untried class is
+    # only a generic coverage gap.  Concrete evidence wins, otherwise every
+    # unsolved run would report the same "try deserialization" advice.
     recent_dead_ends = _bounded_evidence(tuple(dead_ends)[-3:])
     if recent_dead_ends:
+        latest = str(tuple(dead_ends)[-1] or "").strip()
+        if len(latest) > 80:
+            latest = latest[:80] + "…"
         return NextDirection(
-            action="对最近死路做一次根因复核并换一个判据",
+            action=(
+                f"先确认最近死路「{latest}」中否掉它的判据是否真的成立，"
+                "再用一个不同的判据重打一类载荷"
+            ),
             rationale=(
-                "失败结论可能建立在错误判据上（回显、时序或权限假设）；"
-                "先复核最近一条死路的根因，再用不同判据重试，避免重复消耗同一路径。"
+                f"以下判断只来自最近 {len(recent_dead_ends)} 条死路记录，是待验证的假设而不是事实："
+                "死路结论往往建立在回显、时序或权限判据上，判据本身可能不成立；"
+                "换一个判据重打，才能区分“路走不通”和“判断错了”。"
             ),
             evidence=recent_dead_ends,
             confidence="medium",
             source="dead_end_review",
+        )
+
+    classes = tuple(dict.fromkeys(str(c).strip() for c in untried_classes if str(c).strip()))
+    if classes:
+        return NextDirection(
+            action=(
+                f"先确认目标是否具备以下未尝试类的前置条件：{'、'.join(classes)}，"
+                "再决定是否投入测试"
+            ),
+            rationale=(
+                "这些类是整个运行从未尝试过的覆盖缺口，不是针对本靶标的推荐；"
+                "它们只应作为排查清单，先用前置条件筛掉不适用项，避免为了覆盖而覆盖。"
+            ),
+            evidence=_bounded_evidence(classes),
+            confidence="medium" if len(classes) >= 2 else "low",
+            source="untried_class",
         )
 
     if total_facts <= 0:

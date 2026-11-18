@@ -277,29 +277,7 @@ def test_branch_3_does_not_fire_when_commands_were_used():
     assert direction.source == "insufficient_evidence"
 
 
-def test_branch_4_untried_class_high_confidence_for_two_or_more():
-    direction = compose_next_direction(
-        outcome=SOLVER_OUTCOME,
-        untried_classes=("ssrf", "xxe"),
-        dead_ends=("ssti blocked",),
-        total_facts=2,
-        command_count=20,
-    )
-    assert direction is not None
-    assert direction.source == "untried_class"
-    assert direction.confidence == "high"
-    assert "ssrf" in direction.action and "xxe" in direction.action
-    assert direction.evidence == ("ssrf", "xxe")
-
-
-def test_branch_4_untried_class_single_is_medium():
-    direction = compose_next_direction(outcome=SOLVER_OUTCOME, untried_classes=("ssrf",))
-    assert direction is not None
-    assert direction.source == "untried_class"
-    assert direction.confidence == "medium"
-
-
-def test_branch_5_dead_end_review_uses_last_three_oldest_first():
+def test_branch_4_dead_end_review_uses_last_three_oldest_first():
     dead_ends = ("first", "second", "third", "fourth", "fifth")
     direction = compose_next_direction(
         outcome=SOLVER_OUTCOME,
@@ -311,7 +289,41 @@ def test_branch_5_dead_end_review_uses_last_three_oldest_first():
     assert direction.source == "dead_end_review"
     assert direction.confidence == "medium"
     assert direction.evidence == ("third", "fourth", "fifth")
-    assert "根因复核" in direction.action
+    assert "fifth" in direction.action
+    assert "判据" in direction.action
+    assert "假设" in direction.rationale
+
+
+def test_branch_4_dead_end_beats_untried_classes_when_both_present():
+    direction = compose_next_direction(
+        outcome=SOLVER_OUTCOME,
+        dead_ends=("SSTI 探针原样返回",),
+        untried_classes=("ssrf", "xxe"),
+        total_facts=4,
+        command_count=30,
+    )
+    assert direction is not None
+    assert direction.source == "dead_end_review"
+    assert direction.confidence == "medium"
+    assert direction.evidence == ("SSTI 探针原样返回",)
+
+
+def test_branch_5_untried_class_is_a_check_not_a_recommendation():
+    direction = compose_next_direction(outcome=SOLVER_OUTCOME, untried_classes=("ssrf", "xxe"))
+    assert direction is not None
+    assert direction.source == "untried_class"
+    assert direction.confidence == "medium"
+    assert "前置条件" in direction.action
+    assert "ssrf" in direction.action and "xxe" in direction.action
+    assert "覆盖缺口" in direction.rationale
+    assert direction.evidence == ("ssrf", "xxe")
+
+
+def test_branch_5_untried_class_single_is_low_confidence():
+    direction = compose_next_direction(outcome=SOLVER_OUTCOME, untried_classes=("ssrf",))
+    assert direction is not None
+    assert direction.source == "untried_class"
+    assert direction.confidence == "low"
 
 
 def test_branch_6_no_fact_run_is_low_confidence():
