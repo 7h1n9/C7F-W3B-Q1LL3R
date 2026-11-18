@@ -1,37 +1,59 @@
-"""Grade a board fact by whether it can become a verification command.
+"""Classify a board fact into one of five roles.
 
-The project's headline is "facts per 100 commands".  That number is inflated by
-text which carries no knowledge: template placeholders, environment setup, and
-progress narration.  This module keeps the project's established three-class
-taxonomy so historical measurements stay comparable:
+The old metric counted every published fact.  That rewards text which cannot
+be acted on: a template placeholder, a banner, a paraphrase, a dead end.  The
+classification below separates what a fact *is* so the headline can count only
+the ones a later agent can run or replay verbatim:
 
 ``executable``
-    Carries a concrete artifact: URL/IP:port, file path, version/status+endpoint
-    pair, parameter/credential, payload, or flag.
+    Carries a command line, a URL + method + payload, a payload/param set, a
+    path that is read from the target, credentials recovered from output, or a
+    captured flag.  Something can be sent as-is (modulo the target host).
 
-``narrative``
-    A claim, plan or observation with no actionable artifact.  A banner-only
-    string (``Apache/2.4.49``) is narrative here: it is witnessed, but there is
-    no command to run.
+``observation``
+    A concrete but non-actionable artifact: banner/version, status code,
+    response header, endpoint listing, file listing, DB schema.  Useful, but
+    replaying it does not test a hypothesis.
 
-``noise``
-    Placeholder, protocol sentinel or environment setup: the adapter template,
-    ``docker compose up -d``, ``测试环境搭建``, ``(no output)``.
+``hypothesis``
+    A claim, paraphrase or plan with no witness: "the app uses JWT",
+    "probably SQLi in id", "next we try SSRF".  This includes the old
+    "narrative" bucket.
 
-The finer five-way split is retained as an **additional** diagnostic field
-(:func:`classify_fact_detail`), never as a replacement: ``executable`` maps to
-``executable``; ``noise`` maps to ``unknown``; ``narrative`` is split into
-``observation`` / ``hypothesis`` / ``negative``.  That keeps the headline
-comparable while still saying *why* a fact is not actionable.
+``negative``
+    A dead end or a negative result: "DEADEND=...", "not vulnerable",
+    "port refused", "no flag found".  Negative evidence is valuable, but it
+    must not inflate the executable count, even when it quotes a payload.
 
-Decision order is ``noise -> banner-only -> executable -> narrative``:
+``unknown``
+    Empty / placeholder / protocol sentinel / environment setup.  The two
+    traps this module exists to keep out of ``executable`` live here:
+    ``"测试环境搭建"`` and ``"docker compose up -d"`` (setup text) and the
+    adapter template ``"Native Worker completed a bounded evidence-backed
+    observation"``.
 
-* noise first: a setup line can contain a URL or a command word and is still
-  not a fact about the target.
-* banner-only second: "Apache/2.4.49" matches the version signal, but with no
-  other content it cannot be replayed, so it must not be executable.
-* executable third: any concrete artifact wins, even if the sentence is prose.
-* narrative is the residual.
+Definition versions
+-------------------
+``EXECUTABLE_DEFINITION_VERSION = "v2"`` is the strict rule used by the
+headline: version/banner-only and status-only text is *not* executable.
+The previous broad rule is frozen as ``v1`` and exposed as
+:func:`is_executable_fact_legacy` / ``executable_legacy`` in the summary **only
+so a report can print both numbers side by side**.  v1 counted any concrete
+artifact -- including a version banner -- as executable; that is exactly the
+2.1x gap the reconciliation flag exists to explain.
+
+Decision order is ``unknown -> negative -> executable -> observation ->
+hypothesis``:
+
+* unknown first, because a placeholder or setup line can contain a URL or a
+  command word; it is still not a fact about the target.
+* negative second, because a dead end that quotes ``id=1`` is a warning not to
+  retry, not a command to run.  Its role is the label.
+* executable before observation, because "GET /x?id=1" is both a request and a
+  response observation; the presence of a payload is what makes it testable.
+* observation before hypothesis, because a version string is witnessed even
+  when the sentence hedges ("the server appears to be Apache/2.4.49").
+* hypothesis is the residual: a claim with no artifact.
 
 Pure functions only: no IO, no model, no configuration.  Every rule is an
 explicit regex so a disputed label can be traced and changed.
@@ -42,11 +64,16 @@ from __future__ import annotations
 import re
 from typing import Iterable, Literal
 
-FactClass = Literal["executable", "narrative", "noise"]
-DetailClass = Literal["executable", "observation", "hypothesis", "negative", "unknown"]
+#: Strict head-line rule.  Bump only with a deliberate, documented change;
+#: the script prints this next to every ratio.
+EXECUTABLE_DEFINITION_VERSION = "v2"
 
-FACT_CLASSES: tuple[str, ...] = ("executable", "narrative", "noise")
-DETAIL_CLASSES: tuple[str, ...] = (
+#: Frozen broad rule, kept solely for reconciliation.
+LEGACY_EXECUTABLE_DEFINITION_VERSION = "v1"
+
+FactClass = Literal["executable", "observation", "hypothesis", "negative", "unknown"]
+
+FACT_CLASSES: tuple[str, ...] = (
     "executable",
     "observation",
     "hypothesis",
@@ -55,10 +82,11 @@ DETAIL_CLASSES: tuple[str, ...] = (
 )
 
 # ---------------------------------------------------------------------------
-# noise: placeholders, protocol sentinels, environment setup
+# unknown: placeholders, protocol sentinels, environment setup
 # ---------------------------------------------------------------------------
 
-_NOISE_PATTERNS: tuple[re.Pattern[str], ...] = (
+_UNKNOWN_PATTERNS: tuple[re.Pattern[str], ...] = (
+    # Adapter fallback when a step yielded no extractable fact.
     re.compile(r"bounded evidence-backed observation", re.IGNORECASE),
     re.compile(r"^\[(?:claude|codex)\]\s*\(no output\)\s*$", re.IGNORECASE),
     re.compile(
@@ -71,8 +99,8 @@ _NOISE_PATTERNS: tuple[re.Pattern[str], ...] = (
         re.IGNORECASE,
     ),
     re.compile(r"^\[(?:claude|codex)\]\s*$", re.IGNORECASE),
-    # Environment setup is not a fact about the target.  Checked before the
-    # command rules, so "docker compose up -d && curl ..." stays noise.
+    # Environment setup is not a fact about the target.  Kept before the
+    # command rule so "docker compose up -d" never becomes executable.
     re.compile(r"\bdocker\s+(?:compose|run|build|pull|exec)\b", re.IGNORECASE),
     re.compile(
         r"\b(?:pip3?|npm|yarn|pnpm|apt(?:-get)?|apk|brew)\s+(?:install|add)\b",
@@ -89,16 +117,267 @@ _NOISE_PATTERNS: tuple[re.Pattern[str], ...] = (
 )
 
 # ---------------------------------------------------------------------------
-# executable: concrete artifacts
+# negative: dead ends and negative results
 # ---------------------------------------------------------------------------
 
-_SIGNAL_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
+_NEGATIVE_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"\bDEADEND\s*=|\bdead[\s_-]?end\b", re.IGNORECASE),
+    re.compile(
+        r"\bnot\s+(?:vulnerable|exploitable|reachable|accessible|possible|found|usable)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(r"\bno\s+(?:flag|result|output|response|vulnerability|leak|hit|usable)\b", re.IGNORECASE),
+    re.compile(
+        r"\bnever\s+(?:accepted|responded|returned|worked|connected)\b", re.IGNORECASE
+    ),
+    re.compile(
+        r"\b(?:failed|fails|failure|refused|unreachable|timed?\s*out|blocked|disabled|"
+        r"can(?:no|')t|won'?t|doesn'?t\s+work|not\s+work(?:ing)?)\b",
+        re.IGNORECASE,
+    ),
+    # "404 for every id" is a negative result, not an endpoint observation.
+    re.compile(r"\b[45]\d{2}\b[^.\n]{0,40}\b(?:for\s+)?(?:every|all)\b", re.IGNORECASE),
+    re.compile(r"失败|不可用|未找到|无法|拒绝|超时|死路|无效|不存在|没有成功"),
+)
+
+# ---------------------------------------------------------------------------
+# executable v2: command lines, requests, payloads, target paths, creds, flags
+# ---------------------------------------------------------------------------
+
+#: Tools whose presence plus an argument means "this is a command line".
+#: ``docker``/``pip``/``git`` are deliberately absent: they are setup tools,
+#: and their lines are already routed to ``unknown``.
+_TOOL = (
+    r"(?:curl|wget|nmap|sqlmap|gobuster|ffuf|feroxbuster|nuclei|nikto|wfuzz|"
+    r"hydra|ssh|scp|sftp|nc|ncat|socat|python3?|bash|sh|zsh|perl|ruby|php|"
+    r"mysql|psql|redis-cli|mongosh|msfconsole|searchsploit)"
+)
+
+_COMMAND_PATTERNS: tuple[re.Pattern[str], ...] = (
+    # A backticked command with at least one argument: `curl -s http://...`.
+    re.compile(r"`\s*(?:sudo\s+)?" + _TOOL + r"\b[^`\n]{1,300}`", re.IGNORECASE),
+    # Backticked basic shell commands: `id`, `printenv FLAG`, `cat /etc/passwd`.
+    # These are too common in prose to accept unquoted, but inside backticks they
+    # are commands the worker actually ran (or quoted from output).
+    re.compile(
+        r"`\s*(?:id|whoami|hostname|uname|cat|ls|env|printenv|pwd|ifconfig|ip|ps|"
+        r"find|grep|sed|awk|echo|nc)\b[^`\n]{0,300}`",
+        re.IGNORECASE,
+    ),
+    # A shell transcript line: "$ nmap -p- host".
+    re.compile(r"^\s*[$#>]\s*(?:sudo\s+)?" + _TOOL + r"\b", re.IGNORECASE),
+    # A bare command with a flag, URL, host or filename argument:
+    # "ssh -p 26877 -i id_rsa git@target", "sqlmap -u http://...".
+    # A plain version after a product name ("MySQL 5.5.62") must not match,
+    # so a filename argument has to contain a letter.
+    re.compile(
+        r"\b" + _TOOL + r"\s+(?:-{1,2}\S+|https?://\S+|"
+        r"(?=[\w./-]*[A-Za-z])[\w./-]*\.\w+|\S+@\S+)",
+        re.IGNORECASE,
+    ),
+)
+
+_HTTP_METHOD = re.compile(r"\b(?:GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)\b")
+_URL_OR_ENDPOINT = re.compile(
+    r"\bhttps?://\S+|(?<![\w.-])/[A-Za-z0-9_.?=&%~/-]{2,}", re.IGNORECASE
+)
+
+#: Payload grammar.  Kept narrow on purpose: naming a vulnerability class
+#: ("prototype pollution") is a hypothesis, shipping the string is executable.
+_PAYLOAD_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"(?<!\.)\.\./"),
+    re.compile(r"\b(?:php|file|gopher|dict|data|expect)://", re.IGNORECASE),
+    re.compile(r"\{\{|\$\{"),
+    re.compile(
+        r"\bUNION\s+SELECT\b|\bSLEEP\s*\(|\bWAITFOR\s+DELAY\b|"
+        r"\bupdatexml\s*\(|\bextractvalue\s*\(|\binto\s+outfile\b|\bload_file\s*\(",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(?:java\.lang\.)?Runtime\s*@?\.?\s*getRuntime\s*\(|"
+        r"\bnew\s+ProcessBuilder\s*\(|\bProcessBuilder\s*\(",
+        re.IGNORECASE,
+    ),
+    re.compile(r"\b__proto__\s*(?:\[|=)|\$\{jndi:", re.IGNORECASE),
+    re.compile(r"\bO:\d+:\"|\ba:\d+:\{"),
+    re.compile(r";\s*(?:id|whoami|cat|ls|uname|curl|wget)\b|\|\s*(?:id|whoami|cat|ls|uname)\b"),
+    re.compile(r"<script\b|\bonerror\s*=", re.IGNORECASE),
+    re.compile(r"%00|%2e%2e", re.IGNORECASE),
+    # Require an argument: "system()" in prose is a technique name, while
+    # "system('env')" or "system($_GET[cmd])" is a payload to send.
+    re.compile(
+        r"\b(?:system|shell_exec|passthru|eval|assert)\s*\(\s*[\"'$]",
+        re.IGNORECASE,
+    ),
+)
+
+#: Parameter names that carry an attack surface.  A value is required and a
+#: bare ``status=1`` (an ordinary response field) is not enough.
+_SENSITIVE_PARAM = re.compile(
+    r"(?<![\w.-])(?:id|cmd|exec|command|file|filename|path|url|uri|q|query|page|"
+    r"search|user|username|pass|password|passwd|pwd|token|key|api_key|apikey|"
+    r"secret|debug|redirect|next|action|act|target|name|cat|type|data|payload|"
+    r"host|port|email|asset_no|department|lang|template|view|include|require|"
+    r"dir|folder|download|upload|ajax_form|_method|gremlin|exp|func|function|"
+    r"class|code|content)\s*=(?!=)\S{1,200}",
+    re.IGNORECASE,
+)
+_JSON_REQUEST_BODY = re.compile(
+    r"\b(?:with|body|payload|data)\s*[:=]?\s*[\{\[]", re.IGNORECASE
+)
+
+#: A file that is read from the target, not a local helper.  ``/home/kali``
+#: and ``/usr/share`` are this project's own workspace/tool paths.
+_TARGET_PATH = re.compile(
+    r"(?<![\w.-])/(?:etc|proc|var(?!log/)|flag\b|opt|srv|app|root|"
+    r"usr/local)(?:/[\w.@+%~-]+)*",
+    re.IGNORECASE,
+)
+
+_COOKIE = re.compile(r"\b(?:Cookie|Authorization|Set-Cookie)\s*:\s*\S+", re.IGNORECASE)
+_BEARER = re.compile(r"\b(?:Bearer|Basic)\s+[A-Za-z0-9._~+/=-]{8,}", re.IGNORECASE)
+_JWT = re.compile(r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}")
+_CREDENTIAL_PAIR = re.compile(
+    r"(?<![\w:/])(?!CVE-)([A-Za-z][\w.-]{1,31}):"
+    r"(?=[^\s:/`'\"]{3,64}\b)[^\s:/`'\"]{3,64}"
+)
+_SUCCESS_MARKER = re.compile(
+    r"\b(?:valid|works?|working|succeeds?|success(?:ful)?|accepted|granted|"
+    r"authenticated|logs?\s+in|logged?\s*in|login\s+(?:ok|success))\b|"
+    r"成功|有效|登录成功",
+    re.IGNORECASE,
+)
+
+_FLAG = re.compile(r"\b[A-Za-z][A-Za-z0-9_]{1,31}\{[^{}\s]{3,200}\}")
+
+# ---------------------------------------------------------------------------
+# observation: witnessed but non-actionable
+# ---------------------------------------------------------------------------
+
+_OBSERVATION_PATTERNS: tuple[re.Pattern[str], ...] = (
+    # Name + version, or a standalone three-part version.  This is the trap:
+    # "Apache/2.4.49" is observation, never executable.
+    re.compile(r"\b[A-Za-z][A-Za-z0-9_.+-]*(?:[/ ]\d+\.\d+(?:\.\d+)?)(?!\.\d)\b"),
+    re.compile(r"(?<![\d.])\d+\.\d+\.\d+(?![\d.])"),
+    re.compile(
+        r"\b(?:Server|X-Powered-By|Content-Type|Content-Length|Location|"
+        r"Set-Cookie|Allow|WWW-Authenticate)\s*:\s*\S+",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(?:status(?:_?code)?|HTTP/\d(?:\.\d)?|returns?|responds?(?:\s+with)?|got)"
+        r"\s*[\"']?\s*[:=]?\s*[1-5]\d{2}\b",
+        re.IGNORECASE,
+    ),
+    # Endpoint/path listing without a payload.
+    re.compile(r"(?<![\w.-])/[A-Za-z0-9_.?=&%~/-]{2,}"),
+    # A named artifact on disk (source archive, page, config) without a
+    # command that reads it from the target.
+    re.compile(
+        r"\b[\w-]+\.(?:php\d?|phtml|asp|aspx|ashx|jsp|jspx|action|do|html?|txt|"
+        r"zip|tar|t?gz|xml|json|ya?ml|py|rb|pl|sh|js|conf|config|ini|env|bak|"
+        r"old|swp|sql|log|db|sqlite|pem|key)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(r"\b(?:table|tables|columns?|schema|database|db)\b", re.IGNORECASE),
+    re.compile(r"\b(?:source|source code)\b|源码|代码", re.IGNORECASE),
+    # A bare IPv4 with no port/request is a host observation.
+    re.compile(r"\b\d{1,3}(?:\.\d{1,3}){3}\b"),
+)
+
+# ---------------------------------------------------------------------------
+# hypothesis: claims and plans without a witness
+# ---------------------------------------------------------------------------
+
+_HYPOTHESIS_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(
+        r"\b(?:likely|probably|possibly|maybe|perhaps|appears?|seems?|suggests?|"
+        r"might|could|suspect|assume|think|guess|should\s+be|may\s+be|plan(?:ning)?|"
+        r"next\s+step|try(?:ing)?|attempt(?:ing)?|ready\s+to|going\s+to)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(r"可能|推测|猜测|疑似|尝试|计划|应该"),
+)
+
+
+def _normalise(content: object) -> str:
+    return " ".join(str(content if content is not None else "").split())
+
+
+def _matches(patterns: Iterable[re.Pattern[str]], text: str) -> bool:
+    return any(pattern.search(text) for pattern in patterns)
+
+
+def _is_request_with_payload(text: str) -> bool:
+    if not (_HTTP_METHOD.search(text) and _URL_OR_ENDPOINT.search(text)):
+        return False
+    return bool(
+        _matches(_PAYLOAD_PATTERNS, text)
+        or _SENSITIVE_PARAM.search(text)
+        or _JSON_REQUEST_BODY.search(text)
+    )
+
+
+def _has_credentials(text: str) -> bool:
+    if _COOKIE.search(text) or _BEARER.search(text) or _JWT.search(text):
+        return True
+    # The success marker has to sit next to the pair; "CVE-x: y works" in a
+    # different clause must not turn a CVE id into a credential.
+    for match in _CREDENTIAL_PAIR.finditer(text):
+        window = text[max(0, match.start() - 80) : match.end() + 80]
+        if _SUCCESS_MARKER.search(window):
+            return True
+    return False
+
+
+def is_executable_fact(content: str) -> bool:
+    """True only when the fact can be run or replayed verbatim (v2 rule).
+
+    A banner, a paraphrase and an echo without a witness are all False.
+    """
+
+    return classify_fact(content) == "executable"
+
+
+def classify_fact(content: str) -> str:
+    """Return one of :data:`FACT_CLASSES` for one fact string (v2 rule)."""
+
+    text = _normalise(content)
+    if not text or _matches(_UNKNOWN_PATTERNS, text):
+        return "unknown"
+    if _matches(_NEGATIVE_PATTERNS, text):
+        return "negative"
+
+    if (
+        _matches(_COMMAND_PATTERNS, text)
+        or _is_request_with_payload(text)
+        or _matches(_PAYLOAD_PATTERNS, text)
+        or _TARGET_PATH.search(text)
+        or _has_credentials(text)
+        or _FLAG.search(text)
+    ):
+        return "executable"
+
+    if _matches(_OBSERVATION_PATTERNS, text):
+        return "observation"
+    if _matches(_HYPOTHESIS_PATTERNS, text):
+        return "hypothesis"
+    return "hypothesis"
+
+
+# ---------------------------------------------------------------------------
+# v1 legacy rule (frozen): kept only for reconciliation
+# ---------------------------------------------------------------------------
+
+#: The broad rule used before the v2 split.  It is intentionally duplicated and
+#: frozen: reconciliation is only meaningful if it applies the *old* rule, not
+#: a re-interpretation of it.  Do not extend this tuple.
+_LEGACY_SIGNAL_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     (
         "url",
         re.compile(r"\b(?:https?|ftp|gopher|dict|file|php|data|expect)://[^\s<>'\"]+", re.IGNORECASE),
     ),
     (
-        # A bare IPv4 is a target even without a port: ``curl http://10.0.0.5``.
         "ipv4",
         re.compile(r"\b\d{1,3}(?:\.\d{1,3}){3}\b"),
     ),
@@ -112,8 +391,6 @@ _SIGNAL_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ),
     (
         "file_path",
-        # Absolute or home/traversal-rooted path with at least one segment
-        # character.  The lookbehind keeps ``80/443`` and ``and/or`` out.
         re.compile(
             r"(?<![\w.>:-])(?:~|\.\.)?/(?:[A-Za-z0-9_.@+%~-]+/)*[A-Za-z0-9_.@+%~-]+"
         ),
@@ -123,8 +400,6 @@ _SIGNAL_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
         re.compile(r"(?<![\w.-])(?:[\w.-]+/)+[\w.-]+\.[A-Za-z0-9]{1,8}\b"),
     ),
     (
-        # ``index.php`` without a directory.  The extension allowlist keeps
-        # ordinary prose ("e.g." / "i.e.") out; every entry is requestable.
         "filename",
         re.compile(
             r"\b[\w-]+\.(?:php\d?|phtml|asp|aspx|ashx|jsp|jspx|action|do|"
@@ -137,7 +412,6 @@ _SIGNAL_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
         "version",
         re.compile(r"\b[A-Za-z][A-Za-z0-9_.+-]*(?:[/ ]\d+\.\d+(?:\.\d+)?)(?!\.\d)\b"),
     ),
-    # Exactly three segments; lookarounds stop a match starting inside IPv4.
     ("semver", re.compile(r"(?<![\d.])\d+\.\d+\.\d+(?![\d.])")),
     (
         "parameter",
@@ -192,25 +466,19 @@ _SIGNAL_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
         ),
     ),
     (
-        # ``CTF2{...}``, ``flag{...}``, ``n1book{...}`` -- a prefix is required
-        # so JSON objects and ``{{...}}`` templates do not match.
         "flag",
         re.compile(r"\b[A-Za-z][A-Za-z0-9_]{1,31}\{[^{}\s]{3,200}\}"),
     ),
 )
 
-_STATUS_CODE = re.compile(
+_LEGACY_STATUS_CODE = re.compile(
     r"\b(?:status(?:_?code)?|HTTP/\d(?:\.\d)?|returns?|responds?(?:\s+with)?|got)"
     r"\s*[\"\']?\s*[:=]?\s*(\d{3})\b",
     re.IGNORECASE,
 )
-_ENDPOINT_HINT = re.compile(
+_LEGACY_ENDPOINT_HINT = re.compile(
     r"\b(?:endpoint|path|route)\b|(?<![\w.>:-])/[A-Za-z0-9_.?=&%~-]+", re.IGNORECASE
 )
-
-# ---------------------------------------------------------------------------
-# banner-only: witnessed but not replayable
-# ---------------------------------------------------------------------------
 
 _BANNER_LABEL = re.compile(r"\b(?:Server|X-Powered-By)\s*:\s*", re.IGNORECASE)
 _BANNER_TOKEN = re.compile(
@@ -221,12 +489,7 @@ _BANNER_REMAINDER = re.compile(r"[\s,;:/()\[\]{}._+-]+")
 
 
 def _is_banner_only(text: str) -> bool:
-    """True when the whole string is a banner/version and nothing else.
-
-    ``Apache/2.4.49`` and ``Server: nginx/1.18.0`` are banner-only.  A sentence
-    that happens to quote a version ("phpMyAdmin 4.8.1 on Apache/2.4.25") is
-    not: it still has prose and stays executable under the normal rules.
-    """
+    """True when the whole string is a banner/version and nothing else."""
 
     if not _BANNER_TOKEN.search(text):
         return False
@@ -235,166 +498,74 @@ def _is_banner_only(text: str) -> bool:
     return not _BANNER_REMAINDER.sub("", stripped)
 
 
-# ---------------------------------------------------------------------------
-# detail classes for narrative: observation / hypothesis / negative
-# ---------------------------------------------------------------------------
+def is_executable_fact_legacy(content: str) -> bool:
+    """Apply the frozen v1 broad rule (reconciliation only).
 
-_NEGATIVE_PATTERNS: tuple[re.Pattern[str], ...] = (
-    re.compile(r"\bDEADEND\s*=|\bdead[\s_-]?end\b", re.IGNORECASE),
-    re.compile(
-        r"\bnot\s+(?:vulnerable|exploitable|reachable|accessible|possible|found|usable)\b",
-        re.IGNORECASE,
-    ),
-    re.compile(r"\bno\s+(?:flag|result|output|response|vulnerability|leak|hit|usable)\b", re.IGNORECASE),
-    re.compile(r"\bnever\s+(?:accepted|responded|returned|worked|connected)\b", re.IGNORECASE),
-    re.compile(
-        r"\b(?:failed|fails|failure|refused|unreachable|timed?\s*out|blocked|disabled|"
-        r"can(?:no|')t|won'?t|doesn'?t\s+work|not\s+work(?:ing)?)\b",
-        re.IGNORECASE,
-    ),
-    re.compile(r"\b[45]\d{2}\b[^.\n]{0,40}\b(?:for\s+)?(?:every|all)\b", re.IGNORECASE),
-    re.compile(r"失败|不可用|未找到|无法|拒绝|超时|死路|无效|不存在|没有成功"),
-)
-
-_OBSERVATION_PATTERNS: tuple[re.Pattern[str], ...] = (
-    re.compile(r"\b[A-Za-z][A-Za-z0-9_.+-]*[/ ]\d+\.\d+(?:\.\d+)?(?!\.\d)\b"),
-    re.compile(r"(?<![\d.])\d+\.\d+\.\d+(?![\d.])"),
-    re.compile(
-        r"\b(?:Server|X-Powered-By|Content-Type|Content-Length|Location|"
-        r"Set-Cookie|Allow|WWW-Authenticate)\s*:\s*\S+",
-        re.IGNORECASE,
-    ),
-    re.compile(
-        r"\b(?:status(?:_?code)?|HTTP/\d(?:\.\d)?|returns?|responds?(?:\s+with)?|got)"
-        r"\s*[\"']?\s*[:=]?\s*[1-5]\d{2}\b",
-        re.IGNORECASE,
-    ),
-    re.compile(r"(?<![\w.-])/[A-Za-z0-9_.?=&%~/-]{2,}"),
-    re.compile(
-        r"\b[\w-]+\.(?:php\d?|phtml|asp|aspx|ashx|jsp|jspx|action|do|html?|txt|"
-        r"zip|tar|t?gz|xml|json|ya?ml|py|rb|pl|sh|js|conf|config|ini|env|bak|"
-        r"old|swp|sql|log|db|sqlite|pem|key)\b",
-        re.IGNORECASE,
-    ),
-    re.compile(r"\b(?:table|tables|columns?|schema|database|db)\b", re.IGNORECASE),
-    re.compile(r"\b(?:source|source code)\b|源码|代码", re.IGNORECASE),
-    re.compile(r"\b\d{1,3}(?:\.\d{1,3}){3}\b"),
-)
-
-_HYPOTHESIS_PATTERNS: tuple[re.Pattern[str], ...] = (
-    re.compile(
-        r"\b(?:likely|probably|possibly|maybe|perhaps|appears?|seems?|suggests?|"
-        r"might|could|suspect|assume|think|guess|should\s+be|may\s+be|plan(?:ning)?|"
-        r"next\s+step|try(?:ing)?|attempt(?:ing)?|ready\s+to|going\s+to)\b",
-        re.IGNORECASE,
-    ),
-    re.compile(r"可能|推测|猜测|疑似|尝试|计划|应该"),
-)
-
-
-def _normalise(content: object) -> str:
-    return " ".join(str(content if content is not None else "").split())
-
-
-def _matches(patterns: Iterable[re.Pattern[str]], text: str) -> bool:
-    return any(pattern.search(text) for pattern in patterns)
-
-
-def _executable_signals(text: str) -> tuple[str, ...]:
-    names = [name for name, pattern in _SIGNAL_PATTERNS if pattern.search(text)]
-    if _STATUS_CODE.search(text) and _ENDPOINT_HINT.search(text):
-        names.append("status_endpoint")
-    return tuple(names)
-
-
-def is_executable_fact(content: str) -> bool:
-    """True only when the fact carries an artifact a command can use."""
-
-    return classify_fact(content) == "executable"
-
-
-def classify_fact(content: str) -> FactClass:
-    """Return the established three-class label.
-
-    Empty strings are ``noise`` (a broken record, not a claim).  Banner-only
-    strings are ``narrative`` and never executable.
+    It counts any concrete artifact, including a version banner or a bare
+    status+endpoint pair, so it returns more executable facts than v2.
     """
 
     text = _normalise(content)
-    if not text or _matches(_NOISE_PATTERNS, text):
+    if not text or _matches(_UNKNOWN_PATTERNS, text) or _is_banner_only(text):
+        return False
+    if any(pattern.search(text) for _, pattern in _LEGACY_SIGNAL_PATTERNS):
+        return True
+    return bool(_LEGACY_STATUS_CODE.search(text) and _LEGACY_ENDPOINT_HINT.search(text))
+
+
+def classify_fact_legacy(content: str) -> str:
+    """Return ``executable`` / ``narrative`` / ``noise`` under the v1 rule."""
+
+    text = _normalise(content)
+    if not text or _matches(_UNKNOWN_PATTERNS, text):
         return "noise"
-    if _is_banner_only(text):
-        return "narrative"
-    if _executable_signals(text):
-        return "executable"
-    return "narrative"
-
-
-def classify_fact_detail(content: str) -> DetailClass:
-    """Return the finer five-way label **in addition to** the three-class one.
-
-    Mapping: ``executable -> executable``, ``noise -> unknown``, and narrative
-    ``-> observation | hypothesis | negative``.  This field is diagnostic; the
-    headline always uses :func:`classify_fact`.
-    """
-
-    label = classify_fact(content)
-    if label == "executable":
-        return "executable"
-    if label == "noise":
-        return "unknown"
-
-    text = _normalise(content)
-    if _matches(_NEGATIVE_PATTERNS, text):
-        return "negative"
-    if _matches(_OBSERVATION_PATTERNS, text):
-        return "observation"
-    return "hypothesis"
+    return "executable" if is_executable_fact_legacy(text) else "narrative"
 
 
 def executable_fact_summary(facts: list[str]) -> dict[str, object]:
-    """Count the three classes and the rates the metric quotes.
+    """Count v2 classes and carry the v1 number alongside them.
 
-    ``executable_per_100`` is per 100 *facts*, not per 100 commands; the caller
-    that knows its command count divides by that instead.  ``by_detail`` is the
-    additional five-way split; it sums to ``total`` and never replaces
-    ``counts``.
+    ``executable`` / ``ratio`` / ``by_class`` are v2.  ``executable_legacy`` /
+    ``legacy_ratio`` are the frozen v1 rule on the same facts, so a report can
+    never present the new number as if it were the old one.  ``moved_from_legacy``
+    is ``executable_legacy - executable`` (facts the stricter rule downgraded).
     """
 
-    if isinstance(facts, str):  # a bare string is one fact, not char iterable
+    if isinstance(facts, str):  # tolerate a single string, not a char iterable
         facts = [facts]
 
-    counts: dict[str, int] = {name: 0 for name in FACT_CLASSES}
-    by_detail: dict[str, int] = {name: 0 for name in DETAIL_CLASSES}
+    by_class: dict[str, int] = {name: 0 for name in FACT_CLASSES}
     total = 0
+    legacy_executable = 0
     for fact in facts:
-        counts[classify_fact(fact)] += 1
-        by_detail[classify_fact_detail(fact)] += 1
+        by_class[classify_fact(fact)] += 1
+        legacy_executable += int(is_executable_fact_legacy(fact))
         total += 1
 
-    non_noise = total - counts["noise"]
-
-    def share(numerator: int, denominator: int) -> float:
-        return round(numerator / denominator, 4) if denominator else 0.0
+    def ratio(value: int) -> float:
+        return round(value / total, 4) if total else 0.0
 
     return {
         "total": total,
-        "counts": counts,
-        "shares": {name: share(count, total) for name, count in counts.items()},
-        "executable_per_100": round(counts["executable"] * 100 / total, 2) if total else 0.0,
-        "non_noise": non_noise,
-        "executable_share_of_non_noise": share(counts["executable"], non_noise),
-        "by_detail": by_detail,
+        "executable": by_class["executable"],
+        "ratio": ratio(by_class["executable"]),
+        "by_class": by_class,
+        "definition_version": EXECUTABLE_DEFINITION_VERSION,
+        "executable_legacy": legacy_executable,
+        "legacy_ratio": ratio(legacy_executable),
+        "legacy_definition_version": LEGACY_EXECUTABLE_DEFINITION_VERSION,
+        "moved_from_legacy": legacy_executable - by_class["executable"],
     }
 
 
 __all__ = [
-    "DETAIL_CLASSES",
+    "EXECUTABLE_DEFINITION_VERSION",
     "FACT_CLASSES",
-    "DetailClass",
     "FactClass",
+    "LEGACY_EXECUTABLE_DEFINITION_VERSION",
     "classify_fact",
-    "classify_fact_detail",
+    "classify_fact_legacy",
     "executable_fact_summary",
     "is_executable_fact",
+    "is_executable_fact_legacy",
 ]

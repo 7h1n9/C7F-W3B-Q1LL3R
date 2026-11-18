@@ -5,6 +5,12 @@ Read-only.  Command counts and run labels come from the newest
 from MySQL ``run_events`` (``event_type = 'muteki.fact_added'``), restricted to
 the same run ids.  The transition export keeps only fact *counts*.
 
+The headline ratio is printed together with its definition version
+(``EXECUTABLE_DEFINITION_VERSION``) and, alongside it, the frozen legacy number
+(``LEGACY_EXECUTABLE_DEFINITION_VERSION``).  Both are computed on the same rows
+by ``executable_fact_summary``; the executable field therefore can never be
+read as one number when it is the other.
+
 Two windows are printed because the numerator and denominator are not from the
 same snapshot:
 
@@ -15,6 +21,10 @@ same snapshot:
   last ``muteki.worker_command``.  This is the only window that can be read as
   "facts produced per command"; the remainder was published in the finalisation
   batch after the trajectory ended.
+
+``--reconcile-legacy`` applies both rules to the same facts and prints every
+group where they disagree, so a change in the ratio can be attributed to a rule
+change rather than guessed at.
 
 The limitation block is printed by the script itself, not just documented.
 
@@ -30,6 +40,7 @@ Usage::
 
     python scripts/measure_executable_facts.py
     python scripts/measure_executable_facts.py --limit 20 --verbose
+    python scripts/measure_executable_facts.py --reconcile-legacy
 """
 
 from __future__ import annotations
@@ -50,10 +61,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _metrics_boot import record_analysis  # noqa: E402
 
 from app.services.fact_quality import (  # noqa: E402
-    DETAIL_CLASSES,
+    EXECUTABLE_DEFINITION_VERSION,
     FACT_CLASSES,
+    LEGACY_EXECUTABLE_DEFINITION_VERSION,
     classify_fact,
+    classify_fact_legacy,
     executable_fact_summary,
+    is_executable_fact_legacy,
 )
 
 MYSQL_HOST = "127.0.0.1"
@@ -65,6 +79,8 @@ DOCKER_CONTAINER = "c7f-w3b-q1ll3r-mysql-1"
 
 RUN_CHUNK = 25  # long IN lists have been SIGTERM'd on this box
 SAMPLE_CHARS = 300
+RECONCILE_CHARS = 80
+RECONCILE_EXAMPLES = 10
 
 
 @dataclass
@@ -292,8 +308,8 @@ def _pct(numerator: int, denominator: int) -> str:
     return f"{numerator * 100 / denominator:.1f}%" if denominator else "n/a"
 
 
-def _one_line(text: str) -> str:
-    return " ".join(text.split())[:SAMPLE_CHARS]
+def _one_line(text: str, width: int = SAMPLE_CHARS) -> str:
+    return " ".join(text.split())[:width]
 
 
 def _rate(executable: int, commands: int) -> float:
@@ -302,13 +318,18 @@ def _rate(executable: int, commands: int) -> float:
 
 def window_stats(records: list[FactRecord], commands: int) -> dict[str, Any]:
     summary = executable_fact_summary([fact.text for fact in records])
-    counts = summary["counts"]
-    assert isinstance(counts, dict)
+    by_class = summary["by_class"]
+    assert isinstance(by_class, dict)
     return {
         "facts": len(records),
-        "executable": counts["executable"],
-        "ratio": summary["shares"]["executable"],
-        "executable_per_100_commands": _rate(counts["executable"], commands),
+        "executable": summary["executable"],
+        "ratio": summary["ratio"],
+        "by_class": by_class,
+        "executable_legacy": summary["executable_legacy"],
+        "legacy_ratio": summary["legacy_ratio"],
+        "moved_from_legacy": summary["moved_from_legacy"],
+        "executable_per_100_commands": _rate(int(summary["executable"]), commands),
+        "legacy_per_100_commands": _rate(int(summary["executable_legacy"]), commands),
         "summary": summary,
     }
 
@@ -330,6 +351,88 @@ def print_samples(runs: list[RunSlice], wanted: int = 3) -> None:
             print(f"  * {_one_line(text)}")
 
 
+def reconcile_legacy(records: list[FactRecord]) -> dict[str, dict[str, list[str]]]:
+    """Apply v2 and v1 to the same facts and bucket every disagreement.
+
+    ``moved`` is keyed by the *v2* class: a fact v1 called executable that v2
+    did not.  ``gained`` is keyed by the *v1* class: a fact v1 rejected that v2
+    accepts.  The key is the label a reader needs in order to see which rule
+    changed the count.
+    """
+
+    moved: dict[str, list[str]] = {}
+    gained: dict[str, list[str]] = {}
+    for fact in records:
+        new_class = classify_fact(fact.text)
+        was_executable = is_executable_fact_legacy(fact.text)
+        if was_executable and new_class != "executable":
+            moved.setdefault(new_class, []).append(fact.text)
+        elif not was_executable and new_class == "executable":
+            gained.setdefault(classify_fact_legacy(fact.text), []).append(fact.text)
+    return {"moved": moved, "gained": gained}
+
+
+def print_reconciliation(records: list[FactRecord], examples: int) -> None:
+    groups = reconcile_legacy(records)
+    moved = groups["moved"]
+    gained = groups["gained"]
+    moved_total = sum(len(texts) for texts in moved.values())
+    gained_total = sum(len(texts) for texts in gained.values())
+
+    print(
+        f"\n== reconciliation: {EXECUTABLE_DEFINITION_VERSION} vs "
+        f"{LEGACY_EXECUTABLE_DEFINITION_VERSION} on the same {len(records)} facts =="
+    )
+    print(
+        f"{EXECUTABLE_DEFINITION_VERSION} executable={sum(1 for f in records if classify_fact(f.text) == 'executable')}, "
+        f"{LEGACY_EXECUTABLE_DEFINITION_VERSION} executable={sum(1 for f in records if is_executable_fact_legacy(f.text))}, "
+        f"moved={moved_total}, gained={gained_total}"
+    )
+
+    if moved_total:
+        parts = ", ".join(
+            f"{label} {len(texts)}" for label, texts in sorted(moved.items(), key=lambda kv: -len(kv[1]))
+        )
+        print(f"\n{moved_total} facts moved out of executable: {parts}")
+    else:
+        print("\n0 facts moved out of executable")
+
+    for label, texts in sorted(moved.items(), key=lambda kv: -len(kv[1])):
+        print(f"  [{label}] {len(texts)} facts ({_pct(len(texts), moved_total)} of moved)")
+        seen: set[str] = set()
+        shown = 0
+        for text in texts:
+            snippet = _one_line(text, RECONCILE_CHARS)
+            if snippet in seen:
+                continue
+            seen.add(snippet)
+            print(f"    - [{label}] {snippet}")
+            shown += 1
+            if examples and shown >= examples:
+                break
+
+    if gained_total:
+        parts = ", ".join(
+            f"{label} {len(texts)}" for label, texts in sorted(gained.items(), key=lambda kv: -len(kv[1]))
+        )
+        print(f"\n{gained_total} facts gained as executable: {parts}")
+        for label, texts in sorted(gained.items(), key=lambda kv: -len(kv[1])):
+            print(f"  [{label} -> executable] {len(texts)} facts")
+            seen = set()
+            shown = 0
+            for text in texts:
+                snippet = _one_line(text, RECONCILE_CHARS)
+                if snippet in seen:
+                    continue
+                seen.add(snippet)
+                print(f"    - [executable] {snippet}")
+                shown += 1
+                if examples and shown >= examples:
+                    break
+    else:
+        print("\n0 facts gained as executable")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument(
@@ -346,10 +449,23 @@ def main() -> int:
         help="MySQL via 127.0.0.1:3307 (default) or docker exec",
     )
     parser.add_argument("--transitions", default="", help="explicit transitions jsonl")
+    parser.add_argument(
+        "--reconcile-legacy",
+        action="store_true",
+        help="apply v2 and v1 to the same facts and print every disagreement group",
+    )
+    parser.add_argument(
+        "--reconcile-examples",
+        type=int,
+        default=RECONCILE_EXAMPLES,
+        help="examples per disagreement group (default 10; 0 = every disagreeing fact)",
+    )
     args = parser.parse_args()
 
     if args.limit < 0:
         raise SystemExit("--limit must be >= 0")
+    if args.reconcile_examples < 0:
+        raise SystemExit("--reconcile-examples must be >= 0")
 
     path = Path(args.transitions) if args.transitions else newest_transitions()
     if not path.is_file():
@@ -378,12 +494,6 @@ def main() -> int:
     today = window_stats(all_facts, commands)
     lifetime = window_stats(lifetime_facts, commands)
     after = window_stats(after_last, commands)
-    today_summary = today["summary"]
-    assert isinstance(today_summary, dict)
-    today_counts = today_summary["counts"]
-    assert isinstance(today_counts, dict)
-    by_detail = today_summary["by_detail"]
-    assert isinstance(by_detail, dict)
 
     export_facts = sum(run.export_facts for run in runs)
     verified_total = sum(1 for fact in all_facts if fact.verified)
@@ -397,6 +507,10 @@ def main() -> int:
         "muteki.fact_added payload.payload.fact, same run ids"
     )
     print(f"verified    : {verified_total} / {len(all_facts)} ({_pct(verified_total, len(all_facts))})")
+    print(
+        f"definition  : executable = {EXECUTABLE_DEFINITION_VERSION} (strict), "
+        f"legacy = {LEGACY_EXECUTABLE_DEFINITION_VERSION} (frozen, reported alongside only)"
+    )
 
     print("\n== LIMITATION: the two sides of the ratio are not one snapshot ==")
     print(f"- commands and final_status come from the transition export ({path.name}).")
@@ -420,45 +534,66 @@ def main() -> int:
     )
 
     print("\n== windows ==")
-    print(f"{'window':<22}{'facts':>7}{'exec':>7}{'share':>8}{'exec/100cmds':>14}")
+    print(
+        f"{'window':<22}{'facts':>7}"
+        f"{'exec v2':>9}{'v2 share':>10}{'v2/100':>8}"
+        f"{'exec v1':>9}{'v1 share':>10}{'v1/100':>8}"
+    )
     for name, stats in (
         ("facts_as_of_today", today),
         ("facts_in_lifetime", lifetime),
     ):
         print(
-            f"{name:<22}{stats['facts']:>7}{stats['executable']:>7}"
-            f"{stats['ratio'] * 100:>7.1f}%{stats['executable_per_100_commands']:>14.2f}"
+            f"{name:<22}{stats['facts']:>7}"
+            f"{stats['executable']:>9}{stats['ratio'] * 100:>9.1f}%"
+            f"{stats['executable_per_100_commands']:>8.2f}"
+            f"{stats['executable_legacy']:>9}{stats['legacy_ratio'] * 100:>9.1f}%"
+            f"{stats['legacy_per_100_commands']:>8.2f}"
         )
     print(
-        f"{'after_last_command':<22}{after['facts']:>7}{after['executable']:>7}"
-        f"{after['ratio'] * 100:>7.1f}%{'n/a':>14}"
+        f"{'after_last_command':<22}{after['facts']:>7}"
+        f"{after['executable']:>9}{after['ratio'] * 100:>9.1f}%{'n/a':>8}"
+        f"{after['executable_legacy']:>9}{after['legacy_ratio'] * 100:>9.1f}%{'n/a':>8}"
     )
 
-    print("\n== overall (facts_as_of_today) ==")
-    print(f"facts                        {len(all_facts)}")
-    print(f"executable                   {today_counts['executable']}")
-    print(f"executable ratio             {today['ratio'] * 100:.1f}%")
+    print(f"\n== overall (facts_as_of_today, n={len(all_facts)}) ==")
+    print(f"definition version           {EXECUTABLE_DEFINITION_VERSION} (headline)")
+    label_v2 = f"executable ({EXECUTABLE_DEFINITION_VERSION})"
+    label_v1 = f"executable ({LEGACY_EXECUTABLE_DEFINITION_VERSION}, legacy)"
+    print(f"{label_v2:<29}{today['executable']:>4}  {today['ratio'] * 100:>5.1f}%")
+    print(
+        f"{label_v1:<29}{today['executable_legacy']:>4}  {today['legacy_ratio'] * 100:>5.1f}%"
+        "   (frozen rule, not the headline)"
+    )
+    print(f"moved out of executable      {today['moved_from_legacy']}")
     print(f"facts / 100 commands         {_rate(len(all_facts), commands):.2f}")
-    print(f"executable / 100 commands    {today['executable_per_100_commands']:.2f}")
-    print(f"{'class':<12}{'count':>8}{'share':>9}")
+    print(f"executable / 100 commands    {today['executable_per_100_commands']:.2f}  ({EXECUTABLE_DEFINITION_VERSION})")
+    print(
+        f"executable / 100 commands    {today['legacy_per_100_commands']:.2f}  "
+        f"({LEGACY_EXECUTABLE_DEFINITION_VERSION}, legacy)"
+    )
+    print(f"\n{'class':<12}{'count':>8}{'share':>9}")
     for label in FACT_CLASSES:
-        print(f"{label:<12}{today_counts[label]:>8}{_pct(today_counts[label], len(all_facts)):>9}")
-
-    print("\n== by detail (additional field, not a replacement) ==")
-    print(f"{'detail':<12}{'count':>8}{'share':>9}")
-    for label in DETAIL_CLASSES:
-        print(f"{label:<12}{by_detail[label]:>8}{_pct(by_detail[label], len(all_facts)):>9}")
+        print(f"{label:<12}{today['by_class'][label]:>8}{_pct(today['by_class'][label], len(all_facts)):>9}")
 
     print("\n== per status (facts_as_of_today; exact match) ==")
     print(
-        f"{'status':<22}{'runs':>6}{'commands':>10}{'facts':>8}{'exec':>7}"
-        f"{'share':>8}{'exec/100':>10}{'life/100':>10}"
+        f"{'status':<22}{'runs':>6}{'commands':>10}{'facts':>8}"
+        f"{'exec v2':>9}{'v2/100':>8}{'life v2/100':>13}"
+        f"{'exec v1':>9}{'v1/100':>8}"
     )
     status_rows: dict[str, dict[str, int]] = {}
     for run in runs:
         bucket = status_rows.setdefault(
             run.status,
-            {"runs": 0, "commands": 0, "facts": 0, "executable": 0, "life_exec": 0},
+            {
+                "runs": 0,
+                "commands": 0,
+                "facts": 0,
+                "executable": 0,
+                "life_exec": 0,
+                "executable_legacy": 0,
+            },
         )
         bucket["runs"] += 1
         bucket["commands"] += run.commands
@@ -469,32 +604,38 @@ def main() -> int:
         bucket["life_exec"] += sum(
             1 for fact in run.lifetime_facts() if classify_fact(fact.text) == "executable"
         )
+        bucket["executable_legacy"] += sum(
+            1 for fact in run.facts if is_executable_fact_legacy(fact.text)
+        )
 
     for status, bucket in status_rows.items():
         print(
-            f"{status:<22}{bucket['runs']:>6}{bucket['commands']:>10}"
-            f"{bucket['facts']:>8}{bucket['executable']:>7}"
-            f"{_pct(bucket['executable'], bucket['facts']):>8}"
-            f"{_rate(bucket['executable'], bucket['commands']):>10.2f}"
-            f"{_rate(bucket['life_exec'], bucket['commands']):>10.2f}"
+            f"{status:<22}{bucket['runs']:>6}{bucket['commands']:>10}{bucket['facts']:>8}"
+            f"{bucket['executable']:>9}{_rate(bucket['executable'], bucket['commands']):>8.2f}"
+            f"{_rate(bucket['life_exec'], bucket['commands']):>13.2f}"
+            f"{bucket['executable_legacy']:>9}"
+            f"{_rate(bucket['executable_legacy'], bucket['commands']):>8.2f}"
         )
 
     print("\n== per run (facts_as_of_today) ==")
     print(
-        f"{'run_id':<38}{'status':<22}{'cmds':>6}{'facts':>7}{'exec':>6}"
-        f"{'share':>8}{'exec/100':>10}"
+        f"{'run_id':<38}{'status':<22}{'cmds':>6}{'facts':>7}"
+        f"{'exec v2':>8}{'v2 share':>10}{'v2/100':>8}"
     )
     for run in runs:
         executable = sum(1 for fact in run.facts if classify_fact(fact.text) == "executable")
         share = executable / len(run.facts) if run.facts else 0.0
         print(
             f"{run.run_id:<38}{run.status:<22}{run.commands:>6}{len(run.facts):>7}"
-            f"{executable:>6}{share * 100:>7.1f}%"
-            f"{_rate(executable, run.commands):>10.2f}"
+            f"{executable:>8}{share * 100:>9.1f}%"
+            f"{_rate(executable, run.commands):>8.2f}"
         )
 
     if args.verbose:
         print_samples(runs)
+
+    if args.reconcile_legacy:
+        print_reconciliation(all_facts, args.reconcile_examples)
 
     record_analysis(
         "measure_executable_facts",
@@ -504,12 +645,21 @@ def main() -> int:
             "runs": len(runs),
             "commands": commands,
             "facts": len(all_facts),
-            "executable": today_counts["executable"],
-            "ratio": today["ratio"],
+            # Both numbers live under the same key, each wearing its version,
+            # so the new ratio cannot be quoted as if it were the old one.
+            "executable": {
+                "definition_version": EXECUTABLE_DEFINITION_VERSION,
+                "count": today["executable"],
+                "ratio": today["ratio"],
+                "per_100_commands": today["executable_per_100_commands"],
+                "legacy_definition_version": LEGACY_EXECUTABLE_DEFINITION_VERSION,
+                "legacy_count": today["executable_legacy"],
+                "legacy_ratio": today["legacy_ratio"],
+                "legacy_per_100_commands": today["legacy_per_100_commands"],
+                "moved_from_legacy": today["moved_from_legacy"],
+            },
             "facts_per_100_commands": _rate(len(all_facts), commands),
-            "executable_per_100_commands": today["executable_per_100_commands"],
-            "class_counts": dict(today_counts),
-            "by_detail": dict(by_detail),
+            "class_counts": dict(today["by_class"]),
             "by_status": status_rows,
             "verified_facts": verified_total,
             "export_state_facts": export_facts,
@@ -517,19 +667,25 @@ def main() -> int:
                 "facts_as_of_today": {
                     "facts": today["facts"],
                     "executable": today["executable"],
+                    "executable_legacy": today["executable_legacy"],
                     "ratio": today["ratio"],
+                    "legacy_ratio": today["legacy_ratio"],
                     "executable_per_100_commands": today["executable_per_100_commands"],
                 },
                 "facts_in_lifetime": {
                     "facts": lifetime["facts"],
                     "executable": lifetime["executable"],
+                    "executable_legacy": lifetime["executable_legacy"],
                     "ratio": lifetime["ratio"],
+                    "legacy_ratio": lifetime["legacy_ratio"],
                     "executable_per_100_commands": lifetime["executable_per_100_commands"],
                 },
                 "facts_after_last_command": {
                     "facts": after["facts"],
                     "executable": after["executable"],
+                    "executable_legacy": after["executable_legacy"],
                     "ratio": after["ratio"],
+                    "legacy_ratio": after["legacy_ratio"],
                 },
             },
         },
@@ -537,6 +693,7 @@ def main() -> int:
             "limit_runs": args.limit or None,
             "transport": args.transport,
             "transitions": path.name,
+            "definition_version": EXECUTABLE_DEFINITION_VERSION,
             # The guard stores only code_mtime; keep the module path in filters
             # so the snapshot can be traced back without editing the guard.
             "code_path": "backend/app/services/fact_quality.py",
