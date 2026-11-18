@@ -1054,6 +1054,9 @@ export function WorkspacePage() {
   const { id = "" } = useParams();
   const client = useQueryClient();
   const [events, setEvents] = useState<RunEvent[]>([]);
+  // Bounded separately from ``events`` so a command-heavy round cannot push the
+  // run's key states out of the shared 500-event window.
+  const [workerCommands, setWorkerCommands] = useState<RunEvent[]>([]);
   const [continuation, setContinuation] = useState("");
   const [artifactContent, setArtifactContent] = useState<{ path: string; content: string }>();
   const [pocExporting, setPocExporting] = useState(false);
@@ -1119,7 +1122,7 @@ export function WorkspacePage() {
     retry: false,
     staleTime: 60_000,
   });
-  const board = useMemo(() => projectBoard(events, mutekiState.data), [events, mutekiState.data]);
+  const board = useMemo(() => projectBoard([...events, ...workerCommands], mutekiState.data), [events, workerCommands, mutekiState.data]);
   const keyMoments = useMemo(() => projectKeyMoments(events, runMessages.data ?? []), [events, runMessages.data]);
   const eventUsage = useMemo(() => usageFromEvents(events, report.data?.report_json), [events, report.data?.report_json]);
   const usage = useMemo(() => {
@@ -1247,9 +1250,20 @@ export function WorkspacePage() {
 
   useEffect(() => {
     setEvents([]);
+    setWorkerCommands([]);
     let refreshTimer: ReturnType<typeof setTimeout> | undefined;
     const pending = new Set<string>();
     const source = api.streamRunEvents(id, (event) => {
+      // Commands get their own bounded buffer.  A Worker emits two
+      // ``worker_command`` frames per shell call (invocation + tool_result), so
+      // a single busy round would otherwise evict the run's key states from the
+      // 500-event window -- silently emptying the Solver Loop feed and
+      // under-counting dead ends.  The board only needs the command trail, so
+      // keep it separate instead of widening the shared window.
+      if (event.event_type === "muteki.worker_command") {
+        setWorkerCommands((current) => current.some((item) => item.sequence === event.sequence) ? current : [...current, event].sort((a, b) => a.sequence - b.sequence).slice(-400));
+        return;
+      }
       setEvents((current) => current.some((item) => item.sequence === event.sequence) ? current : [...current, event].sort((a, b) => a.sequence - b.sequence).slice(-500));
       pending.add(event.event_type);
       if (refreshTimer !== undefined) return;
