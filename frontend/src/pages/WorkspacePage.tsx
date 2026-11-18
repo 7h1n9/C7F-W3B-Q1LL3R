@@ -137,8 +137,63 @@ function text(value: unknown, fallback = ""): string {
   return typeof value === "string" && value.trim() ? value : fallback;
 }
 
-function clip(value: string, size = 150): string {
-  return value.length > size ? `${value.slice(0, size)}…` : value;
+// A very long payload (multi-KB event body / fact) keeps only a generous
+// preview in the DOM while collapsed so a dense list cannot be bloated by the
+// full strings; the toggle always reports the true length and expanding swaps
+// in the complete value.
+const CLAMP_PREVIEW_LIMIT = 2000;
+
+// Collapsed prose is *measured*, never sliced: the toggle only appears when the
+// rendered text really overflows the clamped box, so short rows stay clean.
+function ExpandableText({ value, lines = 3, className = "", toggleClassName = "muteki-expand-toggle" }: {
+  value: string;
+  lines?: number;
+  className?: string;
+  toggleClassName?: string;
+}) {
+  const bodyRef = useRef<HTMLDivElement>(null);
+  const [expanded, setExpanded] = useState(false);
+  const [clamped, setClamped] = useState(false);
+  const preview = value.length > CLAMP_PREVIEW_LIMIT ? value.slice(0, CLAMP_PREVIEW_LIMIT) : value;
+  const hiddenByPreview = value.length > preview.length;
+
+  useEffect(() => {
+    setExpanded(false);
+  }, [value]);
+
+  useEffect(() => {
+    const body = bodyRef.current;
+    if (!body || expanded) return;
+    const frame = window.requestAnimationFrame(() => {
+      const collapsedHeight = body.clientHeight;
+      const display = body.style.display;
+      // `display:block` disables -webkit-line-clamp, so scrollHeight is the full
+      // text height. The clamp value is a React-owned inline style and must stay
+      // untouched, otherwise the collapsed state would forget it.
+      body.style.display = "block";
+      const fullHeight = body.scrollHeight;
+      body.style.display = display;
+      setClamped(fullHeight > collapsedHeight + 1);
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [preview, expanded, lines]);
+
+  return (
+    <div className="muteki-expandable">
+      <div
+        ref={bodyRef}
+        className={`muteki-expandable-body ${expanded ? "is-expanded" : ""} ${className}`.trim()}
+        style={expanded ? undefined : { WebkitLineClamp: lines }}
+      >
+        {expanded ? value : preview}
+      </div>
+      {(clamped || hiddenByPreview || expanded) && (
+        <button type="button" className={toggleClassName} onClick={() => setExpanded((current) => !current)}>
+          {expanded ? "收起" : `展开全文 · ${value.trim().length} 字`}
+        </button>
+      )}
+    </div>
+  );
 }
 
 function defaultBoardPosition(index: number): BoardPosition {
@@ -194,9 +249,9 @@ function safeEventSummary(event: RunEvent): string {
   }
   if (type === "phase_changed") return `进入 ${text(payload.phase, "未知阶段").toUpperCase()}`;
   if (type === "worker_started" || type === "worker_finished" || type === "worker_step") return `${text(payload.role, "worker")} · ${text(payload.engine_id, "engine")} · ${actor}`;
-  if (type === "intent_proposed") return clip(text(payload.description, "新 Intent"));
+  if (type === "intent_proposed") return text(payload.description, "新 Intent");
   if (type === "intent_claimed" || type === "intent_released" || type === "intent_concluded") return `${text(payload.intent_id, "intent")} ${text(payload.result, "")}`.trim();
-  if (type === "fact_added") return clip(text(payload.content, "写入一条事实"));
+  if (type === "fact_added") return text(payload.content, "写入一条事实");
   if (type === "coordinator_directive" || type === "operator_directive" || type === "intent_state_changed") {
     return [text(payload.directive, text(payload.state, type)), text(payload.reason_code, text(payload.reason))].filter(Boolean).join(" · ");
   }
@@ -205,8 +260,8 @@ function safeEventSummary(event: RunEvent): string {
     return `${tool || "tool"} · ${text(payload.status, fallbackStatus)}`;
   }
   if (type === "artifact.created") return `${text(payload.path, "artifact")} · ${text(payload.size, "")}`.trim();
-  if (type === "review_finding" || type === "review_proposal" || type === "review_proposal_decision") return clip(text(payload.reason ?? payload.label ?? payload.decision, "Review 更新"));
-  if (type === "branch_split" || type === "branch_resolved" || type === "route_suppressed" || type === "route_reopened") return clip(text(payload.reason ?? payload.route_hash ?? type));
+  if (type === "review_finding" || type === "review_proposal" || type === "review_proposal_decision") return text(payload.reason ?? payload.label ?? payload.decision, "Review 更新");
+  if (type === "branch_split" || type === "branch_resolved" || type === "route_suppressed" || type === "route_reopened") return text(payload.reason ?? payload.route_hash ?? type);
   if (type === "flag_found") return "证据已通过 Flag Gate";
   return `${actor} · ${eventLabels[event.event_type] ?? event.event_type}`;
 }
@@ -773,10 +828,14 @@ export function WorkspacePage() {
   // Expansion is keyed by card id so it survives the 2s polling re-render and
   // is shared between the inline board and the fullscreen board.
   const [expandedCaseCards, setExpandedCaseCards] = useState<Record<string, boolean>>({});
+  // The inspector only renders the first 8 facts by default; the toggle opens
+  // the rest instead of silently hiding them.
+  const [showAllFacts, setShowAllFacts] = useState(false);
 
   useEffect(() => {
     setCaseBoardLayout(readBoardLayout(id));
     setExpandedCaseCards({});
+    setShowAllFacts(false);
   }, [id]);
 
   useEffect(() => {
@@ -1063,7 +1122,7 @@ export function WorkspacePage() {
                 return (
                   <div className={`muteki-key-moment is-${moment.kind} is-${moment.tone}`} key={moment.id}>
                     <div className="muteki-key-moment-head"><strong>{moment.title}</strong><span>{moment.timestamp}</span></div>
-                    {moment.kind === "user" ? <div className="muteki-user-prompt">{moment.summary}</div> : <div className="muteki-key-moment-summary">{moment.summary}</div>}
+                    {moment.kind === "user" ? <div className="muteki-user-prompt">{moment.summary}</div> : <ExpandableText value={moment.summary} lines={3} className="muteki-key-moment-summary" toggleClassName="muteki-expand-toggle is-moment" />}
                     {moment.kind === "user" && <small>Blackboard · {moment.status ?? "QUEUED"}</small>}
                   </div>
                 );
@@ -1141,11 +1200,27 @@ export function WorkspacePage() {
                       <div className="muteki-inspector-section-title">当前认知</div>
                     {pendingVerifiedFlag && <div className="muteki-pending-flag"><div><ClockCircleOutlined /> Verified event retained</div><small>当前 Run 尚未通过最终生命周期状态，Completion Gate/report 生成后才会展示具体 Flag。</small></div>}
                     {canonicalFlag && <div className="muteki-blackboard-flag"><div><CheckCircleFilled /> Verified Flag</div><Typography.Text copyable={{ text: canonicalFlag }}>{canonicalFlag}</Typography.Text><small>Completion Gate → canonical Blackboard result</small></div>}
-                    {board.facts.length ? <><div className="muteki-result-chips"><Tag color="green">已验证 {board.facts.filter((fact) => fact.verified).length}</Tag><Tag color="gold">待验证 {board.facts.filter((fact) => !fact.verified).length}</Tag></div>{board.facts.slice(0, 8).map((fact) => <div className="muteki-fact-row" key={`${fact.sequence}-${fact.content}`}><span className="muteki-fact-icon">{fact.verified ? <CheckCircleFilled /> : <ClockCircleOutlined />}</span><div><Typography.Text>{clip(fact.content, 120)}</Typography.Text><small>#{fact.sequence} · {fact.verified ? "已验证" : fact.state === "challenged" ? "待验证 · 已派验证单" : "待验证"} · Evidence {fact.evidenceCount}</small></div></div>)}</> : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="黑板暂无事实" />}
+                    {board.facts.length ? <>
+                      <div className="muteki-result-chips"><Tag color="green">已验证 {board.facts.filter((fact) => fact.verified).length}</Tag><Tag color="gold">待验证 {board.facts.filter((fact) => !fact.verified).length}</Tag></div>
+                      {(showAllFacts ? board.facts : board.facts.slice(0, 8)).map((fact) => (
+                        <div className="muteki-fact-row" key={`${fact.sequence}-${fact.content}`}>
+                          <span className="muteki-fact-icon">{fact.verified ? <CheckCircleFilled /> : <ClockCircleOutlined />}</span>
+                          <div>
+                            <ExpandableText value={fact.content} lines={3} className="muteki-fact-text" />
+                            <small>#{fact.sequence} · {fact.verified ? "已验证" : fact.state === "challenged" ? "待验证 · 已派验证单" : "待验证"} · Evidence {fact.evidenceCount}</small>
+                          </div>
+                        </div>
+                      ))}
+                      {board.facts.length > 8 && (
+                        <button type="button" className="muteki-expand-toggle is-list" onClick={() => setShowAllFacts((current) => !current)}>
+                          {showAllFacts ? "收起 · 只看前 8 条" : `显示全部 ${board.facts.length} 条事实`}
+                        </button>
+                      )}
+                    </> : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="黑板暂无事实" />}
                     <div className="muteki-inspector-section-title">User Prompts → Blackboard</div>
                     {runMessages.data?.length ? runMessages.data.slice(-4).reverse().map((input) => <div className="muteki-blackboard-input" key={input.id}><div><strong>{input.content}</strong><small>revision {input.revision} · {input.status}</small></div></div>) : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无用户提示" />}
                     <div className="muteki-inspector-section-title">Intent Queue</div>
-                    {board.intents.length ? board.intents.slice(0, 8).map((intent) => <div className="muteki-intent-row" key={intent.id}><Space size={5} wrap><Tag color={statusColor(intent.status)}>{statusLabel(intent.status)}</Tag>{intent.tool && <Tag>{intent.tool}</Tag>}{intent.classification && <Tag color="purple">{intent.classification}</Tag>}</Space><Typography.Text>{clip(intent.description, 110)}</Typography.Text><small>{intent.worker ? `Worker ${intent.worker}` : "等待认领"}{intent.result ? ` · ${clip(intent.result, 70)}` : ""}</small></div>) : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无 Intent" />}
+                    {board.intents.length ? board.intents.slice(0, 8).map((intent) => <div className="muteki-intent-row" key={intent.id}><Space size={5} wrap><Tag color={statusColor(intent.status)}>{statusLabel(intent.status)}</Tag>{intent.tool && <Tag>{intent.tool}</Tag>}{intent.classification && <Tag color="purple">{intent.classification}</Tag>}</Space><ExpandableText value={intent.description} lines={2} className="muteki-intent-text" /><small className="is-wrap">{intent.worker ? `Worker ${intent.worker}` : "等待认领"}{intent.result ? ` · ${intent.result}` : ""}</small></div>) : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无 Intent" />}
                     <div className="muteki-context-grid"><Statistic title="无进展" value={solverState.data?.no_progress_count ?? 0} /><Statistic title="Review" value={board.reviewCount} /><Statistic title="当前阶段" value={currentPhase.toUpperCase()} /></div>
                   </div>
                 ),

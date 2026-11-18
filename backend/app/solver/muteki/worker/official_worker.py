@@ -1330,16 +1330,20 @@ class OfficialWorkerAdapter:
                 pending[call_id or f"#{len(pending)}"] = payload["command"]
         elif kind == "tool_result":
             output = str(getattr(step, "raw", "") or getattr(step, "text", "") or "")
+            # Pop the paired command BEFORE capturing markers.  A fact whose
+            # producing command is not recorded is an unattributable claim: the
+            # board cannot say what was run to observe it, and the trajectory
+            # layer has to guess by matching text back onto earlier steps.
+            paired = pending.pop(call_id or f"#{len(pending) - 1}", "")
+            if paired and "command" not in payload:
+                payload["command"] = paired
             if output:
                 payload["result_excerpt"] = redact(output, limit=RESULT_LIMIT)
                 # The Worker's structured findings are printed through the shell,
                 # so they have to be read from REAL command output -- the reply
                 # text the solver scans never contains them.  Buffered here (step
                 # thread) and written to the board in ``execute`` (event loop).
-                self._capture_tool_markers(job, output)
-            paired = pending.pop(call_id or f"#{len(pending) - 1}", "")
-            if paired and "command" not in payload:
-                payload["command"] = paired
+                self._capture_tool_markers(job, output, command=paired)
         self._emit_step_payload(payload)
 
     #: A Worker rarely has more than a handful of genuine findings; the cap keeps
@@ -1347,12 +1351,20 @@ class OfficialWorkerAdapter:
     #: 60-candidate bucket for this actor -- with restatements.
     _TOOL_MARKER_CAP = 24
 
-    def _capture_tool_markers(self, job: Any, output: str) -> None:
-        """Buffer the markers a shell command PRINTED.  Step-thread safe."""
+    def _capture_tool_markers(self, job: Any, output: str, *, command: str = "") -> None:
+        """Buffer the markers a shell command PRINTED.  Step-thread safe.
+
+        ``command`` is the shell invocation whose stdout carried the marker.  It
+        is carried through to ``add_evidence(witness=...)`` so a board entry can
+        always name the command that produced it.  Before this, the paired
+        command was already sitting in ``_pending_commands`` but was popped
+        *after* the capture call, so every fact reached the graph unattributed.
+        """
 
         facts, dead_ends = _tool_output_markers(output)
         if not facts and not dead_ends:
             return
+        provenance = _marker_provenance(command)
         key = self._job_key(job)
         should_drain = False
         with self._tool_marker_lock:
@@ -1366,12 +1378,21 @@ class OfficialWorkerAdapter:
             seen = self._published_markers.get(key)
             slot = self._tool_markers.setdefault(key, {"facts": [], "dead_ends": []})
             for bucket, values in (("facts", facts), ("dead_ends", dead_ends)):
+                room = slot[bucket]
                 for value in values:
-                    if seen and value in seen:
+                    dedupe = _marker_key(value)
+                    if seen and dedupe in seen:
                         continue
-                    room = slot[bucket]
-                    if len(room) < self._TOOL_MARKER_CAP and value not in room:
-                        room.append(value)
+                    # Normalised comparison, not exact string equality: the same
+                    # finding printed with different spacing or casing is one
+                    # finding.  Keep the FIRST spelling so the board stays stable
+                    # across replay.
+                    if len(room) < self._TOOL_MARKER_CAP and all(
+                        _marker_key(item["value"]) != dedupe for item in room
+                    ):
+                        room.append(
+                            {"value": value, "command": command, "provenance": provenance}
+                        )
                         should_drain = True
             loop = self._job_loops.get(key)
         if not should_drain or loop is None or loop.is_closed():
@@ -1415,14 +1436,25 @@ class OfficialWorkerAdapter:
         actor = str(getattr(job, "worker_id", "") or "worker")
         intent_id = str(getattr(job, "intent_id", "") or "")
         written = 0
-        for value in slot["facts"]:
-            if value in seen:
+        for item in slot["facts"]:
+            value = item["value"]
+            dedupe = _marker_key(value)
+            if dedupe in seen:
                 continue
-            if self._publish_fact(graph, actor=actor, value=value, intent_id=intent_id):
-                seen.add(value)
+            if self._publish_fact(
+                graph,
+                actor=actor,
+                value=value,
+                intent_id=intent_id,
+                witness=item.get("command", ""),
+                provenance=item.get("provenance", "unknown"),
+            ):
+                seen.add(dedupe)
                 written += 1
-        for value in slot["dead_ends"]:
-            marker = f"dead_end:{value}"
+        for item in slot["dead_ends"]:
+            value = item["value"]
+            dedupe = _marker_key(value)
+            marker = f"dead_end:{dedupe}"
             if marker in seen:
                 continue
             if self._publish_dead_end(graph, actor=actor, value=value):
@@ -1435,7 +1467,15 @@ class OfficialWorkerAdapter:
         return written
 
     @staticmethod
-    def _publish_fact(graph: Any, *, actor: str, value: str, intent_id: str) -> bool:
+    def _publish_fact(
+        graph: Any,
+        *,
+        actor: str,
+        value: str,
+        intent_id: str,
+        witness: str = "",
+        provenance: str = "unknown",
+    ) -> bool:
         """Write one candidate fact through whichever board API this graph has.
 
         Production hands the adapter the RAW official ``SharedGraph``
@@ -1445,20 +1485,44 @@ class OfficialWorkerAdapter:
         ``add_fact``-only implementation would be a silent no-op in production,
         which is exactly the "green tests, dead feature" failure this project has
         already paid for once.
+
+        ``witness`` names the shell command whose output carried the marker, and
+        ``verifier`` records how the adapter knows: ``observed`` when a probe's
+        own output produced the line, ``inferred`` when the Worker merely echoed
+        it.  Both stay ``verified=False`` -- a marker proves the claim was
+        PRINTED, never that it is true.  The attribution is what makes a board
+        entry auditable; ``confidence`` differs only so downstream ranking can
+        tell the two apart.
         """
 
         add_evidence = getattr(graph, "add_evidence", None)
         if callable(add_evidence):
+            kwargs: dict[str, Any] = {
+                "actor": actor,
+                "source": actor,
+                "fact": value,
+                "verified": False,
+                "confidence": 0.7 if provenance == "observed" else 0.4,
+                "intent_id": intent_id or None,
+            }
+            if witness:
+                kwargs["witness"] = witness[:WITNESS_LIMIT]
+            if provenance and provenance != "unknown":
+                kwargs["verifier"] = provenance
             try:
-                add_evidence(
-                    actor=actor,
-                    source=actor,
-                    fact=value,
-                    verified=False,
-                    confidence=0.4,
-                    intent_id=intent_id or None,
-                )
+                add_evidence(**kwargs)
                 return True
+            except TypeError:
+                # A compatibility facade may not accept the attribution fields
+                # at all.  Drop them and retry rather than losing the fact: an
+                # unattributed fact still beats a silently discarded one.
+                for optional in ("witness", "verifier"):
+                    kwargs.pop(optional, None)
+                try:
+                    add_evidence(**kwargs)
+                    return True
+                except Exception:  # noqa: BLE001
+                    return False
             except Exception:  # noqa: BLE001 - a board write must not end a Run
                 return False
         add_fact = getattr(graph, "add_fact", None)
@@ -1755,6 +1819,50 @@ def _tool_output_markers(text: str, *, cap: int = 200) -> tuple[list[str], list[
         if value not in bucket:
             bucket.append(value)
     return facts, dead_ends
+
+
+#: Audit trail for a board fact: the command that produced it is stored on the
+#: graph as ``witness``.  Bounded because a shell command can be a 20 KB heredoc
+#: payload, and the board row is re-read on every snapshot.
+WITNESS_LIMIT = 400
+
+
+def _marker_key(value: str) -> str:
+    """Normalised identity of a marker, used for dedupe only.
+
+    Whitespace and casing are ignored when deciding whether the same finding was
+    already published (``Flask app`` and ``flask  app`` are one finding).  The
+    first spelling survives so replay stays byte-stable.
+    """
+
+    return re.sub(r"\s+", "", value or "").casefold()
+
+
+#: Shell shapes that PRINT a string rather than OBSERVE one.  A Worker that
+#: ``echo``\\s ``VERIFIED_FACT=...`` is telling the board what it believes; a
+#: Worker whose ``curl`` output happens to contain the line has witnessed it.
+_ECHO_ONLY_RE = re.compile(
+    r"^\s*(?:echo|printf|cat\s*<<|tee)\b"
+    r"|python[0-9.]*\s+-c\s+[\"'](?:print|sys\.stdout)",
+    re.IGNORECASE,
+)
+
+
+def _marker_provenance(command: str) -> str:
+    """``observed`` / ``inferred`` / ``unknown`` for a marker's producing command.
+
+    A heuristic, not a proof: a Worker can pipe its own echo through ``grep`` and
+    land in ``observed``.  The distinction is still worth having -- before it,
+    every fact carried identical confidence, so the board could not tell a probe
+    result from a self-report, and neither could the diagnosis layer.
+    """
+
+    text = (command or "").strip()
+    if not text:
+        return "unknown"
+    if _ECHO_ONLY_RE.search(text):
+        return "inferred"
+    return "observed"
 
 
 _PROMPT_BLOCKED_KEYS = frozenset(

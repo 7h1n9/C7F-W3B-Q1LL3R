@@ -35,6 +35,10 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from _metrics_boot import record_analysis  # noqa: E402  (also puts backend/ on sys.path)
+
 DEFAULT_SRC = ROOT / "data" / "training" / "transitions-20261103T161417Z.jsonl"
 
 # "Already swinging" shapes: a method'd request, a payload, script execution,
@@ -206,6 +210,24 @@ def main() -> int:
         shown[key] += 1
         short = command.replace("\n", " ")[:110]
         print(f"  [{status}/{kind}/touch={touches}] {run_id[:8]}: {short}")
+
+    # Provenance row: these numbers end up in the plan document, so they have to
+    # be recomputable without re-deriving which filter produced them.
+    record_analysis(
+        "analyze_first_action",
+        f"transitions jsonl: {args.src} | 全量读取",
+        {
+            "runs_with_command": len(classified),
+            "status_histogram": dict(status_counts),
+            "first_command_touches_target": {
+                str(touches): dict(table[touches]) for touches in (True, False)
+            },
+            "warmup_median_commands": (warmup[len(warmup) // 2] if warmup else None),
+            "first_command_hits_target": sum(1 for w in warmup if w == 0),
+        },
+        filters={"limit": args.limit or None, "src": args.src.name},
+        data_window=f"{args.src.name} 全量",
+    )
 
     return 0
 

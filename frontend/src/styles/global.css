@@ -159,8 +159,18 @@ body::before { position: fixed; inset: 0; z-index: -1; content: ""; opacity: .58
 .muteki-case-note-content.is-expanded { display: block; -webkit-line-clamp: unset; line-clamp: unset; max-height: none; overflow: visible; user-select: text; cursor: text; }
 .muteki-case-note.is-flag .muteki-case-note-content { color: #175f4e; font-family: Consolas, monospace; font-weight: 700; }
 .muteki-case-note-summary { margin-top: 6px; padding-top: 5px; border-top: 1px dashed #ded29c; color: #8b8160; font-size: 9.5px; line-height: 1.4; overflow-wrap: anywhere; user-select: text; }
-.muteki-case-note-toggle { display: inline-flex; align-items: center; gap: 4px; margin-top: 6px; padding: 0 7px; color: #6f6234; font-family: Consolas, monospace; font-size: 9px; line-height: 18px; background: #ffffffb8; border: 1px dashed #d5c384; border-radius: 6px; cursor: pointer; }
-.muteki-case-note-toggle:hover { color: #453a12; background: #fff; border-color: #b9a45f; }
+.muteki-case-note-toggle, .muteki-expand-toggle { display: inline-flex; align-items: center; gap: 4px; margin-top: 6px; padding: 0 7px; color: #6f6234; font-family: Consolas, monospace; font-size: 9px; line-height: 18px; background: #ffffffb8; border: 1px dashed #d5c384; border-radius: 6px; cursor: pointer; }
+.muteki-case-note-toggle:hover, .muteki-expand-toggle:hover { color: #453a12; background: #fff; border-color: #b9a45f; }
+/* Measured clamp used outside the case board (inspector facts/intents, event
+   stream). Same rule as the note content: only the rendered overflow is hidden,
+   and the expanded state drops every height limit so the full text + selection
+   work. */
+.muteki-expandable { min-width: 0; }
+.muteki-expandable-body { display: -webkit-box; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; user-select: text; cursor: text; }
+.muteki-expandable-body.is-expanded { display: block; -webkit-line-clamp: unset; line-clamp: unset; overflow: visible; }
+.muteki-expand-toggle.is-list { margin: 10px 0 2px; }
+.muteki-expand-toggle.is-moment { margin-top: 8px; font-size: 10px; line-height: 20px; }
+.muteki-fact-row .muteki-fact-text, .muteki-intent-row .muteki-intent-text { color: #2b665d; font-size: 11px; line-height: 1.45; }
 .muteki-case-note small { display: block; max-width: 100%; margin-top: 6px; color: #958b67; font-family: Consolas, monospace; font-size: 8px; line-height: 1.45; white-space: normal; overflow-wrap: anywhere; }
 .muteki-case-note.is-verified small { color: #3d8d6d; }
 .muteki-case-note.is-pending { background: #f4f1e9; border-color: #c8c2b4; border-style: dashed; color: #5e594c; filter: saturate(.6); }
@@ -253,6 +263,9 @@ body::before { position: fixed; inset: 0; z-index: -1; content: ""; opacity: .58
 .muteki-fact-row > div, .muteki-worker-row > div, .muteki-artifact-row > div { min-width: 0; }
 .muteki-fact-row .ant-typography, .muteki-intent-row .ant-typography { display: block; color: #2b665d; font-size: 11px; }
 .muteki-fact-row small, .muteki-intent-row small, .muteki-worker-row small, .muteki-artifact-row small { display: block; margin-top: 3px; overflow: hidden; color: #86a7a0; font-family: Consolas, monospace; font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
+/* Intent result is prose, not a tag: let it wrap instead of hiding the tail
+   behind a nowrap ellipsis. Metadata-only smalls keep the single line. */
+.muteki-intent-row small.is-wrap { overflow: visible; white-space: normal; text-overflow: clip; overflow-wrap: anywhere; }
 .muteki-blackboard-input { padding: 9px 0; border-bottom: 1px solid #e5f1ee; }
 .muteki-blackboard-input strong { display: block; color: #2b665d; font-size: 11px; line-height: 1.45; white-space: pre-wrap; }
 .muteki-blackboard-input small { display: block; margin-top: 4px; color: #86a7a0; font-family: Consolas, monospace; font-size: 9px; }

@@ -24,7 +24,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from _metrics_boot import record_analysis  # noqa: E402
+from _metrics_boot import record_analysis  # noqa: E402  (同时把 backend/ 放进 sys.path)
+
+from app.services.metrics_guard import format_comparison  # noqa: E402
 
 DEFAULT_SRC = ROOT / "data" / "training" / "transitions-20261103T161417Z.jsonl"
 
@@ -66,6 +68,53 @@ def classify_command(command: str) -> str:
     if RECON_RE.search(text):
         return "recon"
     return "other"
+
+
+def print_guard_comparison(
+    unsolved_stats: dict[str, int] | None,
+    solved_stats: dict[str, int] | None,
+    *,
+    window: int,
+):
+    """把「末窗有 fact 增量」的 Run 占比交给选择偏差护栏打印。
+
+    这只是把已经算出来的两个分数喂给 ``format_comparison``：分子的口径是
+    「末 window 条命令里 ``delta_facts`` 之和 > 0 的 Run 数」，分母是该组 Run 数。
+    返回 report 供快照记录；任一组为空时返回 None（0/0 是没测量，不是 0%）。
+    """
+
+    print("\n" + "=" * 72)
+    print("[组间对比] 口径：末%d条命令有 fact 增量的 Run 占比，按 final_status 分组" % window)
+    print("  分组分母（原样，不合并、不重采样）：未解=%s，已解=%s" % (
+        "n/a" if not unsolved_stats else unsolved_stats["n"],
+        "n/a" if not solved_stats else solved_stats["n"],
+    ))
+    if not unsolved_stats or not solved_stats:
+        print("!! 无法对比：某一组为空（n=0）；0/0 不是『0%』，是『没测量』，禁止进入对比表")
+        print("=" * 72)
+        return None
+
+    report = format_comparison(
+        "未解/引擎失败",
+        unsolved_stats["fact_growth_tail"],
+        unsolved_stats["n"],
+        "已解（对照）",
+        solved_stats["fact_growth_tail"],
+        solved_stats["n"],
+    )
+    print(report)
+    print(f"\n  causal_claim_allowed = {report.causal_claim_allowed}"
+          f"（warnings={len(report.warnings)} 条）")
+    print("  !! 该对比是『按结局分组』：分组变量 final_status 就是结局本身。")
+    print("     护栏不报警只说明数字没有明显失衡，不证明分组无偏；")
+    print("     因此本段任何差异都不能解释为『时间预算导致未解』的因果证据。")
+    print(
+        "  注：命令数中位 %d vs %d 无法喂进该护栏——它只吃『分子/分母』比率，"
+        "中位数没有可对应的分母，这是比率模型的结构性盲区。"
+        % (unsolved_stats["median_commands"], solved_stats["median_commands"])
+    )
+    print("=" * 72)
+    return report
 
 
 def main() -> int:
@@ -132,6 +181,8 @@ def main() -> int:
     unsolved_stats = profile(unsolved, "未解/引擎失败")
     solved_stats = profile(solved, "已解（对照）")
 
+    comparison = print_guard_comparison(unsolved_stats, solved_stats, window=args.window)
+
     # 四象限：末窗是否仍在产出 × 结尾形态
     quad = Counter()
     samples: dict[str, list[str]] = defaultdict(list)
@@ -172,6 +223,19 @@ def main() -> int:
             "status_histogram": dict(by_status),
             "unsolved": unsolved_stats,
             "solved": solved_stats,
+            "comparison": None if comparison is None else {
+                "label_a": comparison.label_a,
+                "numerator_a": comparison.numerator_a,
+                "denominator_a": comparison.denominator_a,
+                "label_b": comparison.label_b,
+                "numerator_b": comparison.numerator_b,
+                "denominator_b": comparison.denominator_b,
+                "denominator_ratio": round(comparison.denominator_ratio, 4),
+                "numerator_ratio": comparison.numerator_ratio,
+                "warnings": list(comparison.warnings),
+                "causal_claim_allowed": comparison.causal_claim_allowed,
+                "grouping_variable": "final_status（即结局本身，非自变量）",
+            },
             "quadrant": dict(quad),
             "stuck_fact0_recon": quad.get("fact0 / recon", 0) if n else None,
             "advancing": (

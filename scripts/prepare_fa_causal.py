@@ -29,7 +29,15 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "backend"))
+
+from app.services.metrics_guard import (  # noqa: E402  (path set up above)
+    PreregistrationIncomplete,
+    check_preregistration,
+)
+
 DEFAULT_OUT = ROOT / "experiments" / "fa-causal-v1.grouping.json"
+DEFAULT_PREREG = ROOT / "experiments" / "fa-causal-v1.yaml"
 DEFAULT_GROUND = "b9bbb32f-f186-458f-b90b-12440c0f6aea"  # 常规题组
 TARGET_SIZE = 20
 
@@ -97,6 +105,35 @@ def assign_groups(candidates: list[dict], *, size: int = TARGET_SIZE) -> dict:
     }
 
 
+def preregistration_gate(path: Path, *, skip: bool) -> int | None:
+    """拒绝在预注册不完整的实验文件上生成分组。返回 None 表示放行。
+
+    ``--dry-run`` 也走这里：否则 dry-run 就是一条绕过闸门的暗道。
+    """
+
+    if skip:
+        print("=" * 72)
+        print("!! 警告：--skip-preregistration 已启用 —— 本次实验【没有预注册】。")
+        print("!! 指标口径与判定规则是跑之前定的；没有锁定就等于没定义。")
+        print("!! 本次从这份分组跑出的任何结论只能作探索性观察，不可作为因果证据。")
+        print("=" * 72)
+        return None
+
+    try:
+        check = check_preregistration(path, strict=True)
+    except FileNotFoundError:
+        print(f"FAIL  预注册文件不存在: {path}")
+        print("      没有预注册就没有在开跑前锁定的口径，拒绝生成分组；")
+        print("      确需继续请显式加 --skip-preregistration，并在结论里标注『无预注册』。")
+        return 2
+    except PreregistrationIncomplete as exc:
+        print(exc.args[0])
+        print("FAIL  预注册校验未通过，拒绝生成分组（未触碰数据库、未写任何文件）")
+        return 2
+    print(check)
+    return None
+
+
 def _summary(grouping: dict, pool_size: int) -> dict:
     def stat(items: list[dict]) -> dict:
         runs = [c.get("run_count") or 0 for c in items]
@@ -156,9 +193,12 @@ def load_from_db(ground: str) -> list[dict]:
         for i in range(0, len(id_list), 20):
             batch = id_list[i:i + 20]
             placeholders = ",".join(["%s"] * len(batch))
+            # 事件名带 muteki. 前缀：adapter/event_bridge.py 统一加。
+            # 写成 exploit.first_action 会永远匹配 0 条，fa_seen 恒为 False，
+            # 于是「排除已有 FA 历史的题」这条规则静默失效。
             cur.execute(
                 "select r.challenge_id, count(distinct r.id) as runs, "
-                "  max(case when e.event_type='exploit.first_action' then 1 else 0 end) as fa "
+                "  max(case when e.event_type='muteki.exploit.first_action' then 1 else 0 end) as fa "
                 "from solve_runs r left join run_events e on e.run_id=r.id "
                 f"where r.challenge_id in ({placeholders}) group by r.challenge_id",
                 batch,
@@ -205,7 +245,22 @@ def main() -> int:
     ap.add_argument("--ground", default=DEFAULT_GROUND, help="练习场 UUID")
     ap.add_argument("--size", type=int, default=TARGET_SIZE, help="入组题数")
     ap.add_argument("--out", type=Path, default=DEFAULT_OUT, help="输出 JSON 路径")
+    ap.add_argument("--prereg", type=Path, default=DEFAULT_PREREG, help="预注册 YAML 路径")
+    ap.add_argument(
+        "--skip-preregistration",
+        action="store_true",
+        help="跳过预注册校验（逃逸开关；会打醒目警告，结论不可作为因果）",
+    )
     args = ap.parse_args()
+
+    # --dry-run 以前也写 DEFAULT_OUT，会覆盖已锁定的正式分组（不可复现的副作用）。
+    # dry-run 只允许写到 .dryrun.json，正式名单只能由正式运行生成。
+    if args.dry_run and args.out == DEFAULT_OUT:
+        args.out = DEFAULT_OUT.with_name(f"{DEFAULT_OUT.stem}.dryrun.json")
+
+    gate = preregistration_gate(args.prereg, skip=args.skip_preregistration)
+    if gate is not None:
+        return gate
 
     candidates = _dry_run_fixture() if args.dry_run else load_from_db(args.ground)
     print(f"候选池: {len(candidates)} 道（ground={'(dry-run)' if args.dry_run else args.ground}）")
@@ -230,6 +285,10 @@ def main() -> int:
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "practice_ground_id": None if args.dry_run else args.ground,
         "dry_run": bool(args.dry_run),
+        "preregistration": {
+            "path": str(args.prereg),
+            "verified": not args.skip_preregistration,
+        },
         "rule": "strata=has_cve; order=sha256(challenge_id); even->treatment, odd->control",
         "summary": summary,
         "treatment": grouping["treatment"],
