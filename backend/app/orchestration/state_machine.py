@@ -38,6 +38,28 @@ TERMINAL = {status for status in RunStatus if status.name.startswith(("COMPLETED
     RunStatus.CANCELLED,
     RunStatus.POLICY_BLOCKED,
 }
+
+
+def parse_run_status(value: object) -> RunStatus | None:
+    """Coerce a persisted status into ``RunStatus``, or ``None`` if unknown.
+
+    A persisted string outlives the enum that wrote it: a value set by hand, one
+    from an earlier revision, or one from a path that never knew the enum.  A
+    bare ``RunStatus(value)`` turns any of those into a ``ValueError``, and these
+    reads sit inside reconciliation loops -- so a single unrecognised row used to
+    abort the *entire* startup sweep for every other Run: leases not reclaimed,
+    containers not reaped, phases not projected.  One bad row must not do that.
+
+    ``None`` means "not a status we know", which callers treat as *not terminal*:
+    the safe reading, because it keeps the row eligible for reconciliation
+    instead of silently declaring it finished.
+    """
+    if isinstance(value, RunStatus):
+        return value
+    try:
+        return RunStatus(str(value))
+    except ValueError:
+        return None
 SOLVER_PHASES = {
     "INTAKE", "BASELINE", "RECON", "MAPPING", "HYPOTHESIS", "VALIDATION", "EXPLOITATION", "IMPACT", "TESTING", "CHAINING", "ENUMERATION",
     "FLAG_SEARCH", "FLAG_VERIFICATION", "REPORTING",
@@ -188,6 +210,33 @@ for status in TIMEOUT_SOURCES:
 for status in RunStatus:
     if status not in TERMINAL:
         ALLOWED.setdefault(status, set()).add(RunStatus.PAUSED_DEPLOYMENT)
+
+# A terminal failure is always a legal *outcome* of a non-terminal state.
+#
+# The pause states used to allow exactly two exits: back to PLANNING, or
+# CANCELLED.  That is a dead end the moment recovery itself fails.  A Run that
+# a restart parked in PAUSED_RECOVERY, whose resume then hit a hard error, could
+# not be recorded as FAILED_ENGINE: ``transition`` raised RUN_INVALID_STATE from
+# *inside* the error handler, so the original cause was replaced by an invalid
+# transition, and the row stayed PAUSED_RECOVERY with no lease and no task.  The
+# supervisor then re-enqueued it every sweep into the same wall -- a run that is
+# visibly "recovering" forever while nothing can ever move it.
+#
+# An error must never be harder to record than success.  Every non-terminal
+# status can reach every terminal failure, so any fault can be persisted
+# whatever phase it strikes.
+for status in RunStatus:
+    if status in TERMINAL:
+        continue
+    ALLOWED.setdefault(status, set()).update(
+        {
+            RunStatus.FAILED_ENGINE,
+            RunStatus.FAILED_TOOL,
+            RunStatus.FAILED_RUNNER,
+            RunStatus.TIMEOUT,
+            RunStatus.CANCELLED,
+        }
+    )
 
 
 def transition(run: object, target: RunStatus) -> None:

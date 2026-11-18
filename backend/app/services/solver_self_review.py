@@ -3,7 +3,7 @@
 from sqlalchemy import select
 
 from app.models.challenge import Challenge
-from app.models.multi_agent import AgentTask, PlannerProposal, VerifiedFact
+from app.models.multi_agent import VerifiedFact
 from app.models.solver_state import SolverState
 from app.services.user_input_resume_guard import check_user_input_resume
 

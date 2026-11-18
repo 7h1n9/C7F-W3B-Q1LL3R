@@ -1,0 +1,42 @@
+{
+  "id": "theory-php-deserialize-001",
+  "type": "theory",
+  "category": "deserialize",
+  "subcategory": "php_unserialize",
+  "name": "PHP反序列化漏洞总结",
+  "aliases": [
+    "PHP反序列化",
+    "unserialize",
+    "反序列化链",
+    "POP链"
+  ],
+  "severity": "medium",
+  "description": "> 创建: 未知 | 更新: 2026-05-21 | 适用: PHP 5.x / 7.x | ⚠️ 部分图片托管于外部CDN > 找实习时被问到了相关问题，虽说前前后后还是能答出来，但是感觉有些东西已经忘的差不多了，答的不利索，索性直接写一篇总结博文好了。 PHP反序列化一直是CTF竞赛中的宠儿吧，自己做CTF题目时时常会做到PHP的题目，但凡是PHP的题目，反序列化一般都少不了。",
+  "key_concepts": [
+    "# 序列化",
+    "# 一个简单的反序列化漏洞",
+    "PHP的序列化与反序列化",
+    "# 反序列化",
+    "# PHP反序列化基础",
+    "PHP反序列化漏洞总结",
+    "# PHP反序列化漏洞分析",
+    "PHP魔术方法",
+    "# PHP反序列化漏洞概述",
+    "POP链"
+  ],
+  "related_pocs": [],
+  "related_payloads": [
+    "payloads/php_unserialize/extracted.json"
+  ],
+  "tags": [
+    "PHP反序列化",
+    "unserialize",
+    "反序列化链",
+    "POP链",
+    "deserialize",
+    "ctf",
+    "web"
+  ],
+  "source": "Des-CTF-Knowledge/PHP反序列化漏洞总结.md",
+  "last_updated": "2026-10-22"
+}

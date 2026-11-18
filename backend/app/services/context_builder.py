@@ -1,5 +1,6 @@
 import hashlib
 import json
+import logging
 import re
 from datetime import UTC, datetime
 from pathlib import Path
@@ -19,14 +20,50 @@ from app.models.run import (
 )
 from app.models.skill import RunSkillSnapshot, Skill
 from app.security.lifecycle import vulnerability_lifecycle_engine
-from app.services.challenge_lessons import challenge_lesson_service
+from app.services.challenge_lessons import (
+    challenge_lesson_service,
+    format_profile_lessons,
+    profile_of,
+)
+from app.services.knowledge_context import knowledge_context_service
 from app.services.skill_selection import specialist_skill_catalog
 from app.services.solver_state import solver_state_service
 from app.services.tool_permissions import effective_tools_for
 from app.tools.registry import load_tool_definitions
 
+logger = logging.getLogger(__name__)
+
 CORE_PROMPT_PATH = Path(__file__).resolve().parents[1] / "prompts" / "ctf_solver_core.md"
 CORE_PROMPT = CORE_PROMPT_PATH.read_text(encoding="utf-8")
+
+
+async def _profile_prior(session: AsyncSession, challenge: Challenge, lessons: dict) -> str:
+    """Cross-challenge lessons, for a challenge with no history of its own (CAP-11).
+
+    Same-challenge history already describes this exact target, so whenever it
+    exists it wins: pooling other challenges in would dilute a precise prior with
+    a different range's habits.  The profile view is therefore a fallback for new
+    challenges, not an addition to solved ones.
+
+    Returns an already-rendered, explicitly self-produced block, or ``""``.
+    """
+
+    if any(lessons.get(key) for key in lessons):
+        return ""
+    vulnerability_type, target_stack = profile_of(challenge)
+    if not vulnerability_type:
+        return ""
+    try:
+        profile = await challenge_lesson_service.extract_by_profile(
+            session,
+            vulnerability_type=vulnerability_type,
+            target_stack=target_stack,
+            exclude_challenge_id=challenge.id,
+        )
+    except Exception:
+        logger.warning("Cross-challenge lessons failed; continuing without them", exc_info=True)
+        return ""
+    return format_profile_lessons(profile)
 
 
 class ContextBuilder:
@@ -211,6 +248,7 @@ class ContextBuilder:
         last_call = calls[0] if calls else None
         last_observation = observations[0] if observations else None
         lessons = await challenge_lesson_service.for_context(session, challenge.id, exclude_run_id=run.id)
+        profile_prior = await _profile_prior(session, challenge, lessons)
         latest_tool_view = (last_observation.facts_json or {}).get("tool_model_view") if last_observation else None
         started_at = run.started_at
         if started_at and started_at.tzinfo is None:
@@ -220,6 +258,20 @@ class ContextBuilder:
         # intentionally persisted on the Run for the UI, but must never enter
         # a Solver/Worker prompt or influence planning.
         solver_hints.pop("muteki_board_semantic", None)
+        knowledge_augmentation = knowledge_context_service.build(
+            run,
+            challenge,
+            state=state,
+            solver_state={
+                "current_phase": state.current_phase if state else run.current_phase,
+                "confirmed_facts": (
+                    (snapshot_data.get("canonical_facts") if snapshot_data else None)
+                    or (state.confirmed_facts_json if state else [])
+                ),
+                "ranked_hypotheses": self._ordered_hypotheses(hypotheses),
+            },
+            profile_prior=profile_prior,
+        )
         context = {
             "Role Snapshot": role_snapshot,
             "Challenge-Type Methodology Skill": {
@@ -302,6 +354,7 @@ class ContextBuilder:
                 "flag_pattern": challenge.flag_pattern,
                 "conversation_summary": run.conversation_summary,
             },
+            "Knowledge Augmentation": knowledge_augmentation,
             "Recent Observations": [
                 {"summary": item.summary, "facts": item.facts_json, "created_at": item.created_at.isoformat()}
                 for item in reversed(observations)

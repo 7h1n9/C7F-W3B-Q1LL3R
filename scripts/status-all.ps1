@@ -3,6 +3,8 @@ param(
     [int]$RunnerPort = 8091,
     [int]$BridgePort = 8090,
     [int]$FrontendPort = 5173,
+    # Protocol switch (optional local translation shim); see start-all.ps1.
+    [int]$SwitchPort = 8790,
     [string]$RunnerUrl = "http://192.168.236.128:8091"
 )
 
@@ -14,7 +16,8 @@ $services = @(
     @{ Name = "backend"; Port = $BackendPort; Uri = "http://127.0.0.1:$BackendPort/api/v1/health/ready" },
     @{ Name = "bridge"; Port = $BridgePort; Uri = "http://127.0.0.1:$BridgePort/health" },
     @{ Name = "frontend"; Port = $FrontendPort; Uri = "http://127.0.0.1:$FrontendPort" },
-    @{ Name = "runner"; Port = $RunnerPort; Uri = "$($RunnerUrl.TrimEnd('/'))/health" }
+    @{ Name = "runner"; Port = $RunnerPort; Uri = "$($RunnerUrl.TrimEnd('/'))/health" },
+    @{ Name = "switch"; Port = $SwitchPort; Uri = "http://127.0.0.1:$SwitchPort/health" }
 )
 
 foreach ($service in $services) {

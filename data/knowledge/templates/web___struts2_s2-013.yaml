@@ -1,0 +1,21 @@
+name: '[struts2]s2-013'
+category: web
+keywords:
+- struts2
+- github
+- vulhub
+- tree
+- master
+steps:
+- '[codex] Struts2 S2-013 works on http://direct-ctf2.dasctf.com:27222/link.action
+  via `a=${...}` GET param; the vulhub `.exec(''id'')` single-quote/InputStreamReader
+  payload evaluates and returns in-band output ('
+- '[codex] The `printenv` output printed the flag as `FLAG=<FLAG>`, retrieved with
+  the S2-013 OGNL RCE (running as root).'
+- Native Worker completed a bounded evidence-backed observation
+evidence_chain:
+- '[codex] The `printenv` output printed the flag as `FLAG=<FLAG>`, retrieved with
+  the S2-013 OGNL RCE (running as root).'
+success_format: CTF2\{[^}]+\}
+source: add9450f-87e6-4ecb-a27e-eb07e49d5c95 (solver c32402ff-1912-4aa8-83d4-e77b4655b51e)
+notes: ''

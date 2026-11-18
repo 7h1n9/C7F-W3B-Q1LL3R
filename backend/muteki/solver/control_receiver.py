@@ -30,7 +30,7 @@ import os
 import socket
 import threading
 import time
-from typing import Any, Callable, Optional
+from typing import Any, Optional
 
 # Default host receiver port. The container reaches it via host.docker.internal:<port>.
 DEFAULT_CONTROL_PORT = int(os.environ.get("MUTEKI_CONTROL_PORT", "9100"))

@@ -1,0 +1,35 @@
+name: unipickle
+category: web
+keywords:
+- unipickle
+- pickle
+- dicectf
+- quals
+- kmh
+- dicegang
+- challenges
+- github
+- tree
+- d7f5441edb95f3a98cb49e61b1a608938dacb2a0
+- misc
+- agpl
+steps:
+- route_exhausted route=5247010542b8167a engine=openai-compatible:8deec5f3-5714-4baa-bf3b-4e4bbcd4b01a
+  worker=worker-2 intent=intent_a8b822cb4906443ba62dd1614dac46ed reason=No new endpoint
+  remains on the assigned route.
+- route_exhausted route=web:target:connectivity:check engine=openai-compatible:8deec5f3-5714-4baa-bf3b-4e4bbcd4b01a
+  worker=worker-3 intent=intent_63c703d2263a488d95663b4ebc938572 reason=No new endpoint
+  remains on the assigned route. evidence_refs=f6f226cc-6c19-530e-941b-ed5181edf325
+- route_dead_end route=web:index:content:discovery engine=openai-compatible:8deec5f3-5714-4baa-bf3b-4e4bbcd4b01a
+  worker=worker-4 intent=intent_eefca049339a4baf8d923b926b7e478b reason=Target http://66a5975ddb59251b989f04be.tcp-ctf2.dasctf.com:9999/
+  accepts TCP but resets every connection without an HTTP response (RemoteDisconnected)
+  across 24 total attempts on ~15 distinct, unvisited endpoints and multiple methods
+  (GET /
+- route_exhausted route=route:7da1ae586833a371 engine=openai-compatible:8deec5f3-5714-4baa-bf3b-4e4bbcd4b01a
+  worker=worker-6 intent=I-verify-45-4b1bd51f reason=No new endpoint remains on the
+  assigned route. evidence_refs=1d9a5485-4ead-5a83-be29-2572925f5afe
+evidence_chain: []
+success_format: CTF2\{[^}]+\}
+source: fda52413-aa69-433f-8546-5ae59448d904 (run b21645be-6c82-4bb7-8438-eddb28781999)
+notes: NO_VERIFIED_FLAG
+kind: negative

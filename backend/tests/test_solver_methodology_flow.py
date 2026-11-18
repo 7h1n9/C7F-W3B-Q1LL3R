@@ -7,7 +7,7 @@ from sqlalchemy.pool import StaticPool
 
 from app.models.base import Base
 from app.models.challenge import Challenge
-from app.models.run import Artifact, FlagCandidate, Observation, RunEvent, SolveRun, ToolCall
+from app.models.run import FlagCandidate, Observation, RunEvent, SolveRun, ToolCall
 from app.models.skill import RunSkillSnapshot, Skill
 from app.orchestration.state_machine import RunStatus, transition
 from app.schemas.agent import SkillAction

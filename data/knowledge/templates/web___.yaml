@@ -1,0 +1,38 @@
+name: 每日流量邮报：数据院碎片还原
+category: web
+keywords:
+- pcap
+- tcp
+- pipelined
+- set
+- cookie
+- path
+- latest
+- wins
+- base64
+- partial
+- content
+- range
+steps:
+- '[claude] /api/verify accepts JSON {a1,a2,a3}; correct answers: Q1=/portal (首个有效文档请求，302链
+  /login→/portal 后), Q2=SESS=9b1c (auth 后最新值覆盖，Path=/portal), Q3=b7f2a1e94c6d0358fa2be3c17d9046ee
+  (ETag "aud-7742" 两段 206'
+- '[claude] VERIFIED_FACT=/api/verify accepts JSON {a1,a2,a3}; correct answers: Q1=/portal
+  (首个有效文档请求，302链 /login→/portal 后), Q2=SESS=9b1c (auth 后最新值覆盖，Path=/portal), Q3=b7f2a1e94c6d0358fa2be3c17d9046ee
+  (ETag "aud'
+- Native Worker completed a bounded evidence-backed observation
+- '[codex] POST /api/verify with {"a1":"/portal","a2":"9b1c","a3":"b7f2a1e94c6d0358fa2be3c17d9046ee"}
+  returns {"ok": true, "flag": "<FLAG>"}'
+- '[codex] robots.txt discloses /static/secretkey.txt (content: "you-will-never-guess"),
+  which is a decoy and not needed for verification'
+- '[codex] FOUND_FLAG=<FLAG>'
+evidence_chain:
+- '[claude] VERIFIED_FACT=/api/verify accepts JSON {a1,a2,a3}; correct answers: Q1=/portal
+  (首个有效文档请求，302链 /login→/portal 后), Q2=SESS=9b1c (auth 后最新值覆盖，Path=/portal), Q3=b7f2a1e94c6d0358fa2be3c17d9046ee
+  (ETag "aud'
+- '[codex] POST /api/verify with {"a1":"/portal","a2":"9b1c","a3":"b7f2a1e94c6d0358fa2be3c17d9046ee"}
+  returns {"ok": true, "flag": "<FLAG>"}'
+- '[codex] FOUND_FLAG=<FLAG>'
+success_format: CTF2\{[^}]+\}
+source: e6685a34-d345-407b-858b-3a6a03c2f004 (solver 0d6393e5-2991-42df-b5d0-acd0a2b043ca)
+notes: ''

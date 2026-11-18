@@ -33,12 +33,13 @@ so the scheduler and drivers need no change.
 from __future__ import annotations
 
 import hashlib
+import re as _re
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
 from muteki.solver.worker_profiles import (
-    VALID_BASE_ENGINES,
     DEFAULT_ROLES,
+    VALID_BASE_ENGINES,
     base_engine_for_profile,
     coerce_nonneg_int,
     coerce_pos_int,
@@ -59,8 +60,6 @@ _MODE_TO_KIND: dict[str, str] = {
     "custom_endpoint": "custom_endpoint",
 }
 
-
-import re as _re
 
 # a well-formed new id: seat_<engine>_<6hex> / cred_<engine>_<6hex>. Used to make
 # migration IDEMPOTENT — re-migrating an already-migrated config (the v2 frontend

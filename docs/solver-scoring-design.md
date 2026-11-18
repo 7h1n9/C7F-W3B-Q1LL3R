@@ -1,5 +1,12 @@
 # Solver 评分与预测设计
 
+> **状态：已下线（2026-10-27）。**
+> 该评分机制未能达到可用状态（未解出 Run 的评分行因 MySQL 1205 锁等待整批丢失、
+> 预测覆盖率长期不足），相关代码（`solver_scoring.py`、`models/scoring.py`、
+> `/runs/{id}/score`、`/challenges/{id}/prediction(s)`、前端评分卡）已整体移除。
+> 本文档仅作为历史设计记录保留，不再是当前实现的描述。
+> 数据库表 `run_scores` / `challenge_predictions` 仍保留，仅停止写入。
+
 ## 1. 目标
 
 对一次 SolveRun 进行量化评分。评分前，模型先分析挑战内容并给出预测值；Run 结束后按实际表现计算指标与总分。

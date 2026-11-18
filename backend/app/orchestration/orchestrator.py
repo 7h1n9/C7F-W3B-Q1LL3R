@@ -20,6 +20,7 @@ from app.engines import (
     OpenAICompatibleEngine,
     SolveEngine,
 )
+from app.engines.wire import normalize_wire_api
 from app.models.challenge import Challenge
 from app.models.model_config import ModelConfig
 from app.models.run import (
@@ -30,11 +31,11 @@ from app.models.run import (
     RunAttempt,
     RunEvent,
     RunExecutionLease,
-    RunUserInput,
     SolveRun,
     ToolCall,
 )
 from app.models.skill import RunSkillSnapshot, Skill
+from app.orchestration.multi_agent_orchestrator import multi_agent_orchestrator
 from app.orchestration.state_machine import SOLVER_PHASES, TERMINAL, RunStatus, transition
 from app.schemas.agent import (
     ActionHypothesis,
@@ -51,7 +52,6 @@ from app.services.automation_policy import automation_policy_engine
 from app.services.context_builder import context_builder
 from app.services.crypto import decrypt_api_key
 from app.services.events import event_service
-from app.services.user_input_consumer import consume_user_inputs
 from app.services.evidence_pipeline import evidence_pipeline
 from app.services.finish_gate import finish_gate
 from app.services.flags import flag_service
@@ -61,14 +61,14 @@ from app.services.infrastructure import clear_failure, infrastructure_error, rec
 from app.services.progress_evaluator import progress_evaluator
 from app.services.reports import ReproductionPlanner, report_service
 from app.services.run_attempts import run_attempt_service
+from app.services.run_budget_guard import run_budget_guard
 from app.services.run_finalizer import run_finalizer
 from app.services.runner_client import runner_client
 from app.services.script_controller import script_fallback_controller
 from app.services.solver_state import solver_state_service
 from app.services.tool_manifest import refresh_runtime_tool_manifest
 from app.services.tool_permissions import effective_tools_for
-from app.orchestration.multi_agent_orchestrator import multi_agent_orchestrator
-from app.services.run_budget_guard import run_budget_guard
+from app.services.user_input_consumer import consume_user_inputs
 from app.tools.gateway import tool_gateway
 from app.tools.registry import load_tool_definitions
 
@@ -84,6 +84,12 @@ CTF_PHASE_ORDER = (
     "REPORTING",
 )
 CTF_PHASE_INDEX = {phase: index for index, phase in enumerate(CTF_PHASE_ORDER)}
+
+# Solver modes this controller does not own.  ``RunSupervisor`` dispatches by
+# ``solver_mode``; these two have their own runtimes (the canonical Muteki
+# engine and SolverRuntimeService) and must never be handed to the single-agent
+# controller, which would try to construct a legacy engine for them.
+NON_LEGACY_SOLVER_MODES = {"muteki", "solver_v2"}
 
 
 def _tool_rate_limit_status(payload: dict) -> int | None:
@@ -108,7 +114,7 @@ def _tool_rate_limit_status(payload: dict) -> int | None:
     return None
 
 
-def __logical_tool_budget_ref(payload: dict) -> str | None:
+def _logical_tool_budget_ref(payload: dict) -> str | None:
     """Return one canonical budget key for a tool invocation event."""
     logical_id = payload.get("logical_tool_call_id")
     if logical_id:
@@ -177,6 +183,9 @@ class SolveOrchestrator:
                 decrypt_api_key(config.encrypted_api_key),
                 config.model_name,
                 timeout=config.request_timeout_seconds,
+                # Honour the stored dialect: a Responses-only relay rejects a
+                # Chat body outright.
+                wire_api=normalize_wire_api(getattr(config, "wire_api", None)),
                 action_protocol=config.action_protocol,
                 max_output_tokens=config.max_output_tokens,
                 temperature=config.temperature,
@@ -592,6 +601,27 @@ class SolveOrchestrator:
         )
         return False
 
+    async def _handoff_non_legacy_mode(self, run_id: str, user_message: str | None) -> bool:
+        """Delegate a Run this controller does not own, and report whether it did.
+
+        ``True`` means the Run was handed to its own runtime and the caller must
+        stop; ``False`` means a single-agent Run, which this controller runs
+        itself.  Only ``solver_mode`` is read, so the check is one indexed
+        lookup and never materialises the Run body.
+        """
+        async with SessionLocal() as session:
+            mode = await session.scalar(
+                select(SolveRun.solver_mode).where(SolveRun.id == run_id)
+            )
+            if str(mode or "").lower() not in NON_LEGACY_SOLVER_MODES:
+                return False
+            # Imported lazily: ``run_supervisor`` imports this module inside its
+            # own functions, so a module-level import here would be circular.
+            from app.services.run_supervisor import run_supervisor
+
+            await run_supervisor.continue_until_terminal(session, run_id, user_message)
+        return True
+
     async def start(self, run_id: str, user_message: str | None = None) -> None:
         task = asyncio.current_task()
         existing = self.active_tasks.get(run_id)
@@ -600,6 +630,16 @@ class SolveOrchestrator:
             # before the durable production ToolCall exists.  The original
             # task owns this Run; a second start must not create another
             # Planner/Proposal chain.
+            return
+        # This controller only owns the single-agent engine types.  A Run of a
+        # non-legacy solver mode reaching here used to run the whole bootstrap
+        # and then die in ``build_engine`` with ``unsupported engine type:
+        # claude_cli`` -- an error that blames the engine while the real fault
+        # is that a Run was dispatched through the wrong controller.  Hand it
+        # back to the supervisor dispatcher, which is the one place that knows
+        # how to route by ``solver_mode``.  Guarding here (rather than only at
+        # the caller) means no future call site can reintroduce the trap.
+        if await self._handoff_non_legacy_mode(run_id, user_message):
             return
         if task:
             self.active_tasks[run_id] = task
@@ -677,19 +717,20 @@ class SolveOrchestrator:
                         )
                     return
                 if run.status == RunStatus.CREATED:
-                    try:
-                        await runner_client.sync_workspace(run.id, Path(run.workspace_path))
-                    except Exception as error:
-                        run.last_error_code = "RUNNER_UNAVAILABLE"
-                        run.last_error_message = str(error)[:4000]
-                        await self._transition(session, run, RunStatus.FAILED_RUNNER)
-                        await event_service.append(
-                            session,
-                            run.id,
-                            "run.failed",
-                            {"code": "RUNNER_UNAVAILABLE", "message": str(error)[:1000]},
-                        )
-                        return
+                    # No workspace sync here: this is ``_handoff_non_legacy_mode``,
+                    # and the only thing that ever needed ``sync_workspace`` was
+                    # the legacy Kali Runner -- a separate VM that required the
+                    # tree copied to it.  Muteki's workers mount the host workspace
+                    # directly (``ensure_container`` bind-mounts it), so there is
+                    # nothing to copy.
+                    #
+                    # Keeping the call was not harmless: ``_require_enabled`` raises
+                    # ``RunnerRetiredError`` whenever ``legacy_kali_runner`` is off,
+                    # so any Run reaching CREATED here was transitioned straight to
+                    # ``FAILED_RUNNER`` with "RUNNER_UNAVAILABLE" -- a failure whose
+                    # stated cause (a downed Runner) was not even the real one (the
+                    # Runner is deliberately retired).
+                    pass
                 engine = await self.build_engine(run, session, attempt, lease)
                 self.active_engines[run_id] = engine
                 if run.solver_mode == "multi_agent_v1":
@@ -700,7 +741,11 @@ class SolveOrchestrator:
                     await self._run_event_engine(session, run, engine, user_message, attempt, lease)
             except asyncio.CancelledError:
                 raise
-            except Exception as error:
+            except (Exception, SystemExit) as error:
+                # ``SystemExit`` is a ``BaseException``: without it here, a
+                # refused host operation raised from a worker thread would skip
+                # this handler, reach the loop, and end the service instead of
+                # the Run.  A Run may fail for any reason; the service may not.
                 if "run" in locals() and RunStatus(run.status) not in TERMINAL:
                     if isinstance(error, ModelRateLimitError):
                         code = "MODEL_RATE_LIMITED"
@@ -1601,8 +1646,7 @@ class SolveOrchestrator:
                 # closed the attempt and invalidated the thread.
                 await report_service.generate(session, run, challenge, "solved")
                 await event_service.append(session, run.id, "agent.action_completed", {"type": "finish", "result": "solved"})
-                with contextlib.suppress(Exception):
-                    await runner_client.clear_sessions(run.id)
+                await self._clear_legacy_sessions(run.id)
                 return True
         detailed_gate = await finish_gate.evaluate_detailed(
             session, run, challenge, candidate_verified=solved, result=action.result
@@ -1637,9 +1681,27 @@ class SolveOrchestrator:
         await event_service.append(
             session, run.id, "agent.action_completed", {"type": "finish", "result": result}
         )
-        with contextlib.suppress(Exception):
-            await runner_client.clear_sessions(run.id)
+        await self._clear_legacy_sessions(run.id)
         return True
+
+    async def _clear_legacy_sessions(self, run_id: str) -> None:
+        """Drop the Runner's server-side session, but only when there is a Runner.
+
+        This used to be called unconditionally inside ``contextlib.suppress``,
+        which hid the fact that it always failed: ``_require_enabled`` raises
+        ``RunnerRetiredError`` when ``legacy_kali_runner`` is off, so every solve
+        path paid for an exception object and learned nothing.  Muteki keeps no
+        server-side session to clear -- the worker container is torn down with the
+        Run -- so there is genuinely nothing to do in that mode.
+
+        Still best-effort: a legacy Runner that is up but unwell must not turn a
+        solved Run into a failed one.
+        """
+
+        if not get_settings().legacy_kali_runner:
+            return
+        with contextlib.suppress(Exception):
+            await runner_client.clear_sessions(run_id)
 
     async def _run_event_engine(
         self,

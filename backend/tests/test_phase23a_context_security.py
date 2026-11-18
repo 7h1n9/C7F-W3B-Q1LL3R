@@ -300,7 +300,7 @@ async def test_default_policy_below_limit_allows_worker_manager() -> None:
         state_machine=TaskStateMachine(),
         planner=DeterministicPlanner(),
         policy=ActionPolicyValidator(),
-        worker_manager=WorkerManager(workers={"mock": worker}),
+        worker_manager=WorkerManager(workers={"runner": worker}),
         action_authorizer=DefaultActionAuthorizer(),
         run_context=make_context(max_tool_calls=2),
     )

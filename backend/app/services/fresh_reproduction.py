@@ -1,4 +1,13 @@
-"""Execute the minimal solution path in a clean Runner session."""
+"""Execute the minimal solution path in a clean worker container.
+
+The replay used to go through ``runner_client`` (the legacy Kali Runner VM).  That
+service is retired in this deployment, so every replay raised
+``RunnerRetiredError`` before executing anything: 37 ``arena.fresh_reproduction``
+events, all ``error``, and ``fresh_reproduction_verified`` was False for all 742
+Runs.  The commands were never Runner-specific -- ``reproduction_command_renderer``
+already emits plain shell -- so they now run in the same Muteki container the
+solver used.
+"""
 
 import hashlib
 import json
@@ -10,8 +19,8 @@ from pathlib import Path
 from sqlalchemy import select
 
 from app.models.run import Artifact, FlagCandidate, FlagProvenance, ToolCall
+from app.services.container_reproduction import container_command_runner
 from app.services.reproduction_commands import reproduction_command_renderer
-from app.services.runner_client import runner_client
 
 
 class FreshReproductionExecutor:
@@ -19,8 +28,11 @@ class FreshReproductionExecutor:
         root = Path(run.workspace_path).resolve()
         final = root / "final"
         final.mkdir(parents=True, exist_ok=True)
-        await runner_client.clear_sessions(run.id)
-        await runner_client.sync_workspace(run.id, root)
+        # No workspace sync and no session reset: the container mounts ``root``
+        # directly (``ensure_container`` bind-mounts the run workspace), so the
+        # files the solver wrote are already visible at the same relative paths.
+        # ``clear_sessions``/``sync_workspace`` existed only because the Runner was
+        # a separate machine that needed the tree copied to it.
         selected = steps or []
         checkpoint = run.recovery_checkpoint_json if isinstance(run.recovery_checkpoint_json, dict) else {}
         valid_candidate = await session.scalar(
@@ -53,28 +65,41 @@ class FreshReproductionExecutor:
             field = str(extraction_args.get("test_field") or checkpoint.get("test_field") or "")
             baseline = str(extraction_args.get("baseline_value") or checkpoint.get("baseline_value") or "")
             if not request_spec or not field or not expression:
-                return {"executed": False, "verified": False, "fresh_session": True, "blocked": "MISSING_EXTRACTION_PROVENANCE"}
-            escaped = valid_candidate.candidate.replace("'", "''")
-            suffix = str(extraction_args.get("true_suffix") or "' AND ({condition}) -- ")
-            condition = f"({expression})='{escaped}'"
-            request_spec = json.loads(json.dumps(request_spec))
-            container = "json" if isinstance(request_spec.get("json"), dict) else "form" if isinstance(request_spec.get("form"), dict) else "query"
-            request_spec.setdefault(container, {})[field] = baseline + suffix.format(condition=condition)
-            control_fields = (
-                extraction_args.get("control_fields")
-                if isinstance(extraction_args.get("control_fields"), dict)
-                else checkpoint.get("control_fields")
-            ) or {}
-            for key, value in control_fields.items():
-                request_spec.setdefault(container, {})[str(key)] = value
-            request_spec["final_verification"] = True
-            if isinstance(solver_reproduction, dict):
-                selected = [{
-                    "tool_name": "http_request",
-                    "normalized_arguments": request_spec,
-                }]
+                # The boolean-oracle replay cannot be rebuilt from the checkpoint.
+                # That used to end the whole attempt, which threw away the steps the
+                # planner had already produced -- measured 2026-11-10 on run
+                # 9847adf6, where the planner found the Worker's own PoC script
+                # (``muteki/exploit2.py``) but this early return discarded it and
+                # reported MISSING_EXTRACTION_PROVENANCE with ``steps: 0``.
+                #
+                # Missing extraction provenance means "this particular recipe is
+                # unavailable", not "nothing can be replayed".  Keep ``selected`` as
+                # the planner built it and fall through to execution; if the planner
+                # found nothing either, the loop runs zero steps and the validation
+                # records ``executed: False`` honestly.
+                pass
             else:
-                selected = [{"tool_name": "http_request", "normalized_arguments": request_spec}]
+                escaped = valid_candidate.candidate.replace("'", "''")
+                suffix = str(extraction_args.get("true_suffix") or "' AND ({condition}) -- ")
+                condition = f"({expression})='{escaped}'"
+                request_spec = json.loads(json.dumps(request_spec))
+                container = "json" if isinstance(request_spec.get("json"), dict) else "form" if isinstance(request_spec.get("form"), dict) else "query"
+                request_spec.setdefault(container, {})[field] = baseline + suffix.format(condition=condition)
+                control_fields = (
+                    extraction_args.get("control_fields")
+                    if isinstance(extraction_args.get("control_fields"), dict)
+                    else checkpoint.get("control_fields")
+                ) or {}
+                for key, value in control_fields.items():
+                    request_spec.setdefault(container, {})[str(key)] = value
+                request_spec["final_verification"] = True
+                if isinstance(solver_reproduction, dict):
+                    selected = [{
+                        "tool_name": "http_request",
+                        "normalized_arguments": request_spec,
+                    }]
+                else:
+                    selected = [{"tool_name": "http_request", "normalized_arguments": request_spec}]
         log: list[dict] = []
         commands: list[str] = []
         success = True
@@ -87,6 +112,12 @@ class FreshReproductionExecutor:
             else:
                 tool = getattr(step, "tool_name", None)
                 args = getattr(step, "normalized_arguments", None) or {}
+                # ``workspace_poc`` carries its command on the step, not in
+                # ``normalized_arguments``: the command embeds the container-side
+                # workspace path, which the extractor does not know.
+                manual_command = getattr(step, "manual_command", None)
+                if manual_command:
+                    args = {**args, "manual_command": manual_command}
             if tool == "boolean_config_extract" and not isinstance(checkpoint.get("solver_reproduction"), dict):
                 args = {
                     **(checkpoint.get("request_spec") or {}),
@@ -100,22 +131,41 @@ class FreshReproductionExecutor:
                     "max_requests": 1024,
                 }
             command = reproduction_command_renderer.render(tool, args)
+            # ``workspace_poc`` is not a renderer tool: it re-runs a script the
+            # Worker wrote, so its command comes from the step itself.  The
+            # ``{workspace}`` placeholder is resolved here because only the
+            # container handle knows the host→container mapping.
+            if tool == "workspace_poc":
+                command = str(args.get("manual_command") or "").replace(
+                    "{workspace}", container_command_runner.workspace_path(run.id, root)
+                ) or reproduction_command_renderer.render(tool, args)
             commands.append(command)
-            job_id = await runner_client.create_job(run.id, list(challenge.allowed_hosts or []), tool, args)
-            result = await runner_client.wait_job(job_id, max_wait_seconds=600)
-            log.append({"tool": tool, "command": command, "job_id": job_id, "status": result.get("status"), "result": result})
+            result = await container_command_runner.run_async(run.id, root, command)
+            job_id = result.get("container") or ""
+            log.append({"tool": tool, "command": command, "container": job_id, "status": result.get("status"), "exit_code": result.get("exit_code"), "result": result})
+            # Scan stdout *and* stderr: ``curl -i`` puts the body on stdout, but a
+            # flag echoed by a failing helper lands on stderr, and the old code
+            # searched the whole serialized result anyway.
             result_text = json.dumps(result, ensure_ascii=False)
             match = re.search(str(challenge.flag_pattern), result_text)
             if match:
-                flag_artifact = {"tool": tool, "job_id": job_id, "source": "fresh_runner_result", "candidate": "flag{<redacted>}"}
+                flag_artifact = {"tool": tool, "container": job_id, "source": "fresh_container_result", "candidate": "flag{<redacted>}"}
                 fresh_flag_value = match.group(0)
             body_json = {}
             try:
                 body_json = json.loads(str(result.get("body") or "{}"))
             except json.JSONDecodeError:
-                pass
+                # ``curl -i`` prefixes the status line and headers, so a plain
+                # ``json.loads`` on the body fails.  Retry from the first ``{``.
+                raw_body = str(result.get("body") or "")
+                brace = raw_body.find("{")
+                if brace >= 0:
+                    try:
+                        body_json = json.loads(raw_body[brace:])
+                    except json.JSONDecodeError:
+                        body_json = {}
             if valid_candidate is not None and tool == "http_request" and body_json.get("matched") is True:
-                flag_artifact = {"tool": tool, "job_id": job_id, "source": "fresh_runner_result", "candidate": "flag{<redacted>}"}
+                flag_artifact = {"tool": tool, "container": job_id, "source": "fresh_container_result", "candidate": "flag{<redacted>}"}
                 fresh_flag_value = valid_candidate.candidate
             if result.get("status") != "COMPLETED":
                 success = False

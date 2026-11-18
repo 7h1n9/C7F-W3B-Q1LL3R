@@ -1,0 +1,29 @@
+{
+  "generated_at": "20261103T161417Z",
+  "generator": "scripts/export_training_transitions.py",
+  "git_revision": "3ce21f6",
+  "params": {
+    "since": null,
+    "limit": null,
+    "run_id": null,
+    "seed": "c7f-v1"
+  },
+  "runs_total": 633,
+  "runs_included": 282,
+  "runs_excluded": 351,
+  "exclude_reasons": {
+    "infrastructure": 1,
+    "no_commands": 271,
+    "status": 79
+  },
+  "split_histogram": {
+    "dev": 23,
+    "test": 35,
+    "train": 224
+  },
+  "transitions": 43850,
+  "redactions_total": 90708,
+  "known_secrets_redacted": 121,
+  "accepted_runs_included": 103,
+  "fresh_repro_runs_included": 0
+}

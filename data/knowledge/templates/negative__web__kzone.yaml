@@ -1,0 +1,15 @@
+name: kzone
+category: web
+keywords:
+- kzone
+steps:
+- phpinfo.php/php_info.php absent in 50+ dirs; CVE-2012-1823 payload returns plain
+  Connect Error; config.php & include/{function,safe}.php return 200 with 0-byte body
+  and no PHPSESSID regardless of GET/POST params (not a loader/param-gated include)
+- RACE_WORKER_TIMEOUT
+- ROUND_BUDGET_EXHAUSTED_BEFORE_REASON
+evidence_chain: []
+success_format: CTF2\{[^}]+\}
+source: 73ca736e-1dab-408c-8574-c9a52732ab05 (run b80f74ce-91d0-4331-83a7-6c1e680dce29)
+notes: NO_VERIFIED_FLAG
+kind: negative

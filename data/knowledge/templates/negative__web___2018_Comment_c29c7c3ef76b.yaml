@@ -1,0 +1,29 @@
+name: '[网鼎杯 2018]Comment c29c7c3ef76b'
+category: web
+keywords:
+- comment
+steps:
+- 'comment.php?id= parameter is NOT SQL-injectable: string compare semantics (0x1,
+  2-1, 1'' all miss; "and 1=2" same as 1=1). Input echoed with htmlspecialchars.'
+- 'write_do.php title/category/content are mysqli-escaped: quote-paired and unpaired
+  payloads both persist verbatim, no truncation/error → not SQLi there either.'
+- 'SQL injection in title/category/content is ruled out: (a) paired and unpaired single
+  quotes persist verbatim, (b) 900+ char quote-heavy payload inserts cleanly with
+  no truncation or error, (c) no error output. mysqli real-escape. Only remaining
+  injection primitive is stored XSS (3 unescaped sinks).'
+- 'SQLi timing in comment INSERT content (backslash double-quote breakout) was NOISE:
+  Q4\",(select sleep(3)))# gave one 5s delay once, never reproduces (7+ retries, all
+  0.06-0.09s). Consistent with teammate: content is mysqli-escaped.'
+- 'bo_id param: numeric payloads (sleep, and sleep, '', sleep(3))) no timing; reflected
+  only in redirect Location, intval''d at read time per worker-2'
+- 'union select on comment.php?id: only leftover rows (id=1 TITLEX etc); injection
+  params all render empty -> id is intval, not SQLi (confirms worker-2)'
+- admin/admin, admin/123456, login auth SQLi (' or 1=1) all fail (200 login page)
+- register/user/admin/read/config/db/header/footer.php etc all 404; do=delete/edit/list
+  just 302 index
+- RACE_WORKER_TIMEOUT
+evidence_chain: []
+success_format: CTF2\{[^}]+\}
+source: c29c7c3e-f76b-4cdc-b684-0db5fa5e1ff8 (run 3aff7ce7-a97c-426a-9b0e-8a790da42d67)
+notes: NO_VERIFIED_FLAG
+kind: negative

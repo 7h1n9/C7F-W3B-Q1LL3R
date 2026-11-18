@@ -1,0 +1,16 @@
+name: '[HITCON 2017]SQL So Hard'
+category: web
+keywords:
+- hitcon
+- sql
+- hard
+- github
+- t3hp0rp
+- hitcondockerfile
+steps:
+- RACE_WORKER_TIMEOUT
+evidence_chain: []
+success_format: CTF2\{[^}]+\}
+source: 7f2d69db-9dac-453c-9e8a-9488c89e5b90 (run ddab1353-28a0-40bb-8213-1559834d02f3)
+notes: NO_VERIFIED_FLAG
+kind: negative

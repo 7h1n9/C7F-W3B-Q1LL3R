@@ -1,0 +1,58 @@
+name: BUU XSS COURSE 1
+category: web
+keywords:
+- buu
+- xss
+- course
+steps:
+- '[claude] - 索引源码中不存在 .git 泄露、.DS_Store、robots.txt 或未隐藏的管理/机器人 PHP 文件（通过定向探测）。'
+- Native Worker completed a bounded evidence-backed observation
+- /robots.txt EXISTS and discloses /static/secretkey.txt, content exactly 'you-will-never-guess'
+- 'API surface: POST /backend/login.php (JSON {username,password}->{res:0/1,msg});
+  POST /backend/treehole_submit.php JSON {content}->{msg:1,id:<uuid>} (form-encoded
+  content stored as empty); GET /backend/treehole_view.php?id=<uuid>->{msg:1,content};
+  GET /backend/admin.php requires login, else ''老铁，你还没登录呢！''; /backend/config.php,/backend/db.php,/backend/flag.php
+  exist but empty output'
+- 'treehole_view is a stored-XSS sink; app renders content via v-html. Confirmed:
+  JSON content ''<script>alert(document.domain)</script>'' stored and returned verbatim.'
+- '[codex] Furthest confirmed fact: `/backend/treehole_submit.php` is JSON-based and
+  `treehole_view.php?id=<uuid>` is a public stored-XSS sink (content stored globally
+  by UUID and returned verbatim; the SPA rend'
+- '[claude] Admin bot (HeadlessChrome/72, views treehole entries from /backend/admin.php)
+  session cookie PHPSESSID=9118c167edfc8c9c96504edf06ef71fd recovered via stored XSS
+  img-onerror exfiltration to webhook.sit'
+- '[claude] GET /backend/admin.php with Cookie PHPSESSID=9118c167edfc8c9c96504edf06ef71fd
+  returns the flag verbatim: "flag:<FLAG>"'
+- '[claude] treehole_view renders via innerHTML (v-html), so <script> tags do NOT
+  execute — event-handler payloads (img onerror) are required'
+- '[claude] Blackboard write commands are broken in this environment: write-flag subcommand
+  doesn''t exist, write-fact fails with sqlite3.OperationalError "no such table: events"'
+- '[codex] The login flow has NO client-side cryptography: app sourcemap (webpack:///src/components/Login.vue)
+  shows onSubmit posts plaintext JSON {username,password} to /backend/login.php; no
+  CryptoJS/AES/MD5/e'
+- '[codex] All login attempts return {"res":0}: secret key ''you-will-never-guess''
+  used as username/password/both, its md5/sha1/sha256/base64, and a ~180-entry weak-cred
+  dictionary across users admin/root/adminis'
+evidence_chain:
+- /robots.txt EXISTS and discloses /static/secretkey.txt, content exactly 'you-will-never-guess'
+- 'API surface: POST /backend/login.php (JSON {username,password}->{res:0/1,msg});
+  POST /backend/treehole_submit.php JSON {content}->{msg:1,id:<uuid>} (form-encoded
+  content stored as empty); GET /backend/treehole_view.php?id=<uuid>->{msg:1,content};
+  GET /backend/admin.php requires login, else ''老铁，你还没登录呢！''; /backend/config.php,/backend/db.php,/backend/flag.php
+  exist but empty output'
+- 'treehole_view is a stored-XSS sink; app renders content via v-html. Confirmed:
+  JSON content ''<script>alert(document.domain)</script>'' stored and returned verbatim.'
+- '[claude] Blackboard write commands are broken in this environment: write-flag subcommand
+  doesn''t exist, write-fact fails with sqlite3.OperationalError "no such table: events"'
+- '[codex] The login flow has NO client-side cryptography: app sourcemap (webpack:///src/components/Login.vue)
+  shows onSubmit posts plaintext JSON {username,password} to /backend/login.php; no
+  CryptoJS/AES/MD5/e'
+- '[codex] All login attempts return {"res":0}: secret key ''you-will-never-guess''
+  used as username/password/both, its md5/sha1/sha256/base64, and a ~180-entry weak-cred
+  dictionary across users admin/root/adminis'
+- '[codex] No auth bypass artifacts exist: login.php.bak/~/.swp, .git/HEAD, www.zip,
+  backend.zip all 404; no bot/report/visit/xss endpoints (all 404). The leaked secretkey
+  is a decoy for a non-existent client cr'
+success_format: CTF2\{[^}]+\}
+source: c81070e0-5e1c-4487-a664-1d7a262b099b (solver f29edba6-9bcb-430a-85a1-eb51ade59d08)
+notes: ''

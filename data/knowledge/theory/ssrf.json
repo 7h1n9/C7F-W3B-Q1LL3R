@@ -1,0 +1,40 @@
+{
+  "id": "theory-ssrf-001",
+  "type": "theory",
+  "category": "ssrf_xxe",
+  "subcategory": "ssrf",
+  "name": "SSRF漏洞",
+  "aliases": [
+    "SSRF",
+    "服务端请求伪造",
+    "内网探测"
+  ],
+  "severity": "medium",
+  "description": "URL结构如下 ``` URI = schema:[//authority]path[?query][#fragment]",
+  "key_concepts": [
+    "SSRF漏洞存在的位置",
+    "什么是SSRF",
+    "Tips",
+    "SSRF怎么挖掘",
+    "SSRF的防御",
+    "SSRF的分类",
+    "SSRF原理解析",
+    "对redis和mysql的攻击",
+    "SSRF漏洞的绕过",
+    "SSRF的bypass"
+  ],
+  "related_pocs": [],
+  "related_payloads": [
+    "payloads/ssrf/extracted.json"
+  ],
+  "tags": [
+    "SSRF",
+    "服务端请求伪造",
+    "内网探测",
+    "ssrf_xxe",
+    "ctf",
+    "web"
+  ],
+  "source": "Des-CTF-Knowledge/SSRF漏洞.md",
+  "last_updated": "2026-10-22"
+}

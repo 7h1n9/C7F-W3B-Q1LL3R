@@ -1,0 +1,16 @@
+name: '[Weblogic]SSRF'
+category: web
+keywords:
+- weblogic
+- ssrf
+- github
+- vulhub
+- tree
+- master
+steps:
+- RACE_WORKER_TIMEOUT
+evidence_chain: []
+success_format: CTF2\{[^}]+\}
+source: af00b8fa-f7dd-411b-95c1-8c682d559c4b (run cfe4f1cb-c480-45ae-8fef-0d9312030f05)
+notes: NO_VERIFIED_FLAG
+kind: negative

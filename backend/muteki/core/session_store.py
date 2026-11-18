@@ -13,7 +13,6 @@ from typing import AsyncIterator
 
 from muteki.core.events import Event
 
-
 _REPLAY_YIELD_EVERY = 100
 
 

@@ -1,6 +1,5 @@
 import asyncio
 import hashlib
-import json
 import time
 from pathlib import Path, PurePosixPath
 
@@ -20,6 +19,32 @@ def normalize_runner_job_id(response) -> str | None:
     return str(value).strip() if value is not None and str(value).strip() else None
 
 
+class RunnerRetiredError(DomainError):
+    """The legacy Kali Runner is not part of this deployment.
+
+    Raised instead of letting a request wander off to an address nothing is
+    listening on.  The distinction matters at the call site: a connection error
+    says "the service is down" (retryable, transient, an operator should go look)
+    while this says "this build does not use that service" -- a configuration
+    fact that retrying cannot change.
+
+    The two paths that can still reach here are the legacy ``single_agent`` /
+    ``multi_agent_v1`` solver modes and the fresh-reproduction replay; Muteki's
+    container-native Workers do not go through the Runner at all.
+    """
+
+    def __init__(self, operation: str) -> None:
+        super().__init__(
+            "RUNNER_LEGACY_DISABLED",
+            f"'{operation}' requires the legacy Kali Runner, which is disabled in this "
+            "deployment. Use the Muteki solver mode (container-native Workers), or set "
+            "APP_LEGACY_KALI_RUNNER=1 and point APP_RUNNER_URL at a running Runner.",
+            {"operation": operation},
+            503,
+            stage="RUNNER",
+        )
+
+
 class RunnerClient:
     def _headers(self) -> dict[str, str]:
         return {"X-Runner-Token": get_settings().runner_api_token}
@@ -27,6 +52,17 @@ class RunnerClient:
     @property
     def base_url(self) -> str:
         return get_settings().runner_url.rstrip("/")
+
+    def _require_enabled(self, operation: str) -> None:
+        """Fail fast and precisely when the Runner is retired.
+
+        Called at the entry of every operation that talks to the service.  It is
+        a gate rather than a deletion on purpose: the legacy solver paths are
+        still reachable from the UI, and a wrong ``solver_mode`` should produce an
+        actionable error instead of an opaque connection timeout.
+        """
+        if not get_settings().legacy_kali_runner:
+            raise RunnerRetiredError(operation)
 
     @staticmethod
     def _raise_response(response: httpx.Response, *, stage: str = "RUNNER") -> None:
@@ -60,6 +96,7 @@ class RunnerClient:
             return response.json()
 
     async def initialize_workspace(self, run_id: str) -> None:
+        self._require_enabled("initialize_workspace")
         async with httpx.AsyncClient(timeout=15, trust_env=True) as client:
             response = await client.post(
                 f"{self.base_url}/api/v1/workspaces/{run_id}", headers=self._headers()
@@ -67,6 +104,7 @@ class RunnerClient:
             response.raise_for_status()
 
     async def upload_file(self, run_id: str, relative_path: str, local_path: Path) -> dict:
+        self._require_enabled("upload_file")
         pure = PurePosixPath(relative_path.replace("\\", "/"))
         if pure.is_absolute() or ".." in pure.parts or not local_path.is_file():
             raise DomainError(
@@ -86,6 +124,7 @@ class RunnerClient:
             return response.json()
 
     async def workspace_manifest(self, run_id: str) -> dict[str, dict]:
+        self._require_enabled("workspace_manifest")
         async with httpx.AsyncClient(timeout=15, trust_env=True) as client:
             response = await client.get(
                 f"{self.base_url}/api/v1/workspaces/{run_id}/manifest", headers=self._headers()
@@ -99,6 +138,7 @@ class RunnerClient:
         }
 
     async def sync_workspace(self, run_id: str, local_root: Path) -> dict:
+        self._require_enabled("sync_workspace")
         await self.initialize_workspace(run_id)
         remote = await self.workspace_manifest(run_id)
         candidates: list[tuple[str, Path]] = []
@@ -123,6 +163,7 @@ class RunnerClient:
     async def create_job(
         self, run_id: str, allowed_hosts: list[str], tool: str, arguments: dict
     ) -> str:
+        self._require_enabled("create_job")
         if tool == "python_run" and arguments.get("network_mode") not in (None, "none"):
             raise DomainError("PYTHON_RUN_NETWORK_FORBIDDEN", "python_run is an offline-only tool.", status_code=422)
         payload = {
@@ -153,6 +194,7 @@ class RunnerClient:
         *,
         tool_timeout_seconds: int | None = None,
     ) -> dict:
+        self._require_enabled("wait_job")
         # The Runner owns the actual timeout. Backend waiting is the tool
         # timeout plus a bounded delivery margin, never a fixed 35 seconds.
         requested = int(tool_timeout_seconds or max_wait_seconds or 30)
@@ -181,6 +223,7 @@ class RunnerClient:
         return {"job_id": job_id, "status": "FAILED", "error_code": "RUNNER_TIMEOUT", "summary": "Runner job wait timed out", "error": "RUNNER_TIMEOUT", "stage": "RUNNER_WAIT"}
 
     async def cancel_job(self, job_id: str) -> dict:
+        self._require_enabled("cancel_job")
         async with httpx.AsyncClient(timeout=10, trust_env=True) as client:
             response = await client.post(
                 f"{self.base_url}/api/v1/jobs/{job_id}/cancel", headers=self._headers()
@@ -191,6 +234,7 @@ class RunnerClient:
     async def download_artifact(
         self, run_id: str, relative_path: str, destination: Path, expected_sha256: str | None = None
     ) -> tuple[int, str]:
+        self._require_enabled("download_artifact")
         pure = PurePosixPath(relative_path.replace("\\", "/"))
         if pure.is_absolute() or ".." in pure.parts:
             raise DomainError(
@@ -228,6 +272,7 @@ class RunnerClient:
             temporary.unlink(missing_ok=True)
 
     async def delete_workspace(self, run_id: str) -> None:
+        self._require_enabled("delete_workspace")
         async with httpx.AsyncClient(timeout=15, trust_env=True) as client:
             response = await client.delete(
                 f"{self.base_url}/api/v1/workspaces/{run_id}", headers=self._headers()
@@ -235,6 +280,7 @@ class RunnerClient:
             response.raise_for_status()
 
     async def clear_sessions(self, run_id: str) -> None:
+        self._require_enabled("clear_sessions")
         async with httpx.AsyncClient(timeout=10, trust_env=True) as client:
             response = await client.delete(f"{self.base_url}/api/v1/sessions/{run_id}", headers=self._headers())
             response.raise_for_status()

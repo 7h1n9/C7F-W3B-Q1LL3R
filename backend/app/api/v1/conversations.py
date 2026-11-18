@@ -17,6 +17,7 @@ from app.schemas.conversation import (
     ConversationMessageCreate,
     ConversationRunCreate,
 )
+from app.schemas.model_config import CLI_PROVIDER_TYPES
 from app.services.chat import chat_service
 
 router = APIRouter(tags=["conversations"])
@@ -87,10 +88,10 @@ async def create_conversation(
                 "The selected model configuration is unavailable.",
                 status_code=422,
             )
-        if model.provider_type == "codex_cli":
+        if model.provider_type in CLI_PROVIDER_TYPES:
             raise DomainError(
-                "CODEX_CLI_WORKER_ONLY",
-                "Codex CLI is available only as a Muteki Worker, not as a chat model.",
+                "CLI_ENGINE_WORKER_ONLY",
+                f"{model.provider_type} is available only as a Muteki Worker, not as a chat model.",
                 status_code=422,
             )
     conversation = ChallengeConversation(

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sqlite3
 import time
 import uuid
@@ -18,6 +19,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from ..events import EventEnvelope
+from ..gate import DEFAULT_FLAG_PATTERN, compile_flag_pattern
 from ..graph import DeadEnd, Fact, Flag, Intent, MutekiGraph
 from ..upstream_bridge import to_upstream_challenge
 from .upstream_events import project_upstream_events
@@ -71,6 +73,7 @@ def create_runtime_graph(
             db_path,
             challenge_id=challenge_id,
             event_subscriber=event_subscriber,
+            flag_pattern=str(getattr(challenge, "flag_pattern", "") or "") or None,
         )
     _use_container_safe_journal_mode(graph)
     return graph
@@ -125,6 +128,15 @@ class UpstreamRuntimeGraph:
         self._last_upstream_sequence = 0
         self._last_review_proposal_sequence = 0
         self._local_sequence = 0
+        # Re-entrancy guard: harvesting appends an official ``flag_found``
+        # event, which would otherwise be re-scanned by the next sync pass.
+        self._harvesting_flags = False
+
+    @property
+    def flag_pattern(self) -> str:
+        """Return the challenge flag shape that both gates must agree on."""
+
+        return str(getattr(self._challenge, "flag_pattern", "") or "") or DEFAULT_FLAG_PATTERN
 
     def close(self) -> None:
         self._graph.close()
@@ -148,11 +160,80 @@ class UpstreamRuntimeGraph:
             self._last_upstream_sequence,
             max(int(event.get("seq") or 0) for event in events),
         )
+        if self._harvest_flags(events):
+            # The gate approved a Worker-claimed flag and appended a
+            # ``flag_found`` event; re-read the tail so the subscriber sees the
+            # authoritative flag in this same synchronisation pass.
+            tail = self._graph.events_since(self._last_upstream_sequence)
+            if tail:
+                self._last_upstream_sequence = max(
+                    self._last_upstream_sequence,
+                    max(int(event.get("seq") or 0) for event in tail),
+                )
+                events = [*events, *tail]
         projected = project_upstream_events(events, challenge_id=self.challenge_id)
         for event in projected:
             self._local_sequence = max(self._local_sequence, event.sequence)
             if self._subscriber is not None:
                 self._subscriber(event)
+
+    _FLAG_CLAIM_RE = re.compile(r"(?:FOUND_FLAG|FLAG)\s*=\s*([^\s'\"`]+)")
+
+    def _harvest_flags(self, events: list[dict[str, Any]]) -> bool:
+        """Promote a Worker-claimed flag to the official flag gate.
+
+        The native Worker records the recovered candidate as prose inside a
+        fact (``FOUND_FLAG=CTF2{...}``); the platform used to ignore that text
+        entirely, so a Run that really had the flag still finished "unsolved".
+        This only *submits* the candidate: the official ``flag_ok`` gate still
+        decides, requiring the exact token to appear in the recorded output and
+        to match the challenge format, so a hallucinated candidate can never
+        become a verified flag.
+        """
+
+        if self._harvesting_flags:
+            return False
+        token_mode = self.flag_pattern.strip().casefold() == _TOKEN_FLAG_FORMAT
+        matcher = None if token_mode else compile_flag_pattern(self.flag_pattern)
+        submitted = False
+        self._harvesting_flags = True
+        try:
+            for event in events:
+                kind = str(event.get("kind") or "")
+                if kind in {"flag_found", "dead_end"}:
+                    continue
+                text = _event_text(event.get("payload"))
+                if not text:
+                    continue
+                candidates = [match.group(1) for match in self._FLAG_CLAIM_RE.finditer(text)]
+                if not candidates and matcher is not None:
+                    candidates = [match.group(0) for match in matcher.finditer(text)]
+                actor = str(event.get("actor") or "upstream")
+                for candidate in candidates:
+                    flag = str(candidate).strip().strip(_FLAG_TRAILING_PUNCTUATION)
+                    if not _looks_like_flag(flag, matcher, token_mode=token_mode):
+                        continue
+                    if self._submit_flag_to_gate(actor=actor, flag=flag, real_output=text) is not None:
+                        submitted = True
+                        break
+        finally:
+            self._harvesting_flags = False
+        return submitted
+
+    def _submit_flag_to_gate(self, *, actor: str, flag: str, real_output: str) -> int | None:
+        """Submit one candidate to the official gate; return its seq or None."""
+
+        from muteki.solver.gate import flag_ok
+
+        accepted = flag_ok(
+            str(flag).strip(),
+            str(real_output),
+            flag_format=self.flag_pattern,
+            artifacts=None,
+        )
+        if not accepted:
+            return None
+        return int(self._graph.flag_found(actor=actor, flag=str(flag).strip()))
 
     def _emit_local(self, *, actor: str, event_type: str, payload: dict[str, Any]) -> int:
         self._local_sequence = max(self._local_sequence, self._last_upstream_sequence) + 1
@@ -530,34 +611,127 @@ class UpstreamRuntimeGraph:
         return int(sequence)
 
     def write_flag(self, *, actor: str, flag: str, real_output: str) -> int:
-        from muteki.solver.gate import flag_ok
-
-        accepted = flag_ok(
-            str(flag).strip(),
-            str(real_output),
-            flag_format=str(getattr(self._challenge, "flag_pattern", r"flag\{[^}]+\}")),
-            artifacts=None,
-        )
-        if not accepted:
+        sequence = self._submit_flag_to_gate(actor=actor, flag=flag, real_output=real_output)
+        if sequence is None:
             return self.add_dead_end(actor=actor, description="FLAG_REJECTED_BY_UPSTREAM_GATE")
-        sequence = self._graph.flag_found(actor=actor, flag=str(flag).strip())
         self._sync_events()
-        return int(sequence)
+        return sequence
+
+    def record_flag_decision(self, *, actor: str, decision, evidence: str = "") -> int:
+        """Record a flag claim so a refused value stays reviewable.
+
+        ``write_flag`` can only *accept*: a value its gate refuses becomes a dead
+        end, so a Worker that printed the right value under the wrong banner
+        leaves no trace at all.  That is the shape the real-class boxes reached
+        (``n1book{...}`` written by the box itself), and losing the value meant
+        the next Run had to re-derive it from scratch.
+
+        The value is written through the upstream graph's own ``flag_found``,
+        which does **not** validate -- validation belongs to the read side, where
+        ``flags()`` keeps only what matches the declared banner and
+        ``suspected_flags()`` surfaces the rest.  So one write covers both
+        outcomes: an acceptable value becomes a solve, a foreign-banner value
+        becomes a reviewable candidate, and neither path can be confused with the
+        other.
+        """
+
+        value = str(getattr(decision, "flag", "") or "").strip()
+        if not value:
+            return -1
+        try:
+            sequence = int(self._graph.flag_found(actor=actor, flag=value))
+        except Exception:  # noqa: BLE001 - bookkeeping must not fail Finalize
+            return -1
+        self._sync_events()
+        return sequence
+
+    def fact_states(self) -> dict[int, dict[str, Any]]:
+        """Return the official per-fact lifecycle state, keyed by fact sequence.
+
+        Review arbitration is what turns a candidate fact into a *decision*
+        (challenged / revalidated / rejected / merged / superseded).  Without
+        this the platform can only ever add candidates, which is exactly why
+        "待验证" grew without bound: nothing was allowed to conclude one.
+        """
+
+        reader = getattr(self._graph, "_fact_state_map", None)
+        if not callable(reader):
+            return {}
+        try:
+            return dict(reader() or {})
+        except Exception:
+            return {}
+
+    def review_fact(
+        self,
+        *,
+        actor: str,
+        fact_seq: int,
+        action: str,
+        reason: str = "",
+        verification_goal: str = "",
+        to_fact_seq: int | None = None,
+    ) -> dict[str, Any]:
+        """Apply one official fact-review transition.
+
+        ``fact_seq`` is the Blackboard sequence of the fact, not its position in
+        any displayed list -- the official review tables key on the sequence.
+        """
+
+        reviewer = getattr(self._graph, "review_fact", None)
+        if not callable(reviewer):
+            return {"action": str(action), "fact_seq": int(fact_seq), "seq": -1}
+        result = reviewer(
+            actor=actor,
+            fact_seq=int(fact_seq),
+            action=str(action),
+            reason=str(reason),
+            verification_goal=str(verification_goal),
+            to_fact_seq=to_fact_seq,
+        )
+        self._sync_events()
+        return dict(result or {})
 
     def facts(self, *, verified_only: bool = False) -> list[Fact]:
+        """Return active facts, keyed by their Blackboard sequence.
+
+        ``fact_id`` is the *sequence*, matching ``MutekiGraph.facts`` and the
+        official review tables.  It used to be a positional index, which made a
+        fact unreviewable: the id a Reviewer held could not address the fact in
+        the graph.  Facts that reached a terminal lifecycle state are dropped,
+        mirroring the official ``snapshot``: a rejected/merged/superseded fact
+        is a conclusion, not a pending question.
+        """
+
+        states = self.fact_states()
         facts: list[Fact] = []
-        for index, evidence in enumerate(self._graph.snapshot().evidence, start=1):
-            if verified_only and not evidence.verified:
+        for event in self._graph.events_since(0, kinds=["fact_added"]):
+            sequence = int(event.get("seq") or 0)
+            if sequence <= 0:
                 continue
-            refs = (str(evidence.artifact_id),) if evidence.artifact_id else ()
+            state = states.get(sequence, {})
+            if str(state.get("state") or "") in {"rejected", "merged", "superseded"}:
+                continue
+            if state.get("retired"):
+                continue
+            verified = bool(event.get("verified"))
+            effective = state.get("verified_effective")
+            if effective is not None:
+                verified = bool(effective)
+            if verified_only and not verified:
+                continue
+            payload = event.get("payload") or {}
+            artifact = str(event.get("artifact_id") or "")
             facts.append(
                 Fact(
-                    fact_id=index,
-                    content=evidence.fact,
-                    source_worker_id=evidence.source_solver or evidence.source,
-                    verified=bool(evidence.verified),
-                    created_at="",
-                    evidence_refs=refs,
+                    fact_id=sequence,
+                    content=str(payload.get("fact") or ""),
+                    source_worker_id=str(
+                        payload.get("source_solver") or payload.get("source") or event.get("actor") or ""
+                    ),
+                    verified=verified,
+                    created_at=str(event.get("ts") or ""),
+                    evidence_refs=(artifact,) if artifact else (),
                 )
             )
         return facts
@@ -665,24 +839,115 @@ class UpstreamRuntimeGraph:
             if str(row[0]) in current
         ]
 
-    def flags(self, *, verified_only: bool = False) -> list[Flag]:
-        if verified_only is False:
-            verified_only = True  # official graph only exposes gated flags here
-        flags: list[Flag] = []
+    def _matches_declared_format(self, flag: str) -> bool:
+        """Does ``flag`` match the challenge's declared banner?
+
+        Token-mode challenges (``flag_format == "token"``) declare no shape, so
+        there is nothing to check and every value passes -- the same rule
+        ``_harvest_flags`` applies.
+        """
+
+        value = str(flag or "").strip()
+        if not value:
+            return False
+        if self.flag_pattern.strip().casefold() == _TOKEN_FLAG_FORMAT:
+            return True
+        return compile_flag_pattern(self.flag_pattern).fullmatch(value) is not None
+
+#: Actor prefixes that mean "the host invented this spelling, no Worker read it".
+#:
+#: ``Coordinator._offer_recovered_flag`` writes a value the *box* printed under
+#: its own banner, re-wrapped under the challenge's declared banner.  That is a
+#: guess about the wrapper, and it is recorded deliberately (the value is worth
+#: keeping) but it must never be mistaken for a Worker's finding.
+#:
+#: Measured 2026-10-25 on ``bestphp's revenge`` (run ``07d44a1b``): the recovered
+#: ``CTF2{<uuid>}`` matched the declared ``CTF2\{[^}]+\}`` format, so ``flags()``
+#: returned it, ``flag_found`` became True, ``report_json.flag_verified`` became
+#: True, ``materialize_completion_gate_flag`` filed it ``VALID``, and the Run
+    #: closed ``COMPLETED_SOLVED`` while the platform rejected all five spellings.
+    #: The queue item stayed UNSOLVED, so the two ledgers disagreed, and the Run had
+    #: burned 2.9 hours of the only environment slot.
+    #:
+    #: Format matching cannot separate these: the whole point of re-wrapping is to
+    #: produce a value that *does* match.  Provenance is the only signal available,
+    #: and ``actor`` is where it lives.
+    _RECOVERED_ACTOR_PREFIX = "coordinator:recovery:"
+
+    @staticmethod
+    def _is_recovered_guess(actor: str) -> bool:
+        """True when this flag_found row is a host-supplied wrapper, not a finding."""
+
+        return str(actor or "").strip().casefold().startswith(
+            UpstreamRuntimeGraph._RECOVERED_ACTOR_PREFIX
+        )
+
+    def _flag_found_events(self) -> list[tuple[int, str, str, Any]]:
+        """Every harvested ``flag_found`` as ``(seq, flag, actor, timestamp)``."""
+
+        rows: list[tuple[int, str, str, Any]] = []
         for event in self._graph.events():
             if event.get("kind") != "flag_found":
                 continue
             payload = dict(event.get("payload") or {})
-            flags.append(
-                Flag(
+            rows.append(
+                (
                     int(event.get("seq") or 0),
                     str(payload.get("flag") or ""),
                     str(event.get("actor") or "upstream"),
-                    True,
                     _event_timestamp(event),
                 )
             )
-        return flags
+        return rows
+
+    def flags(self, *, verified_only: bool = False) -> list[Flag]:
+        """Return flags that are verified *against this challenge's declaration*.
+
+        The verdict of the side that produced the value is deliberately not
+        trusted.  The official graph marks every ``flag_found`` it records as
+        verified, and a Run that recorded the flag of the ORIGINAL public
+        challenge -- a value that does not even match the declared banner --
+        was reported ``COMPLETED_SOLVED`` and submitted, where the platform
+        rejected it.  Only this host knows the declared format, so the format is
+        re-applied here, the same way the harvest path already gates candidates.
+        A value that fails is not discarded: it is surfaced by
+        :meth:`suspected_flags` for a human to judge.
+        """
+
+        if verified_only is False:
+            verified_only = True  # official graph only exposes gated flags here
+        return [
+            Flag(seq, flag, actor, True, timestamp)
+            for seq, flag, actor, timestamp in self._flag_found_events()
+            if self._matches_declared_format(flag) and not self._is_recovered_guess(actor)
+        ]
+
+    def suspected_flags(self) -> list[Flag]:
+        """Flags the pipeline recorded but that are not a Worker's finding.
+
+        Two distinct causes land here, and neither is a solve:
+
+        * **wrong banner** -- the value came from somewhere other than the
+          target (a public writeup, the original repository, the run's own
+          notes), so its wrapper does not fit this challenge.
+        * **host-supplied wrapper** -- :meth:`flags` excludes a
+          ``coordinator:recovery:`` row even when its format matches, because the
+          format matching is precisely what that path fabricated.  Without this
+          second clause the excluded value would vanish from both lists and the
+          evidence that it was tried would be lost.
+
+        Handing them to a human is the point: only an operator may promote one.
+        """
+
+        return [
+            Flag(seq, flag, actor, False, timestamp)
+            for seq, flag, actor, timestamp in self._flag_found_events()
+            if flag
+            and (
+                self._is_recovered_guess(actor)
+                or not self._matches_declared_format(flag)
+            )
+        ]
 
     def snapshot(self) -> dict[str, Any]:
         pocs_method = getattr(self._graph, "pocs", None)
@@ -752,6 +1017,49 @@ def _event_timestamp(event: dict[str, Any]) -> str:
         return datetime.fromtimestamp(float(event.get("ts")), UTC).isoformat()
     except (TypeError, ValueError, OverflowError, OSError):
         return ""
+
+
+# Punctuation a Worker commonly trails a flag with inside prose.  Braces are
+# deliberately excluded: stripping ``}`` would truncate the candidate itself.
+_FLAG_TRAILING_PUNCTUATION = ".,;:!?)]\"'`"
+# Upstream sentinel for bare-token challenges (no braces at all).
+_TOKEN_FLAG_FORMAT = "token"
+_TOKEN_CANDIDATE_RE = re.compile(r"[A-Za-z0-9_-]{4,256}")
+
+
+def _event_text(payload: Any) -> str:
+    """Render an official event payload as the text the gate compares against."""
+
+    if payload is None:
+        return ""
+    if isinstance(payload, str):
+        return payload
+    try:
+        return json.dumps(payload, ensure_ascii=False)
+    except (TypeError, ValueError):
+        return str(payload)
+
+
+def _looks_like_flag(
+    candidate: str,
+    matcher: re.Pattern[str] | None,
+    *,
+    token_mode: bool = False,
+) -> bool:
+    """Keep only a single, well-formed token that satisfies the challenge shape."""
+
+    if not candidate or len(candidate) > 512:
+        return False
+    if any(char in candidate for char in "\r\n\"'\\"):
+        return False
+    if token_mode:
+        return _TOKEN_CANDIDATE_RE.fullmatch(candidate) is not None
+    if matcher is None or candidate.count("{") != 1 or candidate.count("}") != 1:
+        return False
+    try:
+        return matcher.fullmatch(candidate) is not None
+    except re.error:
+        return False
 
 
 __all__ = ["UpstreamRuntimeGraph", "create_runtime_graph", "runtime_graph_backend"]

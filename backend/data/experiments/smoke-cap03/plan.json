@@ -1,0 +1,48 @@
+{
+  "configuration_fingerprint": "eb9aa33978d13cdfdc04e3a57e2a1ca55e88ca80744fb18b615ae7cb8733beec",
+  "created_at": "2026-10-15T17:50:25.624834+00:00",
+  "dry_run": false,
+  "manifest_created_at": "2026-10-15T17:50:24.894333+00:00",
+  "resume": false,
+  "schema_version": 1,
+  "skipped_cases": [
+    {
+      "available_range": "asset-warranty-mysql",
+      "case_id": "ssrf-internal",
+      "requires_range": "web-vuln-lab",
+      "status": "SKIPPED_REQUIRES_RANGE_MISSING"
+    },
+    {
+      "available_range": "asset-warranty-mysql",
+      "case_id": "xss-reflected",
+      "requires_range": "web-vuln-lab",
+      "status": "SKIPPED_REQUIRES_RANGE_MISSING"
+    }
+  ],
+  "tasks": [
+    {
+      "arm": "off",
+      "artifact": "artifacts\\sql-injection-golden__off__r1.json",
+      "case_id": "sql-injection-golden",
+      "repeat": 1
+    },
+    {
+      "arm": "on",
+      "artifact": "artifacts\\sql-injection-golden__on__r1.json",
+      "case_id": "sql-injection-golden",
+      "repeat": 1
+    },
+    {
+      "arm": "off",
+      "artifact": "artifacts\\sql-injection-boolean__off__r1.json",
+      "case_id": "sql-injection-boolean",
+      "repeat": 1
+    },
+    {
+      "arm": "on",
+      "artifact": "artifacts\\sql-injection-boolean__on__r1.json",
+      "case_id": "sql-injection-boolean",
+      "repeat": 1
+    }
+  ]
+}

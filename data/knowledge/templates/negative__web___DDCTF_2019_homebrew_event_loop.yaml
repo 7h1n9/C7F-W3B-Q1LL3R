@@ -1,0 +1,17 @@
+name: '[DDCTF 2019]homebrew event loop'
+category: web
+keywords:
+- ddctf
+- homebrew
+- event
+- loop
+- url
+- d5afe1f66147e857
+steps:
+- RACE_WORKER_TIMEOUT
+- ROUND_BUDGET_EXHAUSTED_BEFORE_REASON
+evidence_chain: []
+success_format: CTF2\{[^}]+\}
+source: 8357bbbd-1464-4a8f-bcc4-fc8b7c7338b0 (run 0316f67b-8504-4aa1-b991-98138d9060f9)
+notes: NO_VERIFIED_FLAG
+kind: negative

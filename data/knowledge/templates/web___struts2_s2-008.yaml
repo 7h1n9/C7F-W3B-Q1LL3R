@@ -1,0 +1,24 @@
+name: '[struts2]s2-008'
+category: web
+keywords:
+- struts2
+- github
+- vulhub
+- tree
+- master
+steps:
+- '[claude] S2-008 devmode.action OGNL injection confirmed working at http://direct-ctf2.dasctf.com:25678/devmode.action
+  with parameter debug=command&expression=<OGNL>'
+- '[claude] Flag extracted from environment variable FLAG using OGNL command execution:
+  <FLAG>'
+- '[claude] VERIFIED_FACT=Flag extracted from environment variable FLAG using OGNL
+  command execution: <FLAG>'
+- Native Worker completed a bounded evidence-backed observation
+evidence_chain:
+- '[claude] Flag extracted from environment variable FLAG using OGNL command execution:
+  <FLAG>'
+- '[claude] VERIFIED_FACT=Flag extracted from environment variable FLAG using OGNL
+  command execution: <FLAG>'
+success_format: CTF2\{[^}]+\}
+source: e23246ec-dfd0-495a-9635-e9d34ba99f14 (solver cd0989d6-3acf-4cde-957d-16bd4890a81d)
+notes: ''

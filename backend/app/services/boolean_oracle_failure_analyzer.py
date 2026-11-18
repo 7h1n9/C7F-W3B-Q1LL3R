@@ -75,7 +75,6 @@ def analyze_boolean_oracle(payload: Mapping[str, Any] | None) -> dict[str, Any]:
     reasons: list[str] = []
     recommendations: list[str] = []
     true_condition = str(data.get("true_condition") or "")
-    false_condition = str(data.get("false_condition") or "")
 
     if classification == "TRUE_SIDE_FAILED":
         expected_true = oracle.get("true_value", True)

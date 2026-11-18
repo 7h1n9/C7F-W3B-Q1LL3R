@@ -1,0 +1,26 @@
+name: BUU SSRF COURSE 1
+category: web
+keywords:
+- buu
+- ssrf
+- course
+steps:
+- RACE_WORKER_TIMEOUT
+- sql_boolean_compare:query oracle - root/html form returns identical 111-byte static
+  form for every query/url/JSON payload; no boolean oracle exists on this surface;
+  blind SSRF with no echo; JSON SQL endpoint not present
+- sql_boolean_compare:query -- no boolean oracle on target; response is byte-identical
+  static 111B PHP form for all query/url/JSON payloads; blind SSRF no echo. See /home/kali/workspace/ssrf_probe_notes.md
+- '[claude] No SQL boolean oracle on declared surface: POST JSON `{"query":...}` to
+  target root returns a byte-identical static 111-byte HTML form for all payloads
+  (`1`, `1 AND 1=1`, `1 AND 1=2`); the only real p'
+- WORKER_TIMEOUT
+- '[claude] OOB SSRF confirmation via attacker-controlled canary URL is unconfirmed
+  from this vantage: no inbound HTTP/DNS callback was observed for any vector tried
+  (GET/POST `url=`, multiple canary hosts/webhoo'
+- MUTEKI_RUN_TIMEOUT
+evidence_chain: []
+success_format: flag\{[^}]+\}
+source: e52b9a39-9cad-47c0-bbbb-e554e66ab10c (run d23b7fbc-fe3c-49e0-a36a-6ead07b3526a)
+notes: MUTEKI_RUN_TIMEOUT
+kind: negative

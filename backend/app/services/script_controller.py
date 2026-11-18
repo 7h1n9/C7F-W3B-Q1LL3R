@@ -10,7 +10,6 @@ from __future__ import annotations
 import hashlib
 import json
 from typing import Any
-import re
 
 from sqlalchemy import select
 
@@ -20,7 +19,6 @@ from app.models.challenge import Challenge
 from app.models.run import Artifact, RunAttempt, RunExecutionLease, ScriptRecord, SolveRun, ToolCall
 from app.schemas.multi_agent import ScriptProposalContract
 from app.services.events import event_service
-from app.services.runner_client import runner_client
 from app.services.solver_state import solver_state_service
 from app.tools.gateway import tool_gateway
 
@@ -152,7 +150,6 @@ class ExtractionFallbackController:
     async def run(self, session, run: SolveRun, challenge: Challenge, attempt: RunAttempt, lease: RunExecutionLease) -> dict:
         if not await self.should_run(session, run, challenge):
             return {"status": "SKIPPED", "reason": "PREFERRED_ACTION_AVAILABLE_OR_NOT_TRIGGERED"}
-        state = await solver_state_service.load(session, run.id)
         checkpoint = run.recovery_checkpoint_json or {}
         request_spec = dict(checkpoint.get("request_spec") or {"method": "GET"})
         max_requests = min(20, max(1, int((checkpoint.get("oracle") or {}).get("max_requests") or 1)))

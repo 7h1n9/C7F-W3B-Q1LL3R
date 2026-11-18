@@ -1,0 +1,602 @@
+[
+  {
+    "id": "CVE-2018-13379",
+    "name": "Fortinet FortiOS - Credentials Disclosure",
+    "file": "afrog\\afrog-pocs\\CVE\\2018\\CVE-2018-13379.yaml",
+    "score": 12
+  },
+  {
+    "id": "CVE-2022-37042",
+    "name": "Zimbra Collaboration Suite 8.8.15/9.0 - Remote Code Execution",
+    "file": "afrog\\afrog-pocs\\CVE\\2022\\CVE-2022-37042.yaml",
+    "score": 12
+  },
+  {
+    "id": "CVE-2022-39952",
+    "name": "Fortinet FortiNAC - Arbitrary File Write",
+    "file": "afrog\\afrog-pocs\\CVE\\2022\\CVE-2022-39952.yaml",
+    "score": 12
+  },
+  {
+    "id": "CVE-2023-32315-2",
+    "name": "Openfire身份认证绕过漏洞",
+    "file": "afrog\\afrog-pocs\\CVE\\2023\\CVE-2023-32315-2.yaml",
+    "score": 12
+  },
+  {
+    "id": "CVE-2023-35843",
+    "name": "NocoDB Arbitrary File Read",
+    "file": "afrog\\afrog-pocs\\CVE\\2023\\CVE-2023-35843.yaml",
+    "score": 12
+  },
+  {
+    "id": "CVE-2024-41713",
+    "name": "MitelMiCollab 身份绕过导致任意文件读取漏洞",
+    "file": "afrog\\afrog-pocs\\CVE\\2024\\CVE-2024-41713.yaml",
+    "score": 12
+  },
+  {
+    "id": "hikvision-ivms-8700-fileupload",
+    "name": "海康威视 IVMS 8700 任意文件上传",
+    "file": "afrog\\afrog-pocs\\vulnerability\\hikvision-ivms-8700-fileupload.yaml",
+    "score": 12
+  },
+  {
+    "id": "qihang-media-lfi",
+    "name": "QiHang Media Web (QH.aspx) Digital Signage 3.0.9 - Arbitrary File Disclosure",
+    "file": "afrog\\afrog-pocs\\vulnerability\\qihang-media-lfi.yaml",
+    "score": 12
+  },
+  {
+    "id": "vmware-vcenter-provider-logo-ssrf",
+    "name": "Vmware VCenter - Arbitrary File Read",
+    "file": "afrog\\afrog-pocs\\vulnerability\\vmware-vcenter-provider-logo-ssrf.yaml",
+    "score": 12
+  },
+  {
+    "id": "CNVD-2018-04757",
+    "name": "帆软报表 V8 get_geo_json 任意文件读取漏洞",
+    "file": "afrog\\afrog-pocs\\CNVD\\2018\\CNVD-2018-04757.yaml",
+    "score": 10
+  },
+  {
+    "id": "CNVD-2020-62422",
+    "name": "致远oa系统存在任意文件读取漏洞",
+    "file": "afrog\\afrog-pocs\\CNVD\\2020\\CNVD-2020-62422.yaml",
+    "score": 10
+  },
+  {
+    "id": "CNVD-2021-28277",
+    "name": "Landray OA Custom JSP file rread",
+    "file": "afrog\\afrog-pocs\\CNVD\\2021\\CNVD-2021-28277.yaml",
+    "score": 10
+  },
+  {
+    "id": "CVE-2020-1938",
+    "name": "Ghostcat - Apache Tomcat - AJP File Read/Inclusion Vulnerability",
+    "file": "afrog\\afrog-pocs\\CVE\\2020\\CVE-2020-1938.yaml",
+    "score": 10
+  },
+  {
+    "id": "CVE-2020-3452",
+    "name": "Cisco Read-Only Path Traversal",
+    "file": "afrog\\afrog-pocs\\CVE\\2020\\CVE-2020-3452.yaml",
+    "score": 10
+  },
+  {
+    "id": "CVE-2021-25282",
+    "name": "SaltStack Salt Unautherenticated Remote Command Execution",
+    "file": "afrog\\afrog-pocs\\CVE\\2021\\CVE-2021-25282.yaml",
+    "score": 10
+  },
+  {
+    "id": "CVE-2021-42013",
+    "name": "Apache 2.4.49/2.4.50 - Path Traversal and Remote Code Execution",
+    "file": "afrog\\afrog-pocs\\CVE\\2021\\CVE-2021-42013.yaml",
+    "score": 10
+  },
+  {
+    "id": "CVE-2022-0656",
+    "name": "uDraw <3.3.3 - Local File Inclusion",
+    "file": "afrog\\afrog-pocs\\CVE\\2022\\CVE-2022-0656.yaml",
+    "score": 10
+  },
+  {
+    "id": "CVE-2022-1119",
+    "name": "WordPress Simple File List <3.2.8 - Local File Inclusion",
+    "file": "afrog\\afrog-pocs\\CVE\\2022\\CVE-2022-1119.yaml",
+    "score": 10
+  },
+  {
+    "id": "CVE-2022-1390",
+    "name": "WordPress Admin Word Count Column 2.2 - Local File Inclusion",
+    "file": "afrog\\afrog-pocs\\CVE\\2022\\CVE-2022-1390.yaml",
+    "score": 10
+  },
+  {
+    "id": "CVE-2022-23854",
+    "name": "AVEVA InTouch 安全网关 AccessAnywhere 任意文件读取漏洞",
+    "file": "afrog\\afrog-pocs\\CVE\\2022\\CVE-2022-23854.yaml",
+    "score": 10
+  },
+  {
+    "id": "CVE-2022-2414",
+    "name": "Dogtag PKI XML实体注入漏洞 CVE-2022-2414",
+    "file": "afrog\\afrog-pocs\\CVE\\2022\\CVE-2022-2414.yaml",
+    "score": 10
+  },
+  {
+    "id": "CVE-2022-29464",
+    "name": "WSO2 Management - Arbitrary File Upload & Remote Code Execution",
+    "file": "afrog\\afrog-pocs\\CVE\\2022\\CVE-2022-29464.yaml",
+    "score": 10
+  },
+  {
+    "id": "CVE-2022-31474",
+    "name": "CVE-2022-31474",
+    "file": "afrog\\afrog-pocs\\CVE\\2022\\CVE-2022-31474.yaml",
+    "score": 10
+  },
+  {
+    "id": "CVE-2022-3982",
+    "name": "WordPress Booking Calendar <3.2.2 - Arbitrary File Upload",
+    "file": "afrog\\afrog-pocs\\CVE\\2022\\CVE-2022-3982.yaml",
+    "score": 10
+  },
+  {
+    "id": "CVE-2022-41840",
+    "name": "Welcart eCommerce <= 2.7.7 - Unauth Directory Traversal",
+    "file": "afrog\\afrog-pocs\\CVE\\2022\\CVE-2022-41840.yaml",
+    "score": 10
+  },
+  {
+    "id": "CVE-2023-26256",
+    "name": "STAGIL Navigation for Jira Menu & Themes <2.0.52 - Local File Inclusion",
+    "file": "afrog\\afrog-pocs\\CVE\\2023\\CVE-2023-26256.yaml",
+    "score": 10
+  },
+  {
+    "id": "CVE-2023-31059",
+    "name": "Repetier Server - Directory Traversal",
+    "file": "afrog\\afrog-pocs\\CVE\\2023\\CVE-2023-31059.yaml",
+    "score": 10
+  },
+  {
+    "id": "CVE-2023-34928",
+    "name": "H3C Magic B1STV100R012 RCE",
+    "file": "afrog\\afrog-pocs\\CVE\\2023\\CVE-2023-34928.yaml",
+    "score": 10
+  },
+  {
+    "id": "CVE-2024-23334",
+    "name": "aiohttp - Directory Traversal",
+    "file": "afrog\\afrog-pocs\\CVE\\2024\\CVE-2024-23334.yaml",
+    "score": 10
+  },
+  {
+    "id": "CVE-2024-48248",
+    "name": "NAKIVO Backup & Replication任意文件读取漏洞",
+    "file": "afrog\\afrog-pocs\\CVE\\2024\\CVE-2024-48248.yaml",
+    "score": 10
+  },
+  {
+    "id": "CVE-2024-9465",
+    "name": "Palo Alto Expedition - SQL Injection",
+    "file": "afrog\\afrog-pocs\\CVE\\2024\\CVE-2024-9465.yaml",
+    "score": 10
+  },
+  {
+    "id": "CVE-2025-27817",
+    "name": "Apache Kafka 客户端任意文件读取",
+    "file": "afrog\\afrog-pocs\\CVE\\2025\\CVE-2025-27817.yaml",
+    "score": 10
+  },
+  {
+    "id": "CVE-2025-30208",
+    "name": "Vite 任意文件读取漏洞",
+    "file": "afrog\\afrog-pocs\\CVE\\2025\\CVE-2025-30208.yaml",
+    "score": 10
+  },
+  {
+    "id": "alibaba-anyproxy-fetchbody-anyfile-read",
+    "name": "Alibaba AnyProxy fetchBody 任意文件读取漏洞",
+    "file": "afrog\\afrog-pocs\\vulnerability\\alibaba-anyproxy-fetchbody-anyfile-read.yaml",
+    "score": 10
+  },
+  {
+    "id": "array-vpn-addfolder-fileread",
+    "name": "ArrayVPN 任意文件读取漏洞",
+    "file": "afrog\\afrog-pocs\\vulnerability\\array-vpn-addfolder-fileread.yaml",
+    "score": 10
+  },
+  {
+    "id": "cxcms-arbitrary-file-read",
+    "name": "CxCMS Resource.ashx 任意文件读取漏洞",
+    "file": "afrog\\afrog-pocs\\vulnerability\\cxcms-arbitrary-file-read.yaml",
+    "score": 10
+  },
+  {
+    "id": "dahua-zhinengwulian-evo-runsv1-0push-rce",
+    "name": "大华智能物联管理平台evo-runs/v1.0/push接口存在远程命令执行漏洞",
+    "file": "afrog\\afrog-pocs\\vulnerability\\dahua-zhinengwulian-evo-runsv1-0push-rce.yaml",
+    "score": 10
+  },
+  {
+    "id": "dahua-zhinengwulian-evo-runsv1-0receive-rce",
+    "name": "大华智能物联管理平台evo-runs/v1.0/receive接口存在远程命令执行漏洞",
+    "file": "afrog\\afrog-pocs\\vulnerability\\dahua-zhinengwulian-evo-runsv1-0receive-rce.yaml",
+    "score": 10
+  },
+  {
+    "id": "e-mobile-client-filedownload",
+    "name": "泛微 E-mobile-client接口任意文件下载",
+    "file": "afrog\\afrog-pocs\\vulnerability\\e-mobile-client-filedownload.yaml",
+    "score": 10
+  },
+  {
+    "id": "esafenet-cdgserver3-autosignservice1-rce",
+    "name": "亿赛通电子文档系统 AutoSignService1 RCE",
+    "file": "afrog\\afrog-pocs\\vulnerability\\esafenet-cdgserver3-autosignservice1-rce.yaml",
+    "score": 10
+  },
+  {
+    "id": "esafenet-cdgserver3-cdgauthorisetempletservice1-rce",
+    "name": "亿赛通电子文档系统 CDGAuthoriseTempletService1 RCE",
+    "file": "afrog\\afrog-pocs\\vulnerability\\esafenet-cdgserver3-cdgauthorisetempletservice1-rce.yaml",
+    "score": 10
+  },
+  {
+    "id": "esafenet-cdgserver3-cdgrenewapplication-rce",
+    "name": "亿赛通电子文档系统 CDGRenewApplication RCE",
+    "file": "afrog\\afrog-pocs\\vulnerability\\esafenet-cdgserver3-cdgrenewapplication-rce.yaml",
+    "score": 10
+  },
+  {
+    "id": "esafenet-cdgserver3-checkclientservelt-rce",
+    "name": "亿赛通电子文档系统 CheckClientServelt RCE",
+    "file": "afrog\\afrog-pocs\\vulnerability\\esafenet-cdgserver3-checkclientservelt-rce.yaml",
+    "score": 10
+  },
+  {
+    "id": "esafenet-cdgserver3-clientloginweb-rce",
+    "name": "亿赛通电子文档系统 ClientLoginWeb RCE",
+    "file": "afrog\\afrog-pocs\\vulnerability\\esafenet-cdgserver3-clientloginweb-rce.yaml",
+    "score": 10
+  },
+  {
+    "id": "esafenet-cdgserver3-clientmessage-rce",
+    "name": "亿赛通电子文档系统 clientMessage RCE",
+    "file": "afrog\\afrog-pocs\\vulnerability\\esafenet-cdgserver3-clientmessage-rce.yaml",
+    "score": 10
+  },
+  {
+    "id": "esafenet-cdgserver3-createdocservice1-rce",
+    "name": "亿赛通电子文档系统 CreateDocService1 RCE",
+    "file": "afrog\\afrog-pocs\\vulnerability\\esafenet-cdgserver3-createdocservice1-rce.yaml",
+    "score": 10
+  },
+  {
+    "id": "esafenet-cdgserver3-decrypermissapp-rce",
+    "name": "亿赛通电子文档系统 DecryPermissApp RCE",
+    "file": "afrog\\afrog-pocs\\vulnerability\\esafenet-cdgserver3-decrypermissapp-rce.yaml",
+    "score": 10
+  },
+  {
+    "id": "esafenet-cdgserver3-decryptapplicationservice1-rce",
+    "name": "亿赛通电子文档系统 DecryptApplicationService1 RCE",
+    "file": "afrog\\afrog-pocs\\vulnerability\\esafenet-cdgserver3-decryptapplicationservice1-rce.yaml",
+    "score": 10
+  },
+  {
+    "id": "esafenet-cdgserver3-decryptionapp-rce",
+    "name": "亿赛通电子文档系统 DecryptionApp RCE",
+    "file": "afrog\\afrog-pocs\\vulnerability\\esafenet-cdgserver3-decryptionapp-rce.yaml",
+    "score": 10
+  },
+  {
+    "id": "esafenet-cdgserver3-examcdgdocservice1-rce",
+    "name": "亿赛通电子文档系统 ExamCDGDocService1 RCE",
+    "file": "afrog\\afrog-pocs\\vulnerability\\esafenet-cdgserver3-examcdgdocservice1-rce.yaml",
+    "score": 10
+  },
+  {
+    "id": "esafenet-cdgserver3-fileauditservice-rce",
+    "name": "亿赛通电子文档系统 FileAuditService RCE",
+    "file": "afrog\\afrog-pocs\\vulnerability\\esafenet-cdgserver3-fileauditservice-rce.yaml",
+    "score": 10
+  },
+  {
+    "id": "esafenet-cdgserver3-filecountservice-rce",
+    "name": "亿赛通电子文档系统 FileCountService RCE",
+    "file": "afrog\\afrog-pocs\\vulnerability\\esafenet-cdgserver3-filecountservice-rce.yaml",
+    "score": 10
+  },
+  {
+    "id": "finereport-directory-traversal",
+    "name": "Finereport Directory Traversal",
+    "file": "afrog\\afrog-pocs\\vulnerability\\finereport-directory-traversal.yaml",
+    "score": 10
+  },
+  {
+    "id": "flink-unauth-rce",
+    "name": "Apache Flink Unauth RCE",
+    "file": "afrog\\afrog-pocs\\vulnerability\\flink-upload-rce.yaml",
+    "score": 10
+  },
+  {
+    "id": "h3c-mselfservice-dynamiccontent-properties-rce",
+    "name": "H3C 用户自助服务平台 dynamiccontent.properties.xhtml RCE 漏洞",
+    "file": "afrog\\afrog-pocs\\vulnerability\\h3c-mselfservice-dynamiccontent-properties-rce.yaml",
+    "score": 10
+  },
+  {
+    "id": "jinhe-oa-c6-actiondataset-xxe",
+    "name": "金和OA-C6系统ActionDataSet接口XXE漏洞",
+    "file": "afrog\\afrog-pocs\\vulnerability\\jinhe-oa-c6-actiondataset-xxe.yaml",
+    "score": 10
+  },
+  {
+    "id": "landray-oa-syssearchmain-rce",
+    "name": "Landray sysSearchMain.do RCE",
+    "file": "afrog\\afrog-pocs\\vulnerability\\landray-oa-syssearchmain-rce.yaml",
+    "score": 10
+  },
+  {
+    "id": "o2oa-open-read-file",
+    "name": "O2OA open 后台任意文件读取漏洞",
+    "file": "afrog\\afrog-pocs\\vulnerability\\o2oa-open-read-file.yaml",
+    "score": 10
+  },
+  {
+    "id": "selea-targa-camera-lfi",
+    "name": "Selea Targa IP OCR-ANPR Camera - Unauthenticated Directory Traversal",
+    "file": "afrog\\afrog-pocs\\vulnerability\\selea-targa-camera-lfi.yaml",
+    "score": 10
+  },
+  {
+    "id": "shuiwu-formsinstanceget-sqli",
+    "name": "森鑫炬水务企业综合运营平台-FormsInstanceGet文件读取漏洞",
+    "file": "afrog\\afrog-pocs\\vulnerability\\shuiwu-formsinstanceget-sqli.yaml",
+    "score": 10
+  },
+  {
+    "id": "solr-bypass-fileread",
+    "name": "Apache-Solr 身份认证绕过导致任意文件读取",
+    "file": "afrog\\afrog-pocs\\vulnerability\\solr-bypass-fileread.yaml",
+    "score": 10
+  },
+  {
+    "id": "thinkphp-3-0-log-rce",
+    "name": "Thinkphp 3.0 log 远程命令执行漏洞",
+    "file": "afrog\\afrog-pocs\\vulnerability\\thinkphp-3-0-log-rce.yaml",
+    "score": 10
+  },
+  {
+    "id": "wordpress-ext-adaptive-images-lfi",
+    "name": "Wordpress Ext Adaptive Images lfi",
+    "file": "afrog\\afrog-pocs\\vulnerability\\wordpress-ext-adaptive-images-lfi.yaml",
+    "score": 10
+  },
+  {
+    "id": "xiruanyun-xms-futurehotel-operate-xxe",
+    "name": "西软云XMS-futurehotel-operate 接口存在XXE漏洞",
+    "file": "afrog\\afrog-pocs\\vulnerability\\xiruanyun-xms-futurehotel-operate-xxe.yaml",
+    "score": 10
+  },
+  {
+    "id": "yonyou-nccloud-iupdateservice-xxe",
+    "name": "用友NC Cloud IUpdateService接口存在XXE漏洞",
+    "file": "afrog\\afrog-pocs\\vulnerability\\yonyou-nccloud-iupdateservice-xxe.yaml",
+    "score": 10
+  },
+  {
+    "id": "yonyou-nccloud-uapjs-upload-rce",
+    "name": "用友 NC Cloud 文件上传",
+    "file": "afrog\\afrog-pocs\\vulnerability\\yonyou-nccloud-uapjs-upload-rce.yaml",
+    "score": 10
+  },
+  {
+    "id": "yonyou-u8-ufgovbank-xxe",
+    "name": "用友GRP-U8 ufgovbank XXE漏洞",
+    "file": "afrog\\afrog-pocs\\vulnerability\\yonyou-u8-ufgovbank-xxe.yaml",
+    "score": 10
+  },
+  {
+    "id": "",
+    "name": "poc-yaml-seeyon-unauthorized-fileupload",
+    "file": "xray\\xpoc-xray2.0-poc\\yaml-poc-seeyon-seeyon_oa-rce-CT-159051.yml",
+    "score": 9
+  },
+  {
+    "id": "",
+    "name": "yaml-poc-vmware-cloud_foundation-directory_traversal-CVE-2021-22005",
+    "file": "xray\\xpoc-xray2.0-poc\\yaml-poc-vmware-cloud_foundation-directory_traversal-CVE-2021-22005.yml",
+    "score": 9
+  },
+  {
+    "id": "",
+    "name": "poc-yaml-yonyou-ksoa-file-upload",
+    "file": "xray\\xpoc-xray2.0-poc\\yonyou-ksoa-imageupload-writefile.yml",
+    "score": 9
+  },
+  {
+    "id": "CVE-2021-1499",
+    "name": "Cisco HyperFlex HX Data Platform - File Upload Vulnerability",
+    "file": "afrog\\afrog-pocs\\CVE\\2021\\CVE-2021-1499.yaml",
+    "score": 9
+  },
+  {
+    "id": "CVE-2021-26085",
+    "name": "Confluence Pre-Authorization Arbitrary File Read",
+    "file": "afrog\\afrog-pocs\\CVE\\2021\\CVE-2021-26085.yaml",
+    "score": 9
+  },
+  {
+    "id": "CVE-2021-27250",
+    "name": "D-LINK DAP-2020 webproc 任意文件读取漏洞",
+    "file": "afrog\\afrog-pocs\\CVE\\2021\\CVE-2021-27250.yaml",
+    "score": 9
+  },
+  {
+    "id": "CVE-2021-28164",
+    "name": "Jetty Authorization Before Parsing and Canonicalization",
+    "file": "afrog\\afrog-pocs\\CVE\\2021\\CVE-2021-28164.yaml",
+    "score": 9
+  },
+  {
+    "id": "jira-unauthenticated",
+    "name": "Jira Unauthenticated Admin Projects",
+    "file": "afrog\\afrog-pocs\\unauthorized\\jira-unauthenticated.yaml",
+    "score": 9
+  },
+  {
+    "id": "kingdee-oa-apusic-server-file-traversal",
+    "name": "金蝶OA Apusic应用服务器(中间件) server_file 目录遍历",
+    "file": "afrog\\afrog-pocs\\vulnerability\\kingdee-oa-apusic-server-file-traversal.yaml",
+    "score": 9
+  },
+  {
+    "id": "CNVD-2017-26282",
+    "name": "极通ewebs 应用虚拟化系统 任意文件读取",
+    "file": "afrog\\afrog-pocs\\CNVD\\2017\\CNVD-2017-26282.yaml",
+    "score": 8
+  },
+  {
+    "id": "CNVD-2019-19299",
+    "name": "致远OA A8 htmlofficeservlet Remote Code Execution",
+    "file": "afrog\\afrog-pocs\\CNVD\\2019\\CNVD-2019-19299.yaml",
+    "score": 8
+  },
+  {
+    "id": "CNVD-2020-23735",
+    "name": "Xxunchi Local File read",
+    "file": "afrog\\afrog-pocs\\CNVD\\2020\\CNVD-2020-23735.yaml",
+    "score": 8
+  },
+  {
+    "id": "CNVD-2021-01931",
+    "name": "Ruoyi Management System - Local File Inclusion",
+    "file": "afrog\\afrog-pocs\\CNVD\\2021\\CNVD-2021-01931.yaml",
+    "score": 8
+  },
+  {
+    "id": "CNVD-2021-39067",
+    "name": "H3C IMC dynamiccontent.properties.xhtm 远程命令执行",
+    "file": "afrog\\afrog-pocs\\CNVD\\2021\\CNVD-2021-39067.yaml",
+    "score": 8
+  },
+  {
+    "id": "CNVD-2021-49104",
+    "name": "泛微OA E-Office UploadFile.php 任意文件上传漏洞",
+    "file": "afrog\\afrog-pocs\\CNVD\\2021\\CNVD-2021-49104.yaml",
+    "score": 8
+  },
+  {
+    "id": "CVE-2016-3088",
+    "name": "ActiveMQ Arbitrary File Write Vulnerability (CVE-2016-3088)",
+    "file": "afrog\\afrog-pocs\\CVE\\2016\\CVE-2016-3088.yaml",
+    "score": 8
+  },
+  {
+    "id": "CVE-2018-12613",
+    "name": "PhpMyAdmin 4.8.1 Remote File Inclusion",
+    "file": "afrog\\afrog-pocs\\CVE\\2018\\CVE-2018-12613.yaml",
+    "score": 8
+  },
+  {
+    "id": "CVE-2019-18371",
+    "name": "小米 路由器 extdisks 任意文件读取漏洞",
+    "file": "afrog\\afrog-pocs\\CVE\\2019\\CVE-2019-18371.yaml",
+    "score": 8
+  },
+  {
+    "id": "CVE-2019-19781",
+    "name": "Citrix Application Delivery Controller (ADC) and Gateway Directory Traversal.",
+    "file": "afrog\\afrog-pocs\\CVE\\2019\\CVE-2019-19781.yaml",
+    "score": 8
+  },
+  {
+    "id": "CVE-2019-3396",
+    "name": "Atlassian Confluence Path Traversal",
+    "file": "afrog\\afrog-pocs\\CVE\\2019\\CVE-2019-3396.yaml",
+    "score": 8
+  },
+  {
+    "id": "CVE-2019-5418",
+    "name": "Rails File Content Disclosure",
+    "file": "afrog\\afrog-pocs\\CVE\\2019\\CVE-2019-5418.yaml",
+    "score": 8
+  },
+  {
+    "id": "CVE-2019-7192",
+    "name": "QNAP PhotoStation Unauthorizated File Read",
+    "file": "afrog\\afrog-pocs\\CVE\\2019\\CVE-2019-7192.yaml",
+    "score": 8
+  },
+  {
+    "id": "CVE-2020-11738",
+    "name": "WordPress Duplicator plugin Directory Traversal",
+    "file": "afrog\\afrog-pocs\\CVE\\2020\\CVE-2020-11738.yaml",
+    "score": 8
+  },
+  {
+    "id": "CVE-2020-24571",
+    "name": "NexusDB v4.50.22 Path Traversal",
+    "file": "afrog\\afrog-pocs\\CVE\\2020\\CVE-2020-24571.yaml",
+    "score": 8
+  },
+  {
+    "id": "CVE-2020-35736",
+    "name": "GateOne Arbitrary File Download",
+    "file": "afrog\\afrog-pocs\\CVE\\2020\\CVE-2020-35736.yaml",
+    "score": 8
+  },
+  {
+    "id": "CVE-2020-5410",
+    "name": "Spring Cloud Config Server Directory Traversal",
+    "file": "afrog\\afrog-pocs\\CVE\\2020\\CVE-2020-5410.yaml",
+    "score": 8
+  },
+  {
+    "id": "CVE-2021-21234",
+    "name": "Spring Boot Actuator Logview Directory Traversal",
+    "file": "afrog\\afrog-pocs\\CVE\\2021\\CVE-2021-21234.yaml",
+    "score": 8
+  },
+  {
+    "id": "CVE-2021-21287",
+    "name": "MinIO Browser API - Server-Side Request Forgery",
+    "file": "afrog\\afrog-pocs\\CVE\\2021\\CVE-2021-21287.yaml",
+    "score": 8
+  },
+  {
+    "id": "CVE-2021-3019",
+    "name": "Lanproxy Directory Traversal",
+    "file": "afrog\\afrog-pocs\\CVE\\2021\\CVE-2021-3019.yaml",
+    "score": 8
+  },
+  {
+    "id": "CVE-2021-41381",
+    "name": "Payara Micro Community 5.2021.6 Directory Traversal",
+    "file": "afrog\\afrog-pocs\\CVE\\2021\\CVE-2021-41381.yaml",
+    "score": 8
+  },
+  {
+    "id": "CVE-2021-41773",
+    "name": "Apache 2.4.49 - Path Traversal and Remote Code Execution",
+    "file": "afrog\\afrog-pocs\\CVE\\2021\\CVE-2021-41773.yaml",
+    "score": 8
+  },
+  {
+    "id": "CVE-2021-43734",
+    "name": "kkFileView getCorsFile 任意文件读取漏洞",
+    "file": "afrog\\afrog-pocs\\CVE\\2021\\CVE-2021-43734.yaml",
+    "score": 8
+  },
+  {
+    "id": "CVE-2021-46418",
+    "name": "Telesquare TLR-2855KS6 - 任意文件创建",
+    "file": "afrog\\afrog-pocs\\CVE\\2021\\CVE-2021-46418.yaml",
+    "score": 8
+  }
+]

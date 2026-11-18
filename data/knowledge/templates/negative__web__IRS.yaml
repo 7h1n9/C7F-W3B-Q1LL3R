@@ -1,0 +1,22 @@
+name: IRS
+category: web
+keywords:
+- irs
+- internal
+- restrictedpythonexecution
+- service
+- has
+- established
+- new
+- automated
+- auditing
+- pipeline
+- can
+- remain
+steps:
+- NO_HEALTHY_WORKER_PROFILE
+evidence_chain: []
+success_format: CTF2\{[^}]+\}
+source: 635ea099-c247-4fa9-a6ae-f872cce021c9 (run a80200d2-da35-49ea-8432-325650ab3b3e)
+notes: NO_HEALTHY_WORKER_PROFILE
+kind: negative

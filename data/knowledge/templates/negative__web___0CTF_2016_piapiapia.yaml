@@ -1,0 +1,13 @@
+name: '[0CTF 2016]piapiapia'
+category: web
+keywords:
+- ctf
+- piapiapia
+steps:
+- RACE_WORKER_TIMEOUT
+- ROUND_BUDGET_EXHAUSTED_BEFORE_REASON
+evidence_chain: []
+success_format: CTF2\{[^}]+\}
+source: 0ff84920-9ad9-4c5a-97af-f81a18c2552d (run 615e4b80-b29b-4e7e-a554-21ce1eb1b039)
+notes: NO_VERIFIED_FLAG
+kind: negative

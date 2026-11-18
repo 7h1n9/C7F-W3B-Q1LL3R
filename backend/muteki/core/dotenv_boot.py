@@ -17,7 +17,6 @@ Idempotent: safe to call from multiple entrypoints; only the first call loads.
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 from typing import Optional
 

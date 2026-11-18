@@ -1,0 +1,17 @@
+name: '[ACTF2020 新生赛]BackupFile 183534dbb9f5'
+category: web
+keywords:
+- actf2020
+- backupfile
+- y1ng
+steps:
+- '[codex] index.php.bak served (200) at web root, source: includes flag.php, reads
+  $_GET[''key''], requires is_numeric, then intval($key) == "123ffwsf..." -> echo
+  $flag'
+- '[codex] GET /?key=123 (also 123. and leading-space 123) returns <FLAG>'
+- '[codex] FOUND_FLAG=<FLAG>'
+evidence_chain:
+- '[codex] FOUND_FLAG=<FLAG>'
+success_format: CTF2\{[^}]+\}
+source: 183534db-b9f5-4b0b-a985-153cbbce9949 (solver ffdef3a6-a51f-4700-8933-6c01a53a47c8)
+notes: ''

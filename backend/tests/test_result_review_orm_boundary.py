@@ -1,7 +1,6 @@
 """Regression tests for ID-only ResultReview continuation boundaries."""
 
 import pytest
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 

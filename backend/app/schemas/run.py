@@ -2,36 +2,61 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from app.schemas.model_config import normalize_worker_engine_type
+
 
 class WorkerEngineSelection(BaseModel):
-    engine_type: Literal["codex_cli", "openai_compatible"]
+    # ``cursor_cli`` was removed from this literal when the channel was retired
+    # (see app.schemas.model_config.RETIRED_PROVIDER_TYPES).  Historical Runs keep
+    # their stored engine_type -- the read model below types it as a plain string
+    # on purpose, so old rows still render.
+    engine_type: Literal["codex_cli", "openai_compatible", "claude_cli"]
     model_config_id: str | None = None
 
     @field_validator("engine_type", mode="before")
     @classmethod
     def normalize_engine_type(cls, value: object) -> object:
-        aliases = {"codex": "codex_cli", "codex-sdk": "codex_cli", "codex_sdk": "codex_cli", "codex-cli": "codex_cli", "codex-api": "codex_cli", "openai-compatible": "openai_compatible"}
-        normalized = str(value or "").strip().casefold()
-        return aliases.get(normalized, normalized)
+        # One alias table for the whole app; see app.schemas.model_config.
+        return normalize_worker_engine_type(value) or value
 
     @model_validator(mode="after")
     def validate_model_binding(self) -> "WorkerEngineSelection":
-        if self.engine_type in {"openai_compatible", "codex_cli"} and not self.model_config_id:
+        if not self.model_config_id:
+            # Every engine gets its binary/model/credentials from a model
+            # config, so an unbound Worker selection is unrunnable by definition.
             raise ValueError(f"{self.engine_type} worker requires model_config_id")
-        if self.engine_type not in {"openai_compatible", "codex_cli"} and self.model_config_id:
-            raise ValueError(f"{self.engine_type} worker does not accept model_config_id")
         return self
 
 
 class RunCreate(BaseModel):
-    engine_type: str = Field(default="openai_compatible", pattern="^(openai_compatible|codex_cli)$")
-    # New Runs expose only the two currently supported execution paths.
+    engine_type: str = Field(default="openai_compatible")
+    # New Runs expose only the currently supported execution paths.
     # Existing database rows keep their persisted legacy mode and remain
     # readable through RunRead during the migration window.
     solver_mode: str = Field(default="muteki", pattern="^(single_agent|muteki)$")
+
+    @field_validator("engine_type", mode="before")
+    @classmethod
+    def normalize_engine_type(cls, value: object) -> object:
+        normalized = normalize_worker_engine_type(value)
+        if not normalized:
+            raise ValueError(f"unsupported worker engine type: {value}")
+        return normalized
+
+
     model_config_id: str | None = None
     reason_model_config_id: str | None = None
     worker_engines: list[WorkerEngineSelection] = Field(default_factory=list, max_length=8)
+    #: Recall the curated corpus + distilled templates into this Run's context.
+    #:
+    #: ``None`` means "not specified", which is *not* the same as ``"off"``: the
+    #: Run then falls back to the deployment default (``C7F_KNOWLEDGE_MODE``), so
+    #: a caller that has no opinion does not silently pin the baseline arm of the
+    #: A/B experiment.  A caller that *does* have an opinion (the arena queue, the
+    #: control-experiment endpoint) must be able to state it explicitly, which is
+    #: exactly what was missing: the arena path never wrote this key, so every
+    #: batch solve ran with knowledge off while the corpus sat unused.
+    knowledge_mode: Literal["off", "on"] | None = None
     max_agent_steps: int = Field(default=120, ge=1, le=300)
     max_tool_calls: int = Field(default=120, ge=0, le=300)
     max_context_observations: int = Field(default=8, ge=1, le=50)
@@ -40,6 +65,12 @@ class RunCreate(BaseModel):
     selected_skill_ids: list[str] = Field(default_factory=list, max_length=30)
     disabled_skill_ids: list[str] = Field(default_factory=list, max_length=30)
     conversation_id: str | None = None
+
+
+class RunControlExperimentCreate(BaseModel):
+    factor: Literal["knowledge_mode"]
+    counterfactual_value: Literal["off", "on"]
+    start: bool = False
 
 
 class RunBatchDelete(BaseModel):
@@ -96,7 +127,6 @@ class RunRead(BaseModel):
     active_skill_names: list[str] = Field(default_factory=list)
     diagnostic_tags: list[str] = Field(default_factory=list)
     diagnostic_summary: str | None = None
-    score: dict | None = None
     started_at: str | None
     finished_at: str | None
     created_at: str

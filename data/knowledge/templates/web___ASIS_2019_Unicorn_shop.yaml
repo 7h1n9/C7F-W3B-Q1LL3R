@@ -1,0 +1,34 @@
+name: '[ASIS 2019]Unicorn shop'
+category: web
+keywords:
+- asis
+- unicorn
+- shop
+steps:
+- '[claude] Unicorn shop /charge accepts a single price char; ASCII prices fail (budget
+  100 < 1337 for item 4), but CJK numeral 万 (U+4E07) parses as 10000 via unicodedata/Decimal
+  and successfully purchases item 4'
+- '[claude] Server header is `openresty`; responses are Flask/Jinja-style with alert
+  boxes; price values >1 char (e.g. `1.1`, `0.1`, `1e-9`) are rejected with "Only
+  one char(?) allowed!", confirming the length ch'
+- '[claude] VERIFIED_FACT=Server header is `openresty`; responses are Flask/Jinja-style
+  with alert boxes; price values >1 char (e.g. `1.1`, `0.1`, `1e-9`) are rejected
+  with "Only one char(?) allowed!", confirming'
+- Native Worker completed a bounded evidence-backed observation
+- POST /charge with id=4&price=万 (U+4E07 CJK numeral, single char) returns 操作成功 and
+  the real flag <FLAG>
+- /static/secretkey.txt leaks 'you-will-never-guess' (Flask SECRET_KEY); robots.txt
+  discloses the path
+- '[codex] POST /charge with id=4&price=万 returns 操作成功 and flag <FLAG>'
+- '[codex] FOUND_FLAG=<FLAG>'
+evidence_chain:
+- '[claude] VERIFIED_FACT=Server header is `openresty`; responses are Flask/Jinja-style
+  with alert boxes; price values >1 char (e.g. `1.1`, `0.1`, `1e-9`) are rejected
+  with "Only one char(?) allowed!", confirming'
+- /static/secretkey.txt leaks 'you-will-never-guess' (Flask SECRET_KEY); robots.txt
+  discloses the path
+- '[codex] POST /charge with id=4&price=万 returns 操作成功 and flag <FLAG>'
+- '[codex] FOUND_FLAG=<FLAG>'
+success_format: CTF2\{[^}]+\}
+source: ec70fa58-f5a7-4d57-8ff1-6c75a2713cdc (solver c430fd2d-cacf-4bad-a343-e08773cfc06d)
+notes: ''

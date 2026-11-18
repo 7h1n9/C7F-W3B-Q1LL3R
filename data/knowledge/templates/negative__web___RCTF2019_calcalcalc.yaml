@@ -1,0 +1,19 @@
+name: '[RCTF2019]calcalcalc'
+category: web
+keywords:
+- rctf2019
+- calcalcalc
+- unbreakable
+- reliable
+- calculator
+- think
+steps:
+- Comma ',' is blocked by the gateway in every position (1,2 / 1-1,1 / 1+1,1 / a,a
+  / x,y / ,1 all -> 400). Multi-arg call trick is not reachable; do not retry comma
+  payloads.
+- RACE_WORKER_TIMEOUT
+evidence_chain: []
+success_format: CTF2\{[^}]+\}
+source: 81cbff31-1fdd-43dd-a90e-36a3602a6315 (run 3b6dd7c9-9530-4624-b7c4-7e61b2a00907)
+notes: NO_VERIFIED_FLAG
+kind: negative

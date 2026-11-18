@@ -1,0 +1,9 @@
+# Workspace directories removed as unreferenced.
+# generated: 2026-10-08T09:28:55
+# root: D:\desktop\毕业设计\C7F-W3B-Q1LL3R\data\workspaces
+# count: 2
+# bytes: 5434191
+#
+# name	bytes	files
+3db1cafa-c300-46cb-bd3b-65569ee1490a	3622794	32
+46e6675e-bcc3-458e-a22d-78486fdbc2a0	1811397	16

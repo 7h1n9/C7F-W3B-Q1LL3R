@@ -1,0 +1,29 @@
+{
+  "name": "C7F-W3B-Q1LL3R POC 知识库",
+  "version": "1.0.0",
+  "source": "无影扫描 TscanPlus 逆向提取",
+  "date": "2026-10-22",
+  "statistics": {
+    "total_pocs": 500,
+    "cve_mapped": 104,
+    "categories": {
+      "injection": 343,
+      "file_ops": 183,
+      "auth_bypass": 253,
+      "deserialize": 23,
+      "ssrf_xxe": 41,
+      "info_leak": 307
+    },
+    "fingerprints": 3,
+    "dictionaries": 1
+  },
+  "engines": {
+    "xray": "支持 xpoc 格式（expression 引擎）",
+    "afrog": "支持 afrog 格式（info + rules）"
+  },
+  "usage": {
+    "poc_query": "按 CVE-ID / 漏洞名称 / 攻击类型查询",
+    "fingerprint": "用于资产识别和 Web 指纹匹配",
+    "dictionary": "用于暴力破解和弱口令检测"
+  }
+}

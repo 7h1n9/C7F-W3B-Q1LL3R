@@ -1,0 +1,24 @@
+name: BUU SQL COURSE 2
+category: web
+keywords:
+- buu
+- sql
+- course
+steps:
+- '[claude] (no output)'
+- Native Worker completed a bounded evidence-backed observation
+- '[codex] The target is a Vue `news_frontend` served by openresty. I’m reading the
+  live board and pulling the compiled frontend so the API and auth routes come from
+  the app’s own code rather than guessing paths'
+- '{"tool":"sql_boolean_compare","test_field":"query","success":true,"boolean_oracle_confirmed":true,"oracle_verified":true,"request_count":5}'
+- '[claude] Boolean SQL oracle confirmed on GET /backend/content_detail.php?id= :
+  appending "1 and 1=1" returns the news row while "1 and 1=2" returns [] (5-request
+  bounded test).'
+evidence_chain:
+- '{"tool":"sql_boolean_compare","test_field":"query","success":true,"boolean_oracle_confirmed":true,"oracle_verified":true,"request_count":5}'
+- '[claude] Boolean SQL oracle confirmed on GET /backend/content_detail.php?id= :
+  appending "1 and 1=1" returns the news row while "1 and 1=2" returns [] (5-request
+  bounded test).'
+success_format: CTF2\{[^}]+\}
+source: 55bac32e-c5b8-4cfe-ae9c-0f68b45cc380 (solver e98e08e1-9a81-47d5-a8a4-e186ade1e50e)
+notes: ''

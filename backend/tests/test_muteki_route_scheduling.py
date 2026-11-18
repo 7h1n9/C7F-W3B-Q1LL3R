@@ -43,7 +43,15 @@ def test_multi_engine_race_assigns_complementary_lanes(tmp_path) -> None:
     assert len({job.route_hash for job in jobs}) == 3
     assert len({job.branch_id for job in jobs}) == 3
     assert len({job.engine_attempt_id for job in jobs}) == 3
-    assert {job.payload["lane_key"] for job in jobs} == {
+    lane_keys = [job.payload["lane_key"] for job in jobs]
+    # Complementary, not duplicated: every concurrent engine gets its own lane.
+    assert len(set(lane_keys)) == 3
+    # ... and the first one exploits instead of scouting.  A recon-only roster
+    # spent the whole bounded Race window fingerprinting the target and let the
+    # Run expire with the public exploit never sent.
+    assert lane_keys[0] == "exploit:known-path"
+    assert {job.payload["lane_key"] for job in jobs} <= {
+        "exploit:known-path",
         "recon:public-endpoints",
         "recon:session-api",
         "recon:business-objects",

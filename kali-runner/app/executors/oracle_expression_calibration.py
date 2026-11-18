@@ -11,7 +11,6 @@ import hashlib
 import json
 import uuid
 from copy import deepcopy
-from datetime import UTC, datetime
 from typing import Any
 
 from fastapi import HTTPException
@@ -94,7 +93,6 @@ def _validate(args: dict[str, Any], request: JobRequest) -> tuple[dict[str, Any]
 
 
 def _oracle_value(result: dict[str, Any], oracle: dict[str, Any]) -> tuple[bool | None, bool]:
-    body = str(result.get("body") or result.get("body_excerpt") or "")
     value = _extract_json_path(result, str(oracle.get("json_field") or ""))
     present = value is not None
     if value == oracle.get("true_value", True):
@@ -204,8 +202,9 @@ async def oracle_expression_calibration(request: JobRequest) -> dict[str, Any]:
             grouped.setdefault("matrix", []).append(entry)
         entries = grouped.get("matrix", [])
         by_level = {level: [row for row in entries if int(row["level"]) == level] for level in sorted({int(row["level"]) for row in entries})}
-        passed = lambda level: any(row.get("passed") is True for row in by_level.get(level, []))
-        primitive = {str(row.get("primitive") or row.get("name")): row for row in entries}
+        def passed(level: int) -> bool:
+            return any(row.get("passed") is True for row in by_level.get(level, []))
+
         passed_rows = [row for row in entries if row.get("passed") is True]
         ascii_supported = any(row.get("passed") and str(row.get("primitive")) == "ascii" for row in entries)
         ord_supported = any(row.get("passed") and str(row.get("primitive")) == "ord" for row in entries)

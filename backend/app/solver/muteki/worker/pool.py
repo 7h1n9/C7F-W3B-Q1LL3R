@@ -5,7 +5,7 @@ from dataclasses import dataclass
 
 from ..graph import Intent
 from .engine import WorkerEngine, WorkerResult
-from .engines import ClaudeEngine, CodexCliEngine, CursorEngine
+from .engines import ENGINE_CLASSES
 
 
 @dataclass(frozen=True, slots=True)
@@ -22,9 +22,7 @@ class WorkerPool:
 
     def __init__(self, engines: dict[str, WorkerEngine] | None = None) -> None:
         self._engines = engines or {
-            "codex": CodexCliEngine(),
-            "claude": ClaudeEngine(),
-            "cursor": CursorEngine(),
+            name: factory() for name, factory in ENGINE_CLASSES.items()
         }
         self._active: set[str] = set()
         self._lock = asyncio.Lock()

@@ -1,0 +1,23 @@
+name: '[De1CTF 2019]SSRF Me'
+category: web
+keywords:
+- de1ctf
+- ssrf
+- github
+- ctftraining
+- delta_2019_web_ssrfme
+steps:
+- 'Public recon dead-ends (recon lane): /code.txt /app.py /flag /console /static/
+  all 404 at root; /static/../code.txt, /static/%2e%2e/code.txt 404; /static/secretkey.txt.bak
+  and /static/.git/HEAD return empty reply (openresty blocks), no traversal on plain
+  GET'
+- 'Recon lane DEADEND: /geneSign ignores action/param duplicates and X-Forwarded-For/Host
+  headers; only param matters; action is fixed ''scan''. /static/*.bak and .git return
+  empty reply from openresty. Host header ''localhost'' is blocked by upstream WAF
+  page.'
+- ROUND_BUDGET_EXHAUSTED_BEFORE_REASON
+evidence_chain: []
+success_format: CTF2\{[^}]+\}
+source: fde7053c-fac9-4e3e-ad48-315e7e7fa9e3 (run 047c424e-d52c-4029-a19b-ca89b70d86e2)
+notes: NO_VERIFIED_FLAG
+kind: negative

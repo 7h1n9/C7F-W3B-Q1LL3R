@@ -1,0 +1,27 @@
+name: '[ThinkPHP]IN SQL INJECTION'
+category: web
+keywords:
+- thinkphp
+- sql
+- injection
+- github
+- vulhub
+- blob
+- master
+- sqlinjection
+steps:
+- '[claude] ThinkPHP5 SQL injection via array parameter key (ids[0,updatexml(...)]=1)
+  triggers error page that exposes environment variables'
+- '[claude] Flag found in environment variables section of error response at line
+  906-909'
+- '[claude] FOUND_FLAG=<FLAG>'
+- Native Worker completed a bounded evidence-backed observation
+evidence_chain:
+- '[claude] ThinkPHP5 SQL injection via array parameter key (ids[0,updatexml(...)]=1)
+  triggers error page that exposes environment variables'
+- '[claude] Flag found in environment variables section of error response at line
+  906-909'
+- '[claude] FOUND_FLAG=<FLAG>'
+success_format: CTF2\{[^}]+\}
+source: f57f65f6-d966-4296-93db-8356829832ff (solver ce918525-10d3-455e-ab30-200d110a50fa)
+notes: ''

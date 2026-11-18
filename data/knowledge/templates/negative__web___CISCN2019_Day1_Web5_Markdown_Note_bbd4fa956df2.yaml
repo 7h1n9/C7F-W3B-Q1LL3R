@@ -1,0 +1,32 @@
+name: '[CISCN2019 总决赛 Day1 Web5]Markdown Note bbd4fa956df2'
+category: web
+keywords:
+- ciscn2019
+- day1
+- web5
+- markdown
+- note
+- github
+- imagemlt
+- ciscn_2019_final_pmarkdown
+steps:
+- Direct public flag/server-info paths (/flag, /flag.php, /flag.md, /readflag, /server-status,
+  /.htaccess) do not disclose content; /posts has no listing.
+- php://, data://, and http:// wrappers in md do not bypass fixed posts/ prefix; act
+  traversal/null/data probes render empty. php://filter remains useful in act.
+- act traversal/null/data probes and direct md php/data/http wrappers do not yield
+  content; /index.php?act=zzz and malformed md values return empty fragments.
+- POST debug parameter only creates a request to 0.0.0.0:80 in this public binary;
+  no useful public-endpoint output.
+- POST debug=... triggers a connection to invalid target 0.0.0.0:80 in this public
+  source binary and is not a useful public-endpoint primitive.
+- .md PHP_SELF path does not disclose rendered Markdown externally; measured response
+  is empty (Content-Length 0).
+- .md PHP_SELF paths do not return rendered Markdown to the external client in this
+  deployment; observed response is empty (Content-Length 0).
+- ROUND_BUDGET_EXHAUSTED_BEFORE_REASON
+evidence_chain: []
+success_format: CTF2\{[^}]+\}
+source: bbd4fa95-6df2-46f6-8c3d-8fc91573f1ed (run adadd246-0f51-448d-a0cc-17374c3affe1)
+notes: NO_VERIFIED_FLAG
+kind: negative

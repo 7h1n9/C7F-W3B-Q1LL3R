@@ -1,0 +1,24 @@
+name: benchmark:vulhub-tomcat-put
+category: web
+keywords:
+- benchmark
+- vulhub
+- tomcat
+- put
+- fileupload
+- case
+steps:
+- route_exhausted route=web:tomcat:put:write:location engine=openai-compatible:8deec5f3-5714-4baa-bf3b-4e4bbcd4b01a
+  worker=worker-4 intent=intent_1aeeb2a7e4ea4bd6a55aad74120ff9f2 reason=No new endpoint
+  remains on the assigned route.
+- route_exhausted route=route:5432f7558ea3dfb2 engine=openai-compatible:8deec5f3-5714-4baa-bf3b-4e4bbcd4b01a
+  worker=worker-7 intent=I-verify-36-125368fd reason=No new endpoint remains on the
+  assigned route.
+- route_exhausted route=route:1f0b630adc38fa3a engine=openai-compatible:8deec5f3-5714-4baa-bf3b-4e4bbcd4b01a
+  worker=worker-8 intent=I-verify-35-3f232ae2 reason=No new endpoint remains on the
+  assigned route.
+evidence_chain: []
+success_format: flag\{[^}]+\}
+source: 071eea73-95f6-4704-9e49-d863772e85fd (run c5563df9-52c4-4a56-8b48-6532d342e328)
+notes: NO_VERIFIED_FLAG
+kind: negative

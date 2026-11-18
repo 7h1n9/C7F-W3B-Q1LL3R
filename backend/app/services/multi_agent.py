@@ -26,7 +26,6 @@ from app.models.multi_agent import (
 )
 from app.models.run import Artifact, FlagCandidate, FlagProvenance, SolveRun, ToolCall
 from app.orchestration.state_machine import RunStatus, transition
-from app.services.failure_classification import normalize_failure_classification
 from app.schemas.multi_agent import (
     AgentRole,
     AgentRolePolicyContract,
@@ -41,6 +40,7 @@ from app.schemas.multi_agent import (
     PromotionStatus,
     SolutionChainNodeContract,
 )
+from app.services.failure_classification import normalize_failure_classification
 
 DEFAULT_POLICIES: tuple[AgentRolePolicyContract, ...] = (
     AgentRolePolicyContract(

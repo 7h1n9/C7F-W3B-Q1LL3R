@@ -1,0 +1,11 @@
+name: '[网鼎杯2018]Unfinish 2fff565eba6b'
+category: web
+keywords:
+- unfinish
+steps:
+- RACE_WORKER_TIMEOUT
+evidence_chain: []
+success_format: CTF2\{[^}]+\}
+source: 2fff565e-ba6b-4f87-a73b-ea9e58eefc80 (run 5e2d026f-1009-41f1-9017-21a79a36f09f)
+notes: NO_VERIFIED_FLAG
+kind: negative

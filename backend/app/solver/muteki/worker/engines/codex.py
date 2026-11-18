@@ -4,23 +4,15 @@ from .cli import CliWorkerEngine
 
 
 class CodexCliEngine(CliWorkerEngine):
-    """Headless Codex CLI adapter used by the standalone process driver."""
+    """Headless Codex CLI adapter used by the standalone process driver.
 
-    binary = "codex"
+    argv and parsing come from ``muteki.solver.cli_driver.CodexDriver``
+    (``exec --json`` plus the vendored sandbox/approval handling) so a Codex
+    Worker reports the same session id, token usage and structured-error
+    classification as the container path.
+    """
 
-    def engine_type(self) -> str:
-        return "codex"
-
-    def _command(self, prompt: str) -> list[str]:
-        return [
-            self.executable,
-            "exec",
-            "--json",
-            "--ignore-rules",
-            "--dangerously-bypass-approvals-and-sandbox",
-            "--",
-            prompt,
-        ]
+    engine = "codex"
 
 
 __all__ = ["CodexCliEngine"]

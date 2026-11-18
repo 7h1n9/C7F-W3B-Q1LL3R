@@ -9,7 +9,6 @@ from app.models.skill import RunSkillSnapshot, Skill
 from app.models.solver_state import SolverState
 from app.services.attack_chain import build_attack_chain, reduce_capability
 
-
 SECURITY_CONTEXT_KEYS = (
     "hypotheses",
     "validation_results",

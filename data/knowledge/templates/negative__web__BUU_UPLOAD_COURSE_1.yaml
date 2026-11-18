@@ -1,0 +1,13 @@
+name: BUU UPLOAD COURSE 1
+category: web
+keywords:
+- buu
+- upload
+- course
+steps:
+- NO_HEALTHY_WORKER_PROFILE
+evidence_chain: []
+success_format: CTF2\{[^}]+\}
+source: 8b3a39e2-ea10-4319-b86b-0b3069285c28 (run 479b5a9b-c282-4efd-bb79-65b4b6f1b616)
+notes: NO_HEALTHY_WORKER_PROFILE
+kind: negative

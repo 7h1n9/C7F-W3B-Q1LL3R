@@ -1,0 +1,29 @@
+name: BUU BURP COURSE 1
+category: web
+keywords:
+- buu
+- burp
+- course
+steps:
+- '[claude] Target root returns "只能本地访问。" (local-only gate) but the app trusts the
+  `X-Real-IP` request header as client IP. Sending `X-Real-IP: 127.0.0.1` bypasses
+  the gate and returns a login page. (X-Forwarded-'
+- '[claude] Login page HTML leaks prefilled credentials in the form: username=`admin`,
+  password=`wwoj2wio2jw93ey43eiuwdjnewkndjlwe`.'
+- '[claude] POST `username=admin&password=wwoj2wio2jw93ey43eiuwdjnewkndjlwe` with
+  header `X-Real-IP: 127.0.0.1` to `http://direct-ctf2.dasctf.com:28890/` returns
+  `登录成功！` followed by the flag. Transcript: `evidenc'
+- '[claude] FOUND_FLAG=<FLAG>'
+evidence_chain:
+- '[claude] Target root returns "只能本地访问。" (local-only gate) but the app trusts the
+  `X-Real-IP` request header as client IP. Sending `X-Real-IP: 127.0.0.1` bypasses
+  the gate and returns a login page. (X-Forwarded-'
+- '[claude] Login page HTML leaks prefilled credentials in the form: username=`admin`,
+  password=`wwoj2wio2jw93ey43eiuwdjnewkndjlwe`.'
+- '[claude] POST `username=admin&password=wwoj2wio2jw93ey43eiuwdjnewkndjlwe` with
+  header `X-Real-IP: 127.0.0.1` to `http://direct-ctf2.dasctf.com:28890/` returns
+  `登录成功！` followed by the flag. Transcript: `evidenc'
+- '[claude] FOUND_FLAG=<FLAG>'
+success_format: CTF2\{[^}]+\}
+source: cd170128-4517-4b1e-b368-84b3ef636558 (solver 7ba9b589-1176-42f9-a1fb-b9c743a4d135)
+notes: ''

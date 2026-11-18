@@ -4,7 +4,7 @@ from sqlalchemy.pool import StaticPool
 
 from app.models import Base
 from app.models.challenge import Challenge
-from app.models.run import RunEvent, RunUserInput, SolveRun
+from app.models.run import RunUserInput, SolveRun
 from app.services.events import event_service
 from app.services.metadata_stage_decider import metadata_stage_decider
 from app.services.run_finalizer import run_finalizer

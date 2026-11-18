@@ -42,16 +42,19 @@ def intent_prompt(intent: Intent) -> str:
 
 
 def get_engine(engine_type: str, *, cli: bool = False) -> WorkerEngine:
-    """Create one of the supported engines without importing optional CLIs eagerly."""
+    """Create one of the supported engines without importing optional CLIs eagerly.
 
-    from .engines import ClaudeEngine, CodexCliEngine, CursorEngine
+    The registry lives in ``.engines`` next to the classes themselves, so adding
+    an engine does not need a second parallel name map here.
 
-    engines = {
-        "codex": CodexCliEngine,
-        "claude": ClaudeEngine,
-        "cursor": CursorEngine,
-    }
-    factory = engines.get(str(engine_type).casefold())
+    ``cli`` is accepted for call-site compatibility and does not change the
+    result: every engine currently registered is a CLI engine.
+    """
+
+    del cli
+    from .engines import ENGINE_CLASSES
+
+    factory = ENGINE_CLASSES.get(str(engine_type or "").strip().casefold())
     if factory is None:
         raise ValueError(f"unsupported Muteki engine: {engine_type}")
     return factory()

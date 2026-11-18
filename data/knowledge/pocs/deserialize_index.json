@@ -1,0 +1,140 @@
+[
+  {
+    "id": "yunanbao-authservice-fastjson-rce",
+    "name": "云匣子 FastJson反序列化RCE漏洞",
+    "file": "afrog\\afrog-pocs\\vulnerability\\yunanbao-authservice-fastjson-rce.yaml",
+    "score": 12
+  },
+  {
+    "id": "xiruanyun-xms-detect",
+    "name": "西软云XMS",
+    "file": "afrog\\afrog-pocs\\fingerprinting\\xiruanyun-xms-detect.yaml",
+    "score": 11
+  },
+  {
+    "id": "CVE-2023-25194",
+    "name": "Apache Druid kafka RCE 漏洞",
+    "file": "afrog\\afrog-pocs\\CVE\\2023\\CVE-2023-25194.yaml",
+    "score": 10
+  },
+  {
+    "id": "hikvision-applyautologinticket-rce",
+    "name": "海康威视综合安防管理平台 applyAutoLoginTicket RCE",
+    "file": "afrog\\afrog-pocs\\vulnerability\\hikvision-applyautologinticket-rce.yaml",
+    "score": 10
+  },
+  {
+    "id": "hikvision-center-fastjson-rce",
+    "name": "海康威视综合安防-运行管理中心-Fastjson-远程命令执行漏洞",
+    "file": "afrog\\afrog-pocs\\vulnerability\\hikvision-center-fastjson-rce.yaml",
+    "score": 10
+  },
+  {
+    "id": "kingdee-cloud-user-deserialization-rce",
+    "name": "金蝶云星空 UserService 反序列化远程代码执行",
+    "file": "afrog\\afrog-pocs\\vulnerability\\kingdee-cloud-user-deserialization-rce.yaml",
+    "score": 10
+  },
+  {
+    "id": "CVE-2017-10271",
+    "name": "WebLogic XMLDecoder 反序列化漏洞 CVE-2017-10271",
+    "file": "afrog\\afrog-pocs\\CVE\\2017\\CVE-2017-10271.yaml",
+    "score": 8
+  },
+  {
+    "id": "CVE-2017-7504",
+    "name": "JBoss 4.x JBossMQ JMS 反序列化漏洞",
+    "file": "afrog\\afrog-pocs\\CVE\\2017\\CVE-2017-7504.yaml",
+    "score": 8
+  },
+  {
+    "id": "CVE-2020-5515",
+    "name": "Gila CMS 1.11.8 SQL Injection.",
+    "file": "afrog\\afrog-pocs\\CVE\\2020\\CVE-2020-5515.yaml",
+    "score": 8
+  },
+  {
+    "id": "CVE-2020-7961",
+    "name": "Liferay Portal RCE 反序列化命令执行漏洞",
+    "file": "afrog\\afrog-pocs\\CVE\\2020\\CVE-2020-7961.yaml",
+    "score": 8
+  },
+  {
+    "id": "CVE-2021-3129",
+    "name": "LARAVEL <= V8.4.2 DEBUG MODE - REMOTE CODE EXECUTION",
+    "file": "afrog\\afrog-pocs\\CVE\\2021\\CVE-2021-3129.yaml",
+    "score": 8
+  },
+  {
+    "id": "CVE-2022-33107",
+    "name": "ThinkPHP 6.0.12 反序列化 RCE",
+    "file": "afrog\\afrog-pocs\\CVE\\2022\\CVE-2022-33107.yaml",
+    "score": 8
+  },
+  {
+    "id": "CVD-2023-3118",
+    "name": "用友 UFIDA ActionHandlerServlet 反序列化漏洞",
+    "file": "afrog\\afrog-pocs\\CVE\\2023\\CVD-2023-3118.yaml",
+    "score": 8
+  },
+  {
+    "id": "CVE-2023-29300",
+    "name": "Adobe ColdFusion 序列化漏洞",
+    "file": "afrog\\afrog-pocs\\CVE\\2023\\CVE-2023-29300.yaml",
+    "score": 8
+  },
+  {
+    "id": "CVE-2023-38204",
+    "name": "Adobe ColdFusion 序列化漏洞",
+    "file": "afrog\\afrog-pocs\\CVE\\2023\\CVE-2023-38204.yaml",
+    "score": 8
+  },
+  {
+    "id": "CVE-2025-49113",
+    "name": "Roundcube Webmail - Remote Code Execution",
+    "file": "afrog\\afrog-pocs\\CVE\\2025\\CVE-2025-49113.yaml",
+    "score": 8
+  },
+  {
+    "id": "dahua-icc-sysusers-random-fastjson-rce",
+    "name": "大华ICC智能物联综合管理平台存在fastjson漏洞",
+    "file": "afrog\\afrog-pocs\\vulnerability\\dahua-icc-sysusers-random-fastjson-rce.yaml",
+    "score": 8
+  },
+  {
+    "id": "e-office10-atuh-file-phar-deserialization-rce",
+    "name": "泛微E-office 10 atuh-file存在phar反序列化漏洞",
+    "file": "afrog\\afrog-pocs\\vulnerability\\e-office10-atuh-file-phar-deserialization-rce.yaml",
+    "score": 8
+  },
+  {
+    "id": "fastjson-rce-all",
+    "name": "Fastjson Deserialization RCE",
+    "file": "afrog\\afrog-pocs\\vulnerability\\fastjson-rce-all.yaml",
+    "score": 8
+  },
+  {
+    "id": "hikvision-fastjson-rce",
+    "name": "​海康威视综合安防管理平台 Fastjson 远程命令执行漏洞",
+    "file": "afrog\\afrog-pocs\\vulnerability\\hikvision-fastjson-rce.yaml",
+    "score": 8
+  },
+  {
+    "id": "kingdee-deserialization-rce",
+    "name": "金蝶云星空反序列化rce",
+    "file": "afrog\\afrog-pocs\\vulnerability\\kingdee-deserialization-rce.yaml",
+    "score": 8
+  },
+  {
+    "id": "nacos-jraftserver-deserialization-rce",
+    "name": "Nacos Jraft 远程代码执行 RCE",
+    "file": "afrog\\afrog-pocs\\vulnerability\\nacos-jraftserver-deserialization-rce.yaml",
+    "score": 8
+  },
+  {
+    "id": "seeyon-m1-usertokenservice-rce",
+    "name": "致远OA M1 server 反序列化命令执行漏洞",
+    "file": "afrog\\afrog-pocs\\vulnerability\\seeyon-m1-usertokenservice-rce.yaml",
+    "score": 8
+  }
+]

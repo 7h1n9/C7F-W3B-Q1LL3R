@@ -1,0 +1,23 @@
+name: bestphp's revenge
+category: web
+keywords:
+- bestphp
+- revenge
+steps:
+- RACE_WORKER_TIMEOUT
+- '[codex] Dirbrute with dirb/common.txt x .php/.txt/.bak/.swp/.zip/.html/.phps produced
+  zero real files beyond flag.php and health -- all other hits are the 2239B catch-all;
+  /admin_c, /t.bak, /flag.php.bak alia'
+- '[codex] Case/encoding aliasing does not expose a second copy of flag.php: /FLAG.PHP,
+  /flag.phP, /flag%2ephp, /./flag.php, /flag.php%20 all return the same 236B page;
+  /Flag.php yields the nginx 404 page (case'
+- '[codex] Framework file-access probes all resolve to the same nginx 404: /index.php/flag.php,
+  /a.php/b.php, /index.php%2fa.php; /../etc/passwd and encoded variants are rejected
+  400 by nginx, no traversal surfa'
+- RECOVERY_CANDIDATES_REJECTED 2 value(s) under the challenge banner did not satisfy
+  the gate
+evidence_chain: []
+success_format: CTF2\{[^}]+\}
+source: 5a56306b-24f1-49e4-a7f4-a1e0aca723ac (run caff080a-48c6-4c6f-b5c0-10a63ae9ea46)
+notes: NO_VERIFIED_FLAG
+kind: negative

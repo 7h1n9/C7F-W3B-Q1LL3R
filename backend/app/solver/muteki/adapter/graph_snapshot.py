@@ -212,6 +212,32 @@ def _summary_zh(content: str) -> str:
     return translated if re.search(r"[\u4e00-\u9fff]", translated) else f"已确认条件：{translated}"
 
 
+def _event_detail(event: Any) -> dict[str, Any]:
+    """Re-derive an event's inner detail dict the same way the loop does."""
+
+    payload = dict(getattr(event, "payload", None) or {})
+    detail = payload.get("payload")
+    return dict(detail) if isinstance(detail, dict) else {}
+
+
+def _timeline_event(event: Any) -> dict[str, Any]:
+    """Flatten one Envelope into the ordered timeline the report writer reads.
+
+    ``kind`` is NOT an Envelope attribute — it lives in the payload under
+    ``upstream_event_type`` (the same field the projection loop switches on), so
+    reading ``event.kind`` here would raise.
+    """
+
+    payload = dict(getattr(event, "payload", None) or {})
+    return {
+        "sequence": int(getattr(event, "sequence", 0) or 0),
+        "actor": str(getattr(event, "actor", "") or ""),
+        "kind": str(payload.get("upstream_event_type") or ""),
+        "verified": bool(getattr(event, "verified", False)),
+        "detail": _event_detail(event),
+    }
+
+
 def read_native_graph_snapshot(
     *,
     db_path: str | Path,
@@ -284,6 +310,14 @@ def read_native_graph_snapshot(
         if kind == "fact_added":
             refs = _evidence_refs(detail, raw_events_by_sequence.get(sequence, {}))
             state = fact_states.get(sequence, {})
+            state_name = str(state.get("state") or "unresolved")
+            # A fact that reached a terminal review state is a *conclusion*.
+            # Showing it next to the pending ones is what made the board look
+            # like an ever-growing "待验证" pile: the Review pass was finally
+            # allowed to reject/merge candidates, and those verdicts have to be
+            # visible as verdicts rather than as still-pending questions.
+            if state_name in {"rejected", "merged", "superseded"} or state.get("retired"):
+                continue
             effective_verified = state.get("verified_effective")
             verified = bool(event.verified) if effective_verified is None else bool(effective_verified)
             facts.append(
@@ -292,10 +326,10 @@ def read_native_graph_snapshot(
                     "content": str(detail.get("fact") or detail.get("content") or ""),
                     "verified": verified,
                     "evidence_refs": refs,
+                    "state": state_name,
                 }
             )
             content = facts[-1]["content"]
-            state_name = str(state.get("state") or "unresolved")
             if (
                 verified
                 and not state.get("retired")
@@ -379,6 +413,11 @@ def read_native_graph_snapshot(
         "run_id": str(run_id),
         "revision": max((int(event.sequence or 0) for event in events), default=0),
         "facts": facts,
+        # Appended last (and additive) because a Run with no captured CLI
+        # transcript has nothing else that preserves ORDER: the report writer
+        # needs "what happened first" to narrate a solution honestly, and a
+        # sorted list of facts cannot express that (facts carry no turn index).
+        "events": [_timeline_event(event) for event in events][:200],
         "key_conditions": key_conditions,
         "intents": list(intents.values()),
         "dead_ends": dead_ends,

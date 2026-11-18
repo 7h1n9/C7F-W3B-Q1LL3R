@@ -9,10 +9,47 @@ param(
     [int]$FrontendPort = 5173,
     [string]$DatabaseUrl = "",
     [string]$RunnerUrl = "http://192.168.236.128:8091",
-    [string]$MutekiWorkerImage = "muteki-worker:codex-0.147.0"
+    [string]$MutekiWorkerImage = "muteki-worker:codex-0.147.0",
+    # Protocol switch: a local translation shim so a relay that only serves one
+    # OpenAI dialect (or refuses /v1/messages outright) can still back the Codex,
+    # Claude and OpenAI-compatible channels.  It is skipped unless an upstream is
+    # supplied, because a switch with no upstream answers 503 on every path.
+    [switch]$SkipSwitch,
+    [int]$SwitchPort = 8790,
+    [string]$SwitchUpstreamBaseUrl = "",
+    [string]$SwitchUpstreamApiKey = "",
+    [ValidateSet("chat_completions", "responses")]
+    [string]$SwitchUpstreamWire = "chat_completions",
+    # Optional "old=new,old2=new2" model alias table, applied upstream-side.
+    [string]$SwitchModelAliases = ""
 )
 
 $ErrorActionPreference = "Stop"
+
+# A Windows environment block may carry the same variable twice in different
+# cases (``HTTP_PROXY`` and ``http_proxy``).  PowerShell 5.1 enumerates the block
+# into a case-insensitive dictionary, so those duplicates make the Env: provider
+# throw -- and, more importantly, make ``Start-Process`` fail outright with
+# "Item has already been added", because it builds a ProcessStartInfo
+# environment from that block.  The symptom is a stack trace from deep inside
+# Start-Process and a service that never launches.
+#
+# The provider throwing is the detector: a healthy block enumerates fine, so
+# nothing is touched on a machine with no duplicates.  Only when it does throw
+# are the lower-case proxy spellings dropped -- Windows variable lookup is
+# case-insensitive, so this cannot change what any child process sees.
+$environmentBlockHasDuplicates = $false
+try {
+    Get-ChildItem Env: | Out-Null
+} catch {
+    $environmentBlockHasDuplicates = $true
+}
+if ($environmentBlockHasDuplicates) {
+    Write-Warning "[env] duplicate case-insensitive environment variables detected; clearing lower-case proxy aliases so Start-Process can run."
+    foreach ($duplicateName in @("http_proxy", "https_proxy", "all_proxy", "no_proxy")) {
+        [System.Environment]::SetEnvironmentVariable($duplicateName, $null, "Process")
+    }
+}
 
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $venvDir = Join-Path $repoRoot ".venv3.11"
@@ -195,12 +232,21 @@ function Invoke-CommandInDirectory {
 
     Write-Host "[$Name] $Command $($Arguments -join ' ')"
     Push-Location $WorkingDirectory
+    # Native commands write ordinary progress to stderr (docker compose prints
+    # "Container ... Running", alembic prints its INFO banner).  With the
+    # script-wide ErrorActionPreference=Stop those lines become a terminating
+    # NativeCommandError as soon as the caller redirects or captures the output,
+    # so success is judged by the exit code -- which the check below already does
+    # -- instead of by whether a command happened to write to stderr.
+    $previousPreference = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
     try {
         & $Command @Arguments
         if ($LASTEXITCODE -ne 0) {
             throw "$Name failed with exit code $LASTEXITCODE"
         }
     } finally {
+        $ErrorActionPreference = $previousPreference
         Pop-Location
     }
 }
@@ -213,7 +259,15 @@ function Start-BackgroundService {
         [Parameter(Mandatory = $true)][string]$Command,
         [Parameter(Mandatory = $true)][string[]]$Arguments,
         [Parameter(Mandatory = $true)][string]$HealthyUri,
-        [Parameter(Mandatory = $true)][string]$ProcessPattern
+        [Parameter(Mandatory = $true)][string]$ProcessPattern,
+        # Time allowed for the port to open after spawn.  The backend binds its
+        # socket only after the FastAPI lifespan finishes, and that lifespan
+        # performs a reconciliation pass whose cost grows with the number of
+        # persisted Runs (one row scan per Run plus a container teardown per
+        # Muteki Run).  On a database that has accumulated hundreds of Runs this
+        # routinely needs more than a minute, so the backend gets a longer
+        # window than the frontend.
+        [int]$ReadyTimeoutSeconds = 60
     )
 
     # Start-All is intentionally idempotent: every invocation reconciles old
@@ -236,7 +290,7 @@ function Start-BackgroundService {
         $started = Start-Process -FilePath $Command -ArgumentList $Arguments -WorkingDirectory $WorkingDirectory -RedirectStandardOutput $stdout -RedirectStandardError $stderr -WindowStyle Hidden -PassThru
         Set-Content -LiteralPath (Join-Path $pidsRoot "$Name.pid") -Value $started.Id -Encoding ascii
         try {
-            Wait-PortListening -Port $Port -Name $Name -TimeoutSeconds 60
+            Wait-PortListening -Port $Port -Name $Name -TimeoutSeconds $ReadyTimeoutSeconds
             Wait-HttpOk -Uri $HealthyUri -Name $Name -TimeoutSeconds 60 | Out-Null
             Write-Host "[$Name] healthy."
             return
@@ -265,9 +319,19 @@ if (-not $SkipDocker) {
     if ($dockerCmd) {
         try {
             Write-Host "[docker] starting mysql..."
-            & docker compose up -d mysql | Out-Null
-            if ($LASTEXITCODE -ne 0) {
-                throw "docker compose up failed with exit code $LASTEXITCODE"
+            # docker compose reports "Container ... Running" on stderr, which the
+            # script-wide ErrorActionPreference=Stop would turn into a terminating
+            # error.  The exit code below is the real signal.
+            $previousPreference = $ErrorActionPreference
+            $ErrorActionPreference = "Continue"
+            try {
+                & docker compose up -d mysql | Out-Null
+                $composeExit = $LASTEXITCODE
+            } finally {
+                $ErrorActionPreference = $previousPreference
+            }
+            if ($composeExit -ne 0) {
+                throw "docker compose up failed with exit code $composeExit"
             }
 
             $deadline = (Get-Date).AddMinutes(3)
@@ -301,8 +365,15 @@ if (-not $SkipDocker) {
 
 Set-EnvValue -Name "APP_DATABASE_URL" -Value $databaseUrl
 Set-EnvValue -Name "APP_WORKSPACE_ROOT" -Value "../data/workspaces"
-Set-EnvValue -Name "APP_RUNNER_URL" -Value $backendRunnerUrl
-Set-EnvValue -Name "APP_RUNNER_API_TOKEN" -Value $runnerToken
+# The legacy Kali Runner is a compatibility setting only.  The backend gates every
+# use of it behind APP_LEGACY_KALI_RUNNER, which is off by default: Muteki executes
+# tools in container-native Workers, so an unreachable Runner URL must not gate
+# readiness, tool manifests or permissions.
+if ($env:APP_LEGACY_KALI_RUNNER -eq "1") {
+    Set-EnvValue -Name "APP_RUNNER_URL" -Value $backendRunnerUrl
+    Set-EnvValue -Name "APP_RUNNER_API_TOKEN" -Value $runnerToken
+    Set-EnvValue -Name "APP_LEGACY_KALI_RUNNER" -Value "1"
+}
 Set-EnvValue -Name "APP_CORS_ORIGINS" -Value $backendCorsOrigins
 Set-EnvValue -Name "APP_ENCRYPTION_KEY" -Value $backendEncryptionKey
 Set-EnvValue -Name "APP_CTFCTL_INTERNAL_ACCESS_KEY" -Value $ctfctlAccessKey
@@ -318,14 +389,36 @@ Set-EnvValue -Name "MUTEKI_CONTROL_BIND" -Value "0.0.0.0"
 Set-EnvValue -Name "MUTEKI_CONTROL_PORT" -Value "9100"
 Set-EnvValue -Name "MUTEKI_WORKER_IMAGE" -Value $MutekiWorkerImage
 
-Set-EnvValue -Name "RUNNER_WORKSPACE_ROOT" -Value "../data/workspaces"
-Set-EnvValue -Name "RUNNER_MAX_OUTPUT_BYTES" -Value "1048576"
-Set-EnvValue -Name "RUNNER_JOB_TIMEOUT_SECONDS" -Value "30"
-Set-EnvValue -Name "RUNNER_API_TOKEN" -Value $runnerToken
-Set-EnvValue -Name "RUNNER_ENVIRONMENT" -Value "development"
+if ($env:APP_LEGACY_KALI_RUNNER -eq "1") {
+    Set-EnvValue -Name "RUNNER_WORKSPACE_ROOT" -Value "../data/workspaces"
+    Set-EnvValue -Name "RUNNER_MAX_OUTPUT_BYTES" -Value "1048576"
+    Set-EnvValue -Name "RUNNER_JOB_TIMEOUT_SECONDS" -Value "30"
+    Set-EnvValue -Name "RUNNER_API_TOKEN" -Value $runnerToken
+    Set-EnvValue -Name "RUNNER_ENVIRONMENT" -Value "development"
+}
 
 Set-EnvValue -Name "CTFCTL_ACCESS_KEY" -Value $ctfctlAccessKey
 Set-EnvValue -Name "VITE_API_BASE_URL" -Value $frontendApiBase
+
+# ── protocol switch ─────────────────────────────────────────────────────────
+# An empty parameter falls back to an already-exported value so the upstream key
+# can stay out of the command line (and out of shell history).
+$switchBaseUrl = if ($SwitchUpstreamBaseUrl) { $SwitchUpstreamBaseUrl } else { [string]$env:SWITCH_UPSTREAM_BASE_URL }
+$switchApiKey = if ($SwitchUpstreamApiKey) { $SwitchUpstreamApiKey } else { [string]$env:SWITCH_UPSTREAM_API_KEY }
+$switchEnabled = (-not $SkipSwitch) -and (-not [string]::IsNullOrWhiteSpace($switchBaseUrl))
+
+if ($switchEnabled) {
+    Set-EnvValue -Name "SWITCH_UPSTREAM_BASE_URL" -Value $switchBaseUrl
+    Set-EnvValue -Name "SWITCH_UPSTREAM_API_KEY" -Value $switchApiKey
+    Set-EnvValue -Name "SWITCH_UPSTREAM_WIRE" -Value $SwitchUpstreamWire
+    Set-EnvValue -Name "SWITCH_HOST" -Value "127.0.0.1"
+    Set-EnvValue -Name "SWITCH_PORT" -Value "$SwitchPort"
+    if ($SwitchModelAliases) {
+        Set-EnvValue -Name "SWITCH_MODEL_ALIASES" -Value $SwitchModelAliases
+    }
+} else {
+    Write-Host "[switch] not started: no upstream configured. Pass -SwitchUpstreamBaseUrl (and -SwitchUpstreamApiKey) to enable it."
+}
 
 $npmCmd = (Get-Command npm.cmd -ErrorAction SilentlyContinue)
 if ($npmCmd -and $npmCmd.Source) {
@@ -352,19 +445,28 @@ if (-not (Test-Path (Join-Path $frontendDir "node_modules"))) {
 Write-Host "[migrate] applying backend migrations..."
 Invoke-CommandInDirectory -Name "backend migrate" -WorkingDirectory $backendDir -Command $pythonExe -Arguments @("-m", "alembic", "upgrade", "head")
 
-# Muteki's production execution boundary is container-native. The legacy Kali
-# Runner URL remains an environment-level compatibility setting for old paths,
-# but Start-All must not install, start, stop, or health-check that service.
-Write-Host "[runner] legacy Kali Runner is optional and not managed by Start-All."
-Start-BackgroundService -Name "backend" -Port $BackendPort -WorkingDirectory $backendDir -Command $pythonExe -Arguments @("-m", "uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", "$BackendPort") -HealthyUri "http://127.0.0.1:$BackendPort/api/v1/health/ready" -ProcessPattern "app\.main:app.*--port\s+$BackendPort"
+# Muteki's production execution boundary is container-native.  The legacy Kali
+# Runner has been retired as an execution path; Start-All does not install, start,
+# stop or health-check it, and the backend is told not to depend on it either.
+# Set APP_LEGACY_KALI_RUNNER=1 in the environment to opt back in.
+Write-Host "[runner] legacy Kali Runner disabled (container-native Workers)."
+
+# Start the switch before the backend so the model channels it backs are already
+# reachable when the settings page (or a Run) first probes them.
+if ($switchEnabled) {
+    Start-BackgroundService -Name "switch" -Port $SwitchPort -WorkingDirectory $repoRoot -Command $pythonExe -Arguments @("-m", "protocol_switch") -HealthyUri "http://127.0.0.1:$SwitchPort/health" -ProcessPattern "-m\s+protocol_switch" -ReadyTimeoutSeconds 60
+}
+
+Start-BackgroundService -Name "backend" -Port $BackendPort -WorkingDirectory $backendDir -Command $pythonExe -Arguments @("-m", "uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", "$BackendPort") -HealthyUri "http://127.0.0.1:$BackendPort/api/v1/health/ready" -ProcessPattern "app\.main:app.*--port\s+$BackendPort" -ReadyTimeoutSeconds 180
 
 Start-BackgroundService -Name "frontend" -Port $FrontendPort -WorkingDirectory $frontendDir -Command $npmExe -Arguments @("run", "dev", "--", "--host", "127.0.0.1", "--port", "$FrontendPort") -HealthyUri "http://127.0.0.1:$FrontendPort" -ProcessPattern "frontend[\\/]node_modules.*vite"
 
 Write-Host ""
 Write-Host "[state]"
 Write-Host "  docker mysql : $([bool]$dockerUsed)"
+Write-Host "  switch       : $(if ($switchEnabled) { "http://127.0.0.1:$SwitchPort (upstream $SwitchUpstreamWire -> $switchBaseUrl)" } else { "disabled" })"
 Write-Host "  backend      : http://127.0.0.1:$BackendPort/api/v1/health/ready"
-Write-Host "  runner       : optional legacy service (not managed)"
+Write-Host "  runner       : $(if ($env:APP_LEGACY_KALI_RUNNER -eq '1') { "legacy enabled ($RunnerUrl)" } else { "disabled (container-native Workers)" })"
 Write-Host "  frontend     : http://127.0.0.1:$FrontendPort"
 Write-Host "  logs         : $logsRoot"
 Stop-Transcript | Out-Null

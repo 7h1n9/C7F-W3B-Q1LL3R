@@ -1,0 +1,18 @@
+name: Linux Kernel Cow
+category: web
+keywords:
+- linux
+- kernel
+- cow
+- ssh
+- root
+steps:
+- WORKER_TIMEOUT
+- '[claude] The assigned direction (CLASSIFY_CHALLENGE via http_request) is concluded:
+  the target port speaks SSH only, so HTTP-layer reconnaissance has nothing to classify
+  — further probing requires SSH-domain t'
+evidence_chain: []
+success_format: flag\{[^}]+\}
+source: 7a653793-41e0-46bb-9d97-d34774620957 (run fe7b228a-8b9e-48ef-8648-6fe85da8d0e8)
+notes: NO_VERIFIED_FLAG
+kind: negative

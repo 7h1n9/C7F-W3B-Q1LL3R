@@ -92,6 +92,7 @@ def decide_required_stage(*, asset_warranty_mysql: bool, verified_fact_keys: set
 
 async def decide_required_stage_for_run(session, run, challenge) -> StageDecision:
     from sqlalchemy import select
+
     from app.models.multi_agent import VerifiedFact
     from app.models.run import FlagCandidate, ToolCall
     from app.models.solver_state import SolverState

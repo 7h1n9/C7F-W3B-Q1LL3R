@@ -21,7 +21,11 @@ from app.models.multi_agent import AnalysisReview, EvidenceLedger, PlannerPropos
 from app.models.run import Hypothesis, SolveRun, ToolCall
 from app.models.solver_state import SolverState
 from app.schemas.multi_agent import CompiledApprovedAction
-from app.security.task_policy import get_allowed_tools, validate_tools, vulnerability_type_from_metadata
+from app.security.task_policy import (
+    get_allowed_tools,
+    validate_tools,
+    vulnerability_type_from_metadata,
+)
 from app.services.strategy_continuation import normalize_strategy
 from app.tools.registry import ToolDefinition, load_tool_definitions
 

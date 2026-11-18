@@ -1,0 +1,25 @@
+name: '[FBCTF2019]Products Manager'
+category: web
+keywords:
+- fbctf2019
+- products
+- manager
+steps:
+- '[codex] FBCTF2019 Products Manager: `POST /view.php name=facebook&secret=wkjhduiefgheruifertyf7834tr349ft7dgweif`
+  returns `Product details:<ul><li>facebook</li><li><FLAG></'
+- '[codex] Public endpoints are only `/` (top 5 names), `/add.php`, `/view.php`; all
+  SQL is parameterized (`db.php` uses `bind_param`), descriptions/names are `htmlentities()`-escaped
+  on output.'
+- '[codex] Framework surface: PHP 7.3.11 behind openresty/nginx 1.16.1; `header.php`/`footer.php`
+  are directly fetchable; nonexistent `.php` names return nginx 404; `db.php`/`config.php`
+  return 200 with empty bo'
+- '[codex] DEADEND=SQLi/format-string tricks via `name` (quote/`%`/`&`/NUL/HPP/array/JSON)
+  — parameterized queries plus `htmlentities` make them inert; view.php ignores extra
+  fields such as `description`.'
+evidence_chain:
+- '[codex] DEADEND=SQLi/format-string tricks via `name` (quote/`%`/`&`/NUL/HPP/array/JSON)
+  — parameterized queries plus `htmlentities` make them inert; view.php ignores extra
+  fields such as `description`.'
+success_format: CTF2\{[^}]+\}
+source: 04f07812-2de0-43c4-997a-6b9adc6b8e46 (solver 1a51975b-dbb8-430e-aa3d-7bc05c26aaab)
+notes: ''

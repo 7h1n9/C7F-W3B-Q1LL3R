@@ -19,9 +19,9 @@ import signal as _signal
 import threading
 import time
 import uuid
-from typing import Any, Callable, Optional
+from typing import Callable, Optional
 
-from muteki.solver.cli_driver import CliResult, StreamStep
+from muteki.solver.cli_driver import CliResult, StreamStep, capture_cli_conversation
 from muteki.solver.control_receiver import ControlError, ControlReceiver, _SupervisorLink
 
 # re-export so existing `from control_client import ControlError` keeps working.
@@ -218,6 +218,7 @@ def run_cli_streaming_rcp(
     if oom_killed:
         timed_out = False  # an OOM is never also a timeout
 
+    capture_cli_conversation(driver, "".join(out_lines), "".join(stderr_lines))
     res = driver.parse("".join(out_lines), "".join(stderr_lines))
     res.timed_out = timed_out
     res.oom_killed = oom_killed

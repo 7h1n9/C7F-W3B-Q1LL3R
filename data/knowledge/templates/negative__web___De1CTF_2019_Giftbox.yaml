@@ -1,0 +1,15 @@
+name: '[De1CTF 2019]Giftbox'
+category: web
+keywords:
+- de1ctf
+- giftbox
+- github
+- impakho
+- de1ctf_giftbox
+steps:
+- RACE_WORKER_TIMEOUT
+evidence_chain: []
+success_format: CTF2\{[^}]+\}
+source: 3837911c-45fc-418c-b296-00e2f97e87a3 (run d020d4a7-9307-4a1b-ab7d-4392088d7349)
+notes: NO_VERIFIED_FLAG
+kind: negative

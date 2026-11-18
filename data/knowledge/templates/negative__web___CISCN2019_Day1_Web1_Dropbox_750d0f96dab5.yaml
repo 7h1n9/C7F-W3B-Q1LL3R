@@ -1,0 +1,21 @@
+name: '[CISCN2019 华北赛区 Day1 Web1]Dropbox 750d0f96dab5'
+category: web
+keywords:
+- ciscn2019
+- day1
+- web1
+- dropbox
+steps:
+- 'delete.php itself is the thing that broke: calling it with filename=../../class.php
+  unlinked /var/www/html/class.php (open() only checks file_exists). Never call delete.php
+  with a webroot path.'
+- 'upload.php: all slashes in the client filename are neutralized (../, ..%2F, //,
+  absolute paths) -> file always lands in uploads/<sha1(username.salt)>/; uploaded
+  .png/.jpg is served RAW, never executed by nginx (only \.php$ executes).'
+- nginx path traversal with %2f returns 400; try_files sends any unknown /x.php to
+  the nginx 404 (=nothing executes from uploads).
+evidence_chain: []
+success_format: CTF2\{[^}]+\}
+source: 750d0f96-dab5-440b-bb3f-091746a054f4 (run de871496-a2f0-45c7-bf69-38fbb0681469)
+notes: NO_VERIFIED_FLAG
+kind: negative

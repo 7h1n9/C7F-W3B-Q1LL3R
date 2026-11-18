@@ -1,0 +1,16 @@
+name: BUU SQL COURSE 2
+category: web
+keywords:
+- buu
+- sql
+- course
+steps:
+- '[claude] Declared action contract (POST JSON to `/` with test_field=`query`, oracle
+  `json_field=matched`) — root path rejects POST with 405, so that exact oracle cannot
+  be confirmed; the real injectable surfac'
+- MUTEKI_RUN_TIMEOUT
+evidence_chain: []
+success_format: CTF2\{[^}]+\}
+source: 55bac32e-c5b8-4cfe-ae9c-0f68b45cc380 (run 65110f76-457d-46aa-8c6e-34e3e3cc8a2b)
+notes: MUTEKI_RUN_TIMEOUT
+kind: negative

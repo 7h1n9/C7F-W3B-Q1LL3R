@@ -1,16 +1,34 @@
 import asyncio
 import json
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Mapping
 
 import httpx
 from pydantic import TypeAdapter, ValidationError
 
 from app.engines.action_adapter import validate_action
-from app.engines.retry import TRANSIENT_HTTP_STATUSES, backoff_delay, parse_retry_after
+from app.engines.retry import (
+    DEFAULT_RETRY_JITTER,
+    TRANSIENT_HTTP_STATUSES,
+    backoff_delay,
+    parse_retry_after,
+)
+from app.engines.wire import (
+    CHAT_COMPLETIONS,
+    RESPONSES,
+    normalize_wire_api,
+    resolve_endpoint,
+    responses_to_chat_body,
+    to_responses_request,
+)
 from app.schemas.agent import AgentAction
 from app.schemas.multi_agent import RoleAction
+from app.engines.content_policy import (
+    CONTENT_POLICY_CODE,
+    looks_like_content_policy_body,
+)
 
 action_adapter = TypeAdapter(AgentAction)
 ACTION_SCHEMA = action_adapter.json_schema()
@@ -34,6 +52,35 @@ class ModelProviderError(RuntimeError):
         super().__init__(f"{code}: {message}")
 
 
+def _provider_error_from_status(status: int, response: Any) -> ModelProviderError | None:
+    """Map 401/403 to the *right* error class, reading the body before deciding.
+
+    A relay that runs a content audit answers 403 with a body naming the audit
+    (``content_policy_violation``/``内容审计``).  Lumping that into
+    ``MODEL_PERMISSION_DENIED`` was wrong twice over: the Run reactivation logic
+    reads a permission denial as a credential problem that will not heal, and the
+    body -- the only clue that the fix is a rephrase -- was thrown away.  The
+    caller can still treat 403 as fatal; it now gets a signal it can act on.
+    """
+
+    if status not in {401, 403}:
+        return None
+    body = ""
+    try:
+        body = response.text if response is not None else ""
+    except Exception:  # noqa: BLE001 - a closed body must not mask the status
+        body = ""
+    if status == 403 and looks_like_content_policy_body(body):
+        detail = " ".join(body.split())[:180] or "content audit rejected the prompt"
+        return ModelProviderError(CONTENT_POLICY_CODE, detail)
+    code = "MODEL_AUTH_FAILED" if status == 401 else "MODEL_PERMISSION_DENIED"
+    return ModelProviderError(code, f"provider returned HTTP {status}")
+
+    def __init__(self, code: str, message: str) -> None:
+        self.code = code
+        super().__init__(f"{code}: {message}")
+
+
 @dataclass(frozen=True, slots=True)
 class ChatCompletionResponse:
     """Minimal response contract used by the official Muteki Reason parser."""
@@ -45,7 +92,14 @@ class ChatCompletionResponse:
 
 
 class OpenAICompatibleEngine:
-    """Provider-neutral, structured-action client. Database and tools stay outside."""
+    """Provider-neutral, structured-action client. Database and tools stay outside.
+
+    ``wire_api`` selects the HTTP dialect: ``chat_completions`` (the default, and
+    what most OpenAI-compatible relays serve) or ``responses`` for a provider
+    that only exposes the Responses API.  The Responses path is translated at the
+    HTTP boundary (see :mod:`app.engines.wire`) so every parser below keeps
+    working against one shape.
+    """
 
     def __init__(
         self,
@@ -54,12 +108,15 @@ class OpenAICompatibleEngine:
         model: str,
         timeout: float = 30.0,
         *,
+        wire_api: str = CHAT_COMPLETIONS,
         action_protocol: str = "json_schema",
         max_output_tokens: int = 2048,
         temperature: float = 0.0,
         max_retries: int = 2,
         retry_base_seconds: float = 1.0,
         rate_limit_cooldown_seconds: int = 60,
+        retry_jitter: float = DEFAULT_RETRY_JITTER,
+        retry_rng: Callable[[], float] | None = None,
     ) -> None:
         self.base_url, self.api_key, self.model, self.timeout = (
             base_url.rstrip("/"),
@@ -67,20 +124,75 @@ class OpenAICompatibleEngine:
             model,
             timeout,
             )
+        self.wire_api = normalize_wire_api(wire_api)
         self.action_protocol = action_protocol
         self.max_output_tokens = max_output_tokens
         self.temperature = temperature
         self.max_retries = max_retries
         self.retry_base_seconds = retry_base_seconds
         self.rate_limit_cooldown_seconds = max(1, rate_limit_cooldown_seconds)
+        # Concurrent Runs hitting the same provider share one retry clock, so a
+        # burst of 5xx must be spread rather than synchronized.  ``retry_rng``
+        # lets tests pin the spread to a deterministic value.
+        self.retry_jitter = max(0.0, min(float(retry_jitter), 1.0))
+        self._retry_rng = retry_rng
         self.cooldown_until = 0.0
         self.last_trace: dict[str, Any] = {}
         self._client: httpx.AsyncClient | None = None
+
+    def _backoff(self, attempt: int, **kwargs: Any) -> float:
+        """Backoff with this engine's jitter policy applied."""
+
+        return backoff_delay(
+            attempt,
+            jitter=self.retry_jitter,
+            rng=self._retry_rng,
+            **kwargs,
+        )
 
     def _get_client(self) -> httpx.AsyncClient:
         if self._client is None:
             self._client = httpx.AsyncClient(timeout=self.timeout, trust_env=False)
         return self._client
+
+    async def _post_chat(self, payload: Mapping[str, Any]) -> httpx.Response:
+        """POST one chat-shaped payload on the configured wire.
+
+        In ``responses`` mode the body is translated to the Responses schema and
+        the reply is translated back into the Chat Completions shape, so every
+        caller below keeps its existing ``raise_for_status()`` / ``.json()`` /
+        ``.headers`` handling.  The status code is preserved so the retry and
+        error-classification branches still see the provider's real answer.
+        """
+
+        client = self._get_client()
+        headers = {"Authorization": f"Bearer {self.api_key}"}
+        if self.wire_api == RESPONSES:
+            url = resolve_endpoint(self.base_url, RESPONSES)
+            response = await client.post(
+                url, headers=headers, json=to_responses_request(payload)
+            )
+            if response.status_code >= 400:
+                return response
+            try:
+                chat_body = responses_to_chat_body(response.json())
+            except ValueError:
+                # A malformed envelope is a provider contract error, not a
+                # transport one; let the caller's parse branch report it.
+                return response
+            forwarded = {
+                key: value
+                for key, value in response.headers.items()
+                if key.lower() not in {"content-length", "content-encoding", "transfer-encoding"}
+            }
+            return httpx.Response(
+                response.status_code,
+                json=chat_body,
+                headers=forwarded,
+                request=response.request,
+            )
+        url = resolve_endpoint(self.base_url, CHAT_COMPLETIONS)
+        return await client.post(url, headers=headers, json=dict(payload))
 
     async def close(self) -> None:
         if self._client is not None:
@@ -138,11 +250,7 @@ class OpenAICompatibleEngine:
                             "content": "Return only a valid JSON AgentAction object.",
                         }
                     ]
-                response = await self._get_client().post(
-                    f"{self.base_url}/chat/completions",
-                    headers={"Authorization": f"Bearer {self.api_key}"},
-                    json=payload,
-                )
+                response = await self._post_chat(payload)
                 response.raise_for_status()
                 body = response.json()
                 content = body["choices"][0]["message"].get("content")
@@ -166,14 +274,14 @@ class OpenAICompatibleEngine:
                 status = error.response.status_code
                 if status == 402:
                     raise ModelProviderError("MODEL_QUOTA_EXCEEDED", "provider quota exceeded") from error
-                if status in {401, 403}:
-                    raise ModelProviderError("MODEL_AUTH_FAILED" if status == 401 else "MODEL_PERMISSION_DENIED", f"provider returned HTTP {status}") from error
+                if (mapped := _provider_error_from_status(status, error.response)) is not None:
+                    raise mapped from error
                 if status == 400:
                     raise ModelProviderError("MODEL_BAD_REQUEST", "provider rejected the request") from error
                 if status == 429:
                     network_attempts += 1
                     if network_attempts <= self.max_retries:
-                        delay = backoff_delay(
+                        delay = self._backoff(
                             network_attempts - 1,
                             retry_after=parse_retry_after(error.response.headers),
                             base=1.0,
@@ -188,7 +296,7 @@ class OpenAICompatibleEngine:
                 if status in TRANSIENT_HTTP_STATUSES:
                     network_attempts += 1
                     if network_attempts <= self.max_retries:
-                        delay = backoff_delay(network_attempts - 1, base=self.retry_base_seconds, cap=15.0)
+                        delay = self._backoff(network_attempts - 1, base=self.retry_base_seconds, cap=15.0)
                         await asyncio.sleep(delay)
                         continue
                     raise ModelUnavailableError(
@@ -199,7 +307,7 @@ class OpenAICompatibleEngine:
             except httpx.RequestError as error:
                 network_attempts += 1
                 if network_attempts <= self.max_retries:
-                    await asyncio.sleep(backoff_delay(network_attempts - 1, base=self.retry_base_seconds, cap=15.0))
+                    await asyncio.sleep(self._backoff(network_attempts - 1, base=self.retry_base_seconds, cap=15.0))
                     continue
                 raise ModelUnavailableError(
                     f"MODEL_UNAVAILABLE: {error}"
@@ -225,16 +333,14 @@ class OpenAICompatibleEngine:
         if time.monotonic() < self.cooldown_until:
             raise ModelRateLimitError("MODEL_RATE_LIMITED: provider cooldown is active")
         started = time.perf_counter()
-        response = await self._get_client().post(
-            f"{self.base_url}/chat/completions",
-            headers={"Authorization": f"Bearer {self.api_key}"},
-            json={
+        response = await self._post_chat(
+            {
                 "model": self.model,
                 "messages": messages,
                 "temperature": self.temperature,
                 "max_tokens": self.max_output_tokens,
                 "response_format": {"type": "json_schema", "json_schema": {"name": "role_action", "strict": True, "schema": ROLE_ACTION_SCHEMA}},
-            },
+            }
         )
         response.raise_for_status()
         body = response.json()
@@ -258,14 +364,14 @@ class OpenAICompatibleEngine:
     async def next_contract(self, messages: list[dict], schema: dict, *, name: str = "role_contract") -> dict:
         """Request a role-specific top-level contract without the campaign action schema."""
         started = time.perf_counter()
-        response = await self._get_client().post(
-            f"{self.base_url}/chat/completions",
-            headers={"Authorization": f"Bearer {self.api_key}"},
-            json={
-                "model": self.model, "messages": messages, "temperature": self.temperature,
+        response = await self._post_chat(
+            {
+                "model": self.model,
+                "messages": messages,
+                "temperature": self.temperature,
                 "max_tokens": self.max_output_tokens,
                 "response_format": {"type": "json_schema", "json_schema": {"name": name, "strict": True, "schema": schema}},
-            },
+            }
         )
         response.raise_for_status()
         body = response.json()
@@ -313,56 +419,74 @@ class OpenAICompatibleEngine:
         # call.  Do not silently replace it with the Worker output-token cap.
         if max_tokens is not None:
             payload["max_tokens"] = max_tokens
-        try:
-            response = await self._get_client().post(
-                f"{self.base_url}/chat/completions",
-                headers={"Authorization": f"Bearer {self.api_key}"},
-                json=payload,
-            )
-            response.raise_for_status()
-            body = response.json()
-            content = body["choices"][0]["message"].get("content")
-            if not isinstance(content, str):
-                raise ValueError("chat response did not contain text content")
-            usage = body.get("usage") or {}
-            self.last_trace = {
-                "latency_ms": round((time.perf_counter() - started) * 1000),
-                "input_tokens": usage.get("prompt_tokens") or usage.get("input_tokens"),
-                "output_tokens": usage.get("completion_tokens") or usage.get("output_tokens"),
-                "provider_request_id": getattr(response, "headers", {}).get("x-request-id")
-                if getattr(response, "headers", None)
-                else None,
-                "parse_attempts": 1,
-                "response_excerpt": content[:2000],
-            }
-            return ChatCompletionResponse(
-                content=content,
-                input_tokens=int(self.last_trace.get("input_tokens") or 0),
-                output_tokens=int(self.last_trace.get("output_tokens") or 0),
-                model=str(body.get("model") or payload["model"]),
-            )
-        except httpx.HTTPStatusError as error:
-            status = error.response.status_code
-            if status == 402:
-                raise ModelProviderError("MODEL_QUOTA_EXCEEDED", "provider quota exceeded") from error
-            if status in {401, 403}:
-                code = "MODEL_AUTH_FAILED" if status == 401 else "MODEL_PERMISSION_DENIED"
-                raise ModelProviderError(code, f"provider returned HTTP {status}") from error
-            if status == 400:
-                # A malformed/unsupported Reason request is a provider
-                # contract error, not a transport outage.  Keeping this
-                # distinct prevents the Coordinator from repeatedly probing
-                # an endpoint that is reachable but rejects the payload.
-                raise ModelProviderError("MODEL_BAD_REQUEST", "provider rejected the request") from error
-            if status == 429:
-                self.cooldown_until = time.monotonic() + self.rate_limit_cooldown_seconds
-                raise ModelRateLimitError(
-                    "MODEL_RATE_LIMITED: provider returned HTTP 429 Too Many Requests"
-                ) from error
-            if status in TRANSIENT_HTTP_STATUSES:
-                raise ModelUnavailableError(f"MODEL_UNAVAILABLE: provider returned HTTP {status}") from error
-            raise ModelProviderError("MODEL_UNAVAILABLE", f"provider returned HTTP {status}") from error
-        except httpx.TimeoutException as error:
-            raise ModelProviderError("MODEL_TIMEOUT", "provider request timed out") from error
-        except httpx.RequestError as error:
-            raise ModelUnavailableError(f"MODEL_UNAVAILABLE: {error}") from error
+        network_attempts = 0
+        max_attempts = max(1, self.max_retries + 1)
+        for _ in range(max_attempts):
+            try:
+                response = await self._post_chat(payload)
+                response.raise_for_status()
+                body = response.json()
+                content = body["choices"][0]["message"].get("content")
+                if not isinstance(content, str):
+                    raise ValueError("chat response did not contain text content")
+                usage = body.get("usage") or {}
+                self.last_trace = {
+                    "latency_ms": round((time.perf_counter() - started) * 1000),
+                    "input_tokens": usage.get("prompt_tokens") or usage.get("input_tokens"),
+                    "output_tokens": usage.get("completion_tokens") or usage.get("output_tokens"),
+                    "provider_request_id": getattr(response, "headers", {}).get("x-request-id")
+                    if getattr(response, "headers", None)
+                    else None,
+                    "parse_attempts": 1,
+                    "response_excerpt": content[:2000],
+                }
+                return ChatCompletionResponse(
+                    content=content,
+                    input_tokens=int(self.last_trace.get("input_tokens") or 0),
+                    output_tokens=int(self.last_trace.get("output_tokens") or 0),
+                    model=str(body.get("model") or payload["model"]),
+                )
+            except httpx.HTTPStatusError as error:
+                status = error.response.status_code
+                if status == 402:
+                    raise ModelProviderError("MODEL_QUOTA_EXCEEDED", "provider quota exceeded") from error
+                if (mapped := _provider_error_from_status(status, error.response)) is not None:
+                    raise mapped from error
+                if status == 400:
+                    # A malformed/unsupported Reason request is a provider
+                    # contract error, not a transport outage.  Keeping this
+                    # distinct prevents the Coordinator from repeatedly probing
+                    # an endpoint that is reachable but rejects the payload.
+                    raise ModelProviderError("MODEL_BAD_REQUEST", "provider rejected the request") from error
+                if status == 429:
+                    self.cooldown_until = time.monotonic() + self.rate_limit_cooldown_seconds
+                    raise ModelRateLimitError(
+                        "MODEL_RATE_LIMITED: provider returned HTTP 429 Too Many Requests"
+                    ) from error
+                if status in TRANSIENT_HTTP_STATUSES:
+                    network_attempts += 1
+                    if network_attempts < max_attempts:
+                        delay = self._backoff(
+                            network_attempts - 1,
+                            base=self.retry_base_seconds,
+                            cap=15.0,
+                        )
+                        await asyncio.sleep(delay)
+                        continue
+                    raise ModelUnavailableError(
+                        f"MODEL_UNAVAILABLE: provider returned HTTP {status}"
+                    ) from error
+                raise ModelProviderError("MODEL_UNAVAILABLE", f"provider returned HTTP {status}") from error
+            except httpx.TimeoutException as error:
+                raise ModelProviderError("MODEL_TIMEOUT", "provider request timed out") from error
+            except httpx.RequestError as error:
+                network_attempts += 1
+                if network_attempts < max_attempts:
+                    delay = self._backoff(
+                        network_attempts - 1,
+                        base=self.retry_base_seconds,
+                        cap=15.0,
+                    )
+                    await asyncio.sleep(delay)
+                    continue
+                raise ModelUnavailableError(f"MODEL_UNAVAILABLE: {error}") from error

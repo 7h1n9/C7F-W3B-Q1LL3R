@@ -1,0 +1,108 @@
+[
+ {
+  "index": 1,
+  "verdict": "repair",
+  "reasons": [
+   "依赖前序脚本"
+  ],
+  "technique": "unknown",
+  "title": "[Jboss]CVE-2017-7504 — decisive step",
+  "run_id": "82fbceea-0339-49b2-8043-3ad27fe1c9b7",
+  "decisive_sequence": 425,
+  "raw_length": 141
+ },
+ {
+  "index": 2,
+  "verdict": "repair",
+  "reasons": [
+   "依赖前序文件"
+  ],
+  "technique": "arbitrary-file-read",
+  "title": "[Jenkins] CVE-2024-23897 Jenkins Arbitrary File Read Through the CLI — decisive step",
+  "run_id": "3903a584-2a15-4922-bad9-78ce9db12b32",
+  "decisive_sequence": 106,
+  "raw_length": 202
+ },
+ {
+  "index": 3,
+  "verdict": "reject",
+  "reasons": [
+   "植入成功后的回读，不是利用步骤"
+  ],
+  "technique": "unknown",
+  "title": "[HTTPD]CVE-2017-15715 — decisive step",
+  "run_id": "7f310cc9-79c4-41a3-9a9e-8ddda767b9be",
+  "decisive_sequence": 88,
+  "raw_length": null
+ },
+ {
+  "index": 4,
+  "verdict": "accept",
+  "reasons": [],
+  "technique": "path-traversal",
+  "title": "[Rails]CVE-2019-5418 — decisive step",
+  "run_id": "789f95c2-d311-4bd2-8fc6-3fff21373e7d",
+  "decisive_sequence": 163,
+  "raw_length": null
+ },
+ {
+  "index": 5,
+  "verdict": "reject",
+  "reasons": [
+   "heredoc 未闭合（缺 EOF 终止符），脚本体被切掉"
+  ],
+  "technique": "unknown",
+  "title": "[CISCN2019 华东南赛区]Web4 — decisive step",
+  "run_id": "36840f51-7d53-494c-abf1-e14ea2d6c1fa",
+  "decisive_sequence": 359,
+  "raw_length": 298
+ },
+ {
+  "index": 6,
+  "verdict": "reject",
+  "reasons": [
+   "植入成功后的回读，不是利用步骤"
+  ],
+  "technique": "file-upload",
+  "title": "[极客大挑战 2019]Upload — decisive step",
+  "run_id": "52e0f76c-2102-454b-8dec-8681f80d2ef6",
+  "decisive_sequence": 406,
+  "raw_length": 299
+ },
+ {
+  "index": 7,
+  "verdict": "reject",
+  "reasons": [
+   "heredoc 未闭合（缺 EOF 终止符），脚本体被切掉"
+  ],
+  "technique": "unknown",
+  "title": "[护网杯 2018]easy_tornado — decisive step",
+  "run_id": "e777da72-6e6c-421e-8dc9-b7f346189bfc",
+  "decisive_sequence": 220,
+  "raw_length": 159
+ },
+ {
+  "index": 8,
+  "verdict": "repair",
+  "reasons": [
+   "依赖题解专用路径"
+  ],
+  "technique": "path-traversal",
+  "title": "[HCTF 2018]WarmUp — decisive step",
+  "run_id": "57d67098-1f19-4ecb-b54b-1591a349ab42",
+  "decisive_sequence": 31,
+  "raw_length": 115
+ },
+ {
+  "index": 9,
+  "verdict": "repair",
+  "reasons": [
+   "凭证在采集时被脱敏为 [redacted]，无法填写"
+  ],
+  "technique": "unknown",
+  "title": "[Postgres]CVE-2018-1058 — decisive step",
+  "run_id": "3d62f760-c30c-4968-b590-6d219b778b73",
+  "decisive_sequence": 235,
+  "raw_length": 256
+ }
+]

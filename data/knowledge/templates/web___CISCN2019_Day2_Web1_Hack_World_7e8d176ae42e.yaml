@@ -1,0 +1,22 @@
+name: '[CISCN2019 华北赛区 Day2 Web1]Hack World 7e8d176ae42e'
+category: web
+keywords:
+- ciscn2019
+- day2
+- web1
+- hack
+- world
+- uuid
+steps:
+- '[codex] Target is [CISCN2019 华北赛区 Day2] Hack World: POST `index.php` param `id`
+  is quoted into a SELECT. Blacklisted tokens: `or`, `and`, quotes `''`/`"`, `information_schema`,
+  `where`, `count(1)`, `ord`, `mid'
+- '[codex] Blind extraction (ascii/substr/length over `(select(flag)from(flag))`)
+  gave a 42-char value, independently confirmed by live equality: payload `id=0^((select(flag)from(flag))=0x4354...7d)`
+  returns the'
+- '[codex] FOUND_FLAG=<FLAG>'
+evidence_chain:
+- '[codex] FOUND_FLAG=<FLAG>'
+success_format: CTF2\{[^}]+\}
+source: 7e8d176a-e42e-4df5-b139-02b950d75394 (solver 579e7d4e-bfcc-44cb-8198-e287bd8a500f)
+notes: ''

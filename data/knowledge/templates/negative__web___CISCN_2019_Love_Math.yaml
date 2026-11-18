@@ -1,0 +1,17 @@
+name: '[CISCN 2019 初赛]Love Math'
+category: web
+keywords:
+- ciscn
+- love
+- math
+- github
+- ctftraining
+- ciscn_2019_qual_love_math
+steps:
+- RACE_WORKER_TIMEOUT
+- MUTEKI_RUN_TIMEOUT
+evidence_chain: []
+success_format: CTF2\{[^}]+\}
+source: 7708f06c-2500-400c-ade8-45cd37246836 (run f9d4a683-49f2-4875-824f-880a0587c2a3)
+notes: MUTEKI_RUN_TIMEOUT
+kind: negative

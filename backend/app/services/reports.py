@@ -1,9 +1,11 @@
 import asyncio
 import hashlib
 import json
+import logging
 import re
 import shutil
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 from pydantic import BaseModel, Field
@@ -25,11 +27,14 @@ from app.orchestration.state_machine import TERMINAL, RunStatus
 from app.services.events import event_service
 from app.services.manual_writeup import ManualWriteupRenderer
 from app.services.muteki_board_semantics import SEMANTIC_CACHE_KEY
+from app.services.muteki_llm_report import LLM_REPORT_CACHE_KEY, build_llm_report
 from app.services.muteki_poc_bundle import PocBundleUnavailable, build_poc_bundle_for_run
 from app.services.muteki_recovered_trace import load_recovered_trace, merge_recovered_state
 from app.services.muteki_writeup import render_muteki_writeup
 from app.services.reproduction_commands import reproduction_command_renderer
 from app.solver.muteki.adapter.cost_bridge import load_muteki_usage
+
+logger = logging.getLogger(__name__)
 
 
 class ReproductionStep(BaseModel):
@@ -55,6 +60,12 @@ class SolutionPathExtractor:
         "web_search",
         "file_read",
         "file_search",
+        # A Muteki worker's own record of "a worker ran".  It carries no request:
+        # replaying it produced ``curl -i -X GET "{{target_url}}"`` -- a literal
+        # template with an empty URL, which "reproduces" nothing.  Measured
+        # 2026-11-10 on run 9847adf6, where this was the only ToolCall row and it
+        # shadowed the real evidence (the worker's own PoC script on disk).
+        "muteki_native_worker",
     }
     _SENSITIVE_KEY = re.compile(
         r"(?i)(password|passwd|secret|token|api[_-]?key|authorization|cookie)"
@@ -189,7 +200,78 @@ class SolutionPathExtractor:
                     source_artifact_ids=source_artifacts,
                 )
             )
+        if not steps:
+            steps = self._workspace_poc_steps(run)
         return steps
+
+    #: PoC scripts a Muteki worker leaves behind, newest-looking first.  The worker
+    #: writes ``exploit.py`` / ``exploit2.py`` / ``PoC_*.py`` into its own
+    #: ``muteki/`` scratch dir and sometimes copies the winner to ``shared/``.
+    _POC_GLOBS: tuple[str, ...] = (
+        "muteki/exploit*.py",
+        "shared/PoC_*.py",
+        "muteki/PoC_*.py",
+        "muteki/solve*.py",
+    )
+
+    @classmethod
+    def _workspace_poc_steps(cls, run: SolveRun) -> list[ReproductionStep]:
+        """Fall back to the PoC script the Worker wrote when no ToolCall replays.
+
+        Measured 2026-11-10 on ``[De1CTF 2019]Giftbox`` (run ``9847adf6``): the Run
+        has exactly one ``ToolCall`` -- ``muteki_native_worker`` -- because Muteki
+        workers run shell commands directly instead of going through the structured
+        ``http_request`` tool.  ``extract`` therefore returned **0 steps** and
+        ``execute`` blocked with ``MISSING_EXTRACTION_PROVENANCE`` before running
+        anything.  The replay was impossible not because the evidence was missing
+        but because it was in the wrong shape.
+
+        The evidence was on disk the whole time: the worker had written
+        ``muteki/exploit2.py`` and copied it to ``shared/PoC_giftbox_exploit.py``
+        after its own end-to-end verification, and ``final/muteki-poc.zip`` is the
+        packaged form of the same thing.
+
+        This does NOT weaken the check.  Re-running the Worker's own script in a
+        fresh container is a stronger reproduction than replaying a hand-assembled
+        curl: it re-executes the actual exploit chain rather than one request from
+        it.  The flag is still matched against ``challenge.flag_pattern`` by the
+        caller, so a script that prints nothing is still unverified.
+        """
+
+        root = Path(str(getattr(run, "workspace_path", "") or ""))
+        if not root or not root.is_dir():
+            return []
+        chosen: Path | None = None
+        for pattern in cls._POC_GLOBS:
+            matches = sorted(
+                (p for p in root.glob(pattern) if p.is_file() and p.stat().st_size > 0),
+                key=lambda p: p.stat().st_mtime,
+                reverse=True,
+            )
+            if matches:
+                chosen = matches[0]
+                break
+        if chosen is None:
+            return []
+        relative = chosen.relative_to(root).as_posix()
+        interpreter = "python3" if chosen.suffix == ".py" else "bash"
+        command = f"cd {{workspace}} && {interpreter} {relative}"
+        return [
+            ReproductionStep(
+                order=1,
+                title_zh="重放 Worker 留下的 PoC 脚本",
+                purpose_zh=(
+                    "在全新容器中重新执行 Worker 自己写出的利用脚本，"
+                    "验证整条利用链可独立复现。"
+                ),
+                tool_name="workspace_poc",
+                normalized_arguments={"path": relative, "interpreter": interpreter},
+                manual_method=f"{interpreter} {relative}",
+                manual_command=command,
+                expected_evidence=[f"脚本 {relative} 的输出中出现 flag"],
+                source_artifact_ids=[],
+            )
+        ]
 
 
 class ReproductionPlanner:
@@ -421,6 +503,25 @@ class ReportService:
             # condition in the WP instead of manufacturing a script.
             poc_bundle = None
         usage = await load_muteki_usage(session, str(run.id))
+        # Narrative authoring: hand the model the Worker's captured conversation
+        # plus the deterministic board projection, and let it write the sections
+        # the template renderer structurally cannot.  Never fatal — a failure
+        # degrades to the deterministic writeup.
+        llm_report = await build_llm_report(
+            session,
+            run=run,
+            challenge=challenge,
+            graph_state=graph_state,
+            calls=calls,
+            evidence=evidence_rows,
+            poc_available=poc_bundle is not None,
+            verified_flag=str(getattr(result, "flag", "") or "") if solved else "",
+            usage_summary={
+                "calls": usage.calls,
+                "cost_usd": round(usage.cost_usd, 10),
+                "total_tokens": usage.tokens,
+            },
+        )
         report_payload = {
             "result": "solved" if solved else "unsolved",
             "engine": "muteki",
@@ -448,6 +549,14 @@ class ReportService:
                 "available": bool(recovered_trace.get("available")),
                 "step_count": len(recovered_trace.get("steps", []) or []),
                 "replayable_step_count": len(recovered_trace.get("replayable_steps", []) or []),
+            },
+            "llm_report": {
+                "status": llm_report.get("status"),
+                "model": llm_report.get("model") or "",
+                "conversation_available": bool(llm_report.get("conversation_available")),
+                "conversation_chars": int(llm_report.get("conversation_chars") or 0),
+                "error_code": llm_report.get("error_code") or "",
+                "usage": llm_report.get("usage") or {},
             },
             "semantic_analysis": {
                 "status": semantic_analysis.get("status"),
@@ -488,6 +597,7 @@ class ReportService:
             poc_available=poc_bundle is not None,
             recovered_trace=recovered_trace,
             semantic_analysis=semantic_analysis,
+            llm_report=llm_report,
         ).encode("utf-8")
         (final / "writeup.zh-CN.md").write_bytes(writeup)
         (final / "writeup.md").write_bytes(writeup)
@@ -682,3 +792,149 @@ class ReportService:
 
 
 report_service = ReportService()
+
+
+def _flag_shaped(value: Any) -> str | None:
+    """Return a real flag token, or None for empty/placeholder/non-flag values.
+
+    Recovery must never turn a template the model echoed (``flag{...}``,
+    ``{uuid}``, ``flag{your_flag_here}``) into a persisted answer, so the
+    upstream provenance gate's placeholder rule is reused here.
+    """
+
+    text = str(value or "").strip()
+    if not text or len(text) > 512 or "\n" in text or "\r" in text:
+        return None
+    if "{" not in text or not text.endswith("}"):
+        return None
+    try:
+        from muteki.solver.gate import is_placeholder_flag
+    except Exception:  # pragma: no cover - import guard for isolated runtimes
+        return text
+    return None if is_placeholder_flag(text) else text
+
+
+async def recover_muteki_terminal_result(session: AsyncSession, run: SolveRun) -> SimpleNamespace:
+    """Rebuild the canonical Muteki completion result from durable evidence.
+
+    A Muteki Run can reach COMPLETED_SOLVED / COMPLETED_UNSOLVED through the
+    native terminal handoff (``run.muteki_terminal_reconciled``) or through
+    startup recovery instead of the in-process runtime.  No in-memory
+    ``MutekiRunResult`` survives that path, so report materialization had no
+    result object to consume and the final report, writeup and PoC bundle were
+    never written — leaving a "completed" Run that could neither show nor export
+    its Writeup or PoC.
+
+    This reconstructs the same shape from the Run row, the durable terminal
+    event and the native graph, without ever inventing a flag.
+    """
+
+    report = run.report_json if isinstance(run.report_json, dict) else {}
+    checkpoint = run.recovery_checkpoint_json if isinstance(run.recovery_checkpoint_json, dict) else {}
+    terminal = checkpoint.get("muteki_native_terminal") if isinstance(checkpoint.get("muteki_native_terminal"), dict) else {}
+    status = str(run.status)
+
+    flag = _flag_shaped(report.get("flag"))
+    flag_found = bool(report.get("flag_verified")) or bool(terminal.get("flag_found")) or status == RunStatus.COMPLETED_SOLVED.value
+
+    graph_path = str(report.get("graph_path") or "").strip()
+    if not graph_path:
+        graph_path = str(Path(str(run.workspace_path)).resolve() / "muteki" / "graph" / "upstream_shared_graph.db")
+
+    challenge = await session.get(Challenge, run.challenge_id)
+    if flag is None and challenge is not None and Path(graph_path).is_file():
+        try:
+            from app.solver.muteki.adapter.graph_snapshot import read_native_graph_snapshot
+
+            state = await asyncio.to_thread(
+                read_native_graph_snapshot,
+                db_path=Path(graph_path),
+                challenge=challenge,
+                run_id=str(run.id),
+            )
+            for item in reversed([entry for entry in (state.get("flags") or []) if entry.get("verified")]):
+                flag = _flag_shaped(item.get("flag"))
+                if flag:
+                    break
+        except Exception:
+            logger.warning("muteki terminal flag recovery from graph failed", exc_info=True)
+
+    if flag is None:
+        candidate = await session.scalar(
+            select(FlagCandidate)
+            .where(FlagCandidate.run_id == run.id, FlagCandidate.verified.is_(True))
+            .order_by(FlagCandidate.created_at.desc())
+        )
+        if candidate is not None:
+            flag = _flag_shaped(getattr(candidate, "candidate", None))
+
+    if flag is not None:
+        flag_found = True
+
+    reason = str(
+        terminal.get("reason")
+        or report.get("reason")
+        or run.last_error_code
+        or "MUTEKI_TERMINAL_RECONCILED"
+    )
+    return SimpleNamespace(
+        status=status,
+        reason=reason,
+        flag=flag,
+        flag_found=bool(flag_found),
+        graph_path=graph_path,
+    )
+
+
+async def ensure_muteki_report(session: AsyncSession, run: SolveRun) -> bool:
+    """Idempotently materialize the canonical Muteki report for export.
+
+    Returns True when an ACTIVE formal report now exists.  Safe to call on a
+    read path: when the report was already generated this is a single indexed
+    lookup that changes nothing.
+    """
+
+    if str(run.solver_mode or "").lower() != "muteki":
+        return False
+    if str(run.status) not in {
+        RunStatus.COMPLETED_SOLVED.value,
+        RunStatus.COMPLETED_UNSOLVED.value,
+    }:
+        return False
+
+    existing = await session.scalar(
+        select(Artifact.id).where(
+            Artifact.run_id == run.id,
+            Artifact.artifact_type == "report",
+            Artifact.status == "ACTIVE",
+        )
+    )
+    if existing is not None:
+        return True
+
+    try:
+        result = await recover_muteki_terminal_result(session, run)
+        await report_service.generate_muteki(session, run, result)
+    except Exception:
+        logger.exception("Muteki report materialization failed for run %s", run.id)
+        await session.rollback()
+        return False
+
+    created = await session.scalar(
+        select(Artifact.id).where(
+            Artifact.run_id == run.id,
+            Artifact.artifact_type == "report",
+            Artifact.status == "ACTIVE",
+        )
+    )
+    if created is not None:
+        # The reconciliation path never emitted this, so record it explicitly
+        # for the Run timeline.
+        await event_service.append(
+            session,
+            run.id,
+            "report.materialized",
+            {"artifact_id": str(created), "engine": "muteki", "source": "terminal_reconciliation"},
+        )
+        await session.commit()
+    return created is not None

@@ -1,0 +1,23 @@
+name: '[Dest0g3 520迎新赛]EasyPHP f377786c93e9'
+category: web
+keywords:
+- dest0g3
+- easyphp
+- something
+steps:
+- '[claude] POST `ctf[]=x` to / → PHP "Array to string conversion" notice triggers
+  set_error_handler after `$fl4g .= $dest0g3`, dumping flag: response ends `Try harder!<FLAG>`.'
+- '[claude] Source: fl4g.php sets `$fl4g`, error handler prints it; time checks are
+  irrelevant — only need one warning/notice after concatenation (string concat of
+  array suffices).'
+- '[claude] VERIFIED_FACT=Source: fl4g.php sets `$fl4g`, error handler prints it;
+  time checks are irrelevant — only need one warning/notice after concatenation (string
+  concat of array suffices).'
+- Native Worker completed a bounded evidence-backed observation
+evidence_chain:
+- '[claude] VERIFIED_FACT=Source: fl4g.php sets `$fl4g`, error handler prints it;
+  time checks are irrelevant — only need one warning/notice after concatenation (string
+  concat of array suffices).'
+success_format: CTF2\{[^}]+\}
+source: f377786c-93e9-41d1-a828-4cc875639ea2 (solver 8f2da7d2-4489-4bde-a7c4-6ccd97728919)
+notes: ''

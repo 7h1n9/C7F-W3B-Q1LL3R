@@ -1,0 +1,61 @@
+name: '[网鼎杯2018]Unfinish 2fff565eba6b'
+category: web
+keywords:
+- unfinish
+steps:
+- 'Public PHP surface = login.php, register.php, index.php(auth-gated, shows username
+  + images/674407.jpg), config.php (200 empty). Static: fonts/ images/ javascripts/(slideout/slideout.min.js)
+  stylesheets/(style.css,flaticon.css,index.css) uploads/(a.jpeg). /health,/ready=ok;
+  server-status 403; TRACE 405. Auth user via register->login 302 works.'
+- 'register.php accepts ANY email without validation and without duplicate-email check
+  (302 -> login.php). login.php POST: wrong creds -> 200 1483 bytes with ''用户名或密码错误'';
+  GET params are ignored (200 1459). No hidden top-level endpoints: /nginx_status
+  /status /metrics /phpmyadmin /adminer /cgi-bin/* /server-info all 404; /health,/ready
+  200 ''ok''. *.phps -> 403 (Apache FilesMatch) but no source leak.'
+- 'index.php renders registered username RAW into span.user-name (no htmlspecialchars):
+  confirmed stored XSS with script, svg/onload, img onerror all stored verbatim and
+  echoed back. Fires on index.php load for the logged-in user. Host-header spoof gives
+  404 on all vhosts (no admin vhost).'
+- 'config.php = silent no-op: GET/POST/PUT/DELETE/OPTIONS/PATCH/HEAD all 200 with
+  0-byte body; any query/POST params ignored. Not a gadget. PATH_INFO (/login.php/x,
+  /index.php/admin) is silently ignored by every script; /zzqq.php etc 404. No .bak/.old/.inc/.swp/.txt/.json
+  backups for index/login/register/config/db/conn/common/functions/user. Session fixation
+  works (client PHPSESSID honored, no regen) but session is per-browser.'
+- '[claude] Unfinish 注入全链路:register.php username 处 `0''+(payload)+''0` 注入,登录后 index.php
+  的 `<span class="user-name">` 回显数值;逗号与 `information_schema` 被过滤,`mid(x from i for
+  1)` 绕过;flag 表列名未知但 `select * from flag limit'
+- '[claude] Exploit 脚本存于 `st.py`。'
+- Native Worker completed a bounded evidence-backed observation
+- 'Recon lane conclusions: username sink is numeric-eval SQLi context (0+(...)+0),
+  so my earlier raw-HTML XSS check was a misread of output context (payload was evaluated,
+  not stored). Public surface: 4 PHP scripts + static dirs + uploads/{a.jpeg,a.jpg,1.jpg}.
+  No admin bot, no second vhost, no source leak, no upload endpoint. Exploitation
+  path is SQLi via register username -> index.php numeric echo.'
+evidence_chain:
+- 'Public PHP surface = login.php, register.php, index.php(auth-gated, shows username
+  + images/674407.jpg), config.php (200 empty). Static: fonts/ images/ javascripts/(slideout/slideout.min.js)
+  stylesheets/(style.css,flaticon.css,index.css) uploads/(a.jpeg). /health,/ready=ok;
+  server-status 403; TRACE 405. Auth user via register->login 302 works.'
+- 'register.php accepts ANY email without validation and without duplicate-email check
+  (302 -> login.php). login.php POST: wrong creds -> 200 1483 bytes with ''用户名或密码错误'';
+  GET params are ignored (200 1459). No hidden top-level endpoints: /nginx_status
+  /status /metrics /phpmyadmin /adminer /cgi-bin/* /server-info all 404; /health,/ready
+  200 ''ok''. *.phps -> 403 (Apache FilesMatch) but no source leak.'
+- 'index.php renders registered username RAW into span.user-name (no htmlspecialchars):
+  confirmed stored XSS with script, svg/onload, img onerror all stored verbatim and
+  echoed back. Fires on index.php load for the logged-in user. Host-header spoof gives
+  404 on all vhosts (no admin vhost).'
+- 'config.php = silent no-op: GET/POST/PUT/DELETE/OPTIONS/PATCH/HEAD all 200 with
+  0-byte body; any query/POST params ignored. Not a gadget. PATH_INFO (/login.php/x,
+  /index.php/admin) is silently ignored by every script; /zzqq.php etc 404. No .bak/.old/.inc/.swp/.txt/.json
+  backups for index/login/register/config/db/conn/common/functions/user. Session fixation
+  works (client PHPSESSID honored, no regen) but session is per-browser.'
+- '[claude] Exploit 脚本存于 `st.py`。'
+- 'Recon lane conclusions: username sink is numeric-eval SQLi context (0+(...)+0),
+  so my earlier raw-HTML XSS check was a misread of output context (payload was evaluated,
+  not stored). Public surface: 4 PHP scripts + static dirs + uploads/{a.jpeg,a.jpg,1.jpg}.
+  No admin bot, no second vhost, no source leak, no upload endpoint. Exploitation
+  path is SQLi via register username -> index.php numeric echo.'
+success_format: CTF2\{[^}]+\}
+source: 2fff565e-ba6b-4f87-a73b-ea9e58eefc80 (solver 72a3325f-7542-476e-8c4a-e5a47d354bf2)
+notes: ''

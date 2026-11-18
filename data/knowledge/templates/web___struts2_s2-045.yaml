@@ -1,0 +1,22 @@
+name: '[struts2]s2-045'
+category: web
+keywords:
+- struts2
+- github
+- vulhub
+- blob
+- master
+steps:
+- '[codex] OGNL evaluates only on POST /doUpload.action; probe returns `vulhub: 54289`.'
+- '[codex] RCE as root (uid=0) via Content-Type ProcessBuilder/IOUtils payload; FLAG
+  in container env.'
+- '[codex] FOUND_FLAG=<FLAG>'
+- Native Worker completed a bounded evidence-backed observation
+evidence_chain:
+- '[codex] OGNL evaluates only on POST /doUpload.action; probe returns `vulhub: 54289`.'
+- '[codex] RCE as root (uid=0) via Content-Type ProcessBuilder/IOUtils payload; FLAG
+  in container env.'
+- '[codex] FOUND_FLAG=<FLAG>'
+success_format: CTF2\{[^}]+\}
+source: 258cd04b-57dd-4938-9265-a8be284228e4 (solver 4444097b-4847-4f9f-a6d0-209c6ee508cf)
+notes: ''

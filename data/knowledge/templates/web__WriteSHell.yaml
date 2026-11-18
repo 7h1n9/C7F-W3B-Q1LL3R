@@ -1,0 +1,62 @@
+name: WriteSHell
+category: web
+keywords:
+- writeshell
+steps:
+- '[claude] 死胡同=在数组字面量内部注入 `system($_GET[''c''])` 是无效的 —— 生成的代码是一个 `return [...]`
+  表达式，因此不会产生输出；必须使用像 `var_dump(...)` 这样的函数调用，其结果会出现在响应中。'
+- Native Worker completed a bounded evidence-backed observation
+- robots.txt at /robots.txt discloses /static/secretkey.txt; its real 20-byte body
+  is 'you-will-never-guess' (not a DASCTF flag).
+- 'Root / is PHP source: highlight_file(__FILE__) then builds md5(uniqid()).php via
+  file_put_contents using GET cmd, and var_dump()s the generated filename on every
+  request.'
+- 'Public .git is directory-indexed: HEAD=refs/heads/master, master=15ca375e54f056a576905b41a417b413c57df6eb,
+  config origin=https://github.com/fermayo/hello-world-lamp.git. All 11 loose objects
+  are upstream LICENSE/README/index.php/logo.png/phpinfo.php/tree/commit objects;
+  .git/index is 5 entries matching those blob hashes, with no challenge-specific blob.'
+- 'Framework surface leaks X-Powered-By: PHP/5.5.9-1ubuntu4.14; front proxy is openresty
+  but Apache error pages identify Apache/2.4.7 (Ubuntu), including autoindex pages
+  for /.git/.'
+- 'Bounded dirb top-1000 public-path scan of / and /static/ found no new readable
+  files: root only reveals .git/HEAD (200), .hta/.htaccess/.htpasswd (403), cgi-bin/
+  (403); /static/ top-1000 had zero non-404 results. JSON evidence: /home/kali/workspace/evidence/ffuf-root-top1000.json
+  and ffuf-static-top1000.json.'
+- '[codex] `robots.txt` discloses `/static/secretkey.txt`; live body is `you-will-never-guess`
+  (not a flag).'
+- '[codex] `/` runs PHP 5.5.9-1ubuntu4.14 and exposes its source: `highlight_file(__FILE__)`,
+  builds `md5(uniqid()).php` from GET `cmd`, writes it, and `var_dump()`s the generated
+  filename.'
+- '[codex] `/.git/` is directory-indexed. `HEAD` is `refs/heads/master`, master is
+  `15ca375e54f056a576905b41a417b413c57df6eb`, and origin is `https://github.com/fermayo/hello-world-lamp.git`.'
+- '[codex] All 11 loose Git objects are upstream `LICENSE`, `README.md`, `index.php`,
+  `logo.png`, `phpinfo.php`, tree, and commit objects. `.git/index` contains exactly
+  those five upstream blob hashes, with no c'
+- '[codex] Responses leak `X-Powered-By: PHP/5.5.9-1ubuntu4.14`; Apache autoindex/error
+  pages identify `Apache/2.4.7 (Ubuntu)` behind openresty.'
+evidence_chain:
+- robots.txt at /robots.txt discloses /static/secretkey.txt; its real 20-byte body
+  is 'you-will-never-guess' (not a DASCTF flag).
+- 'Root / is PHP source: highlight_file(__FILE__) then builds md5(uniqid()).php via
+  file_put_contents using GET cmd, and var_dump()s the generated filename on every
+  request.'
+- 'Public .git is directory-indexed: HEAD=refs/heads/master, master=15ca375e54f056a576905b41a417b413c57df6eb,
+  config origin=https://github.com/fermayo/hello-world-lamp.git. All 11 loose objects
+  are upstream LICENSE/README/index.php/logo.png/phpinfo.php/tree/commit objects;
+  .git/index is 5 entries matching those blob hashes, with no challenge-specific blob.'
+- 'Framework surface leaks X-Powered-By: PHP/5.5.9-1ubuntu4.14; front proxy is openresty
+  but Apache error pages identify Apache/2.4.7 (Ubuntu), including autoindex pages
+  for /.git/.'
+- 'Bounded dirb top-1000 public-path scan of / and /static/ found no new readable
+  files: root only reveals .git/HEAD (200), .hta/.htaccess/.htpasswd (403), cgi-bin/
+  (403); /static/ top-1000 had zero non-404 results. JSON evidence: /home/kali/workspace/evidence/ffuf-root-top1000.json
+  and ffuf-static-top1000.json.'
+- '[codex] `robots.txt` discloses `/static/secretkey.txt`; live body is `you-will-never-guess`
+  (not a flag).'
+- 'WriteSHell RCE confirmed: cmd='' . system(''id'') . '' writes a PHP file whose
+  leaked md5(uniqid()).php body is uid=33(www-data) gid=33(www-data) groups=33(www-data);
+  a root-level /flaaaaaaaaaaaaaaaaag file is readable via the same generated-shell
+  execution path.'
+success_format: DASCTF\{[^}]+\}
+source: d649a358-6cb6-498f-8999-7f371a468148 (solver a9915183-a9d8-4003-884d-2a2334f64f57)
+notes: ''

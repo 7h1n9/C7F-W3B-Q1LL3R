@@ -1,0 +1,16 @@
+name: BUU XXE COURSE 1
+category: web
+keywords:
+- buu
+- xxe
+- course
+steps:
+- '[codex] The canonical `flag{...}` pattern wasn''t used; the challenge is configured
+  with the `CTF2{...}` banner, which the brief explicitly accepts.'
+- Native Worker completed a bounded evidence-backed observation
+evidence_chain:
+- '[codex] The canonical `flag{...}` pattern wasn''t used; the challenge is configured
+  with the `CTF2{...}` banner, which the brief explicitly accepts.'
+success_format: flag\{[^}]+\}
+source: fdba8694-57e4-493a-8b34-38e79e3c0346 (solver dbb4388a-8628-45c4-aab7-4969448f44f3)
+notes: ''

@@ -1,0 +1,81 @@
+# FA（首行动）因果实验 —— 预注册
+#
+# 目的：把"有 FA 的题解出率 45% vs 无 FA 7%"从相关变成因果。
+# 规则：本文件的指标口径、分组方式、判定条件在开跑前锁定；跑完不得改动再来解释。
+# 依据：docs/2026-11-18-plan.md 的 P0 段落。
+
+id: fa-causal-v1
+preregistered_at: "2026-11-18"
+owner: "项目负责人"
+
+question: >
+  在同一个脚手架、同一时段、同一题源下，给 exploit lane 注入一条可执行的
+  FIRST ACTION，是否提高解出率？还是"有 FA"只是因为该题能被配方命中？
+
+# 已知的混淆（必须先承认，否则实验没意义）
+confounds:
+  - "FA 只对能被配方/CVE 命中的题产生 ⇒ 原观测混有『这题本来就像我们见过的』"
+  - "生存偏差：ACTIVE 122 道仅 4 道有 FA，SOLVED 142 道有 127 道"
+  - "多试几次也会提高解出率 ⇒ 必须固定 rollout 预算，不可用多次重跑去堆结果"
+
+population:
+  source: "arena_solve_queue 中状态 UNSOLVED 的常规题"
+  filter: "当前没有任何 FA 来源（无配方命中、无 CVE 首行动）"
+  sample_size: 20
+  randomisation: "按题 id 排序后取哈希，奇偶均分两组（可复现，不需手工挑）"
+  blocking: "同批次同一天内跑完，两组交替执行，避免靶机状态随时间漂移"
+
+arms:
+  treatment:
+    name: "FA 注入"
+    manipulation: "仅为该题手写 1 条可执行的 FIRST ACTION，写入 exploit lane 的 goal 首句"
+    constraints:
+      - "不改 worker 引擎分配、不改模型、不改 AGENTS.md"
+      - "FA 允许未经验证（这正是要测的），但必须是一条能直接发出的命令，不是描述"
+  control:
+    name: "原样"
+    manipulation: "不加任何 FA，走现有 exploit lane 默认 goal"
+
+protocol:
+  stop_at: "由用户指定 HH:MM，到点即停，不续跑"
+  per_challenge_budget_seconds: 1500      # ARENA_WORKER_ROUND_SECONDS，两组一致
+  reclaim_before_start: true              # 必须确认 active_environments: 0
+  freeze:
+    - worker 引擎分配
+    - 模型与 prompt（除实验注入的那一句）
+    - ARENA_WORKER_ROUND_SECONDS / ARENA_RUN_BUDGET_SECONDS
+  record_policy_version: true             # 结果必须带 policy 段，跨版本不可混算
+
+metrics:
+  primary:
+    name: "解出率（solved / assigned）"
+    note: "分母只算真正跑过的题；infra 失败（余额/402/503/网络/关机）剔除并单独计数"
+  instrumentation:
+    name: "exploit.first_action 事件出现率"
+    expected: "treatment 10/10，control 0/10"
+    note: "这条不成立说明注入没生效，主指标作废——先修管道再谈效果"
+  secondary:
+    - "首个 flag 尝试耗时（run_events 时间差）"
+    - "首条命令是否直接打目标（有 FA 的 167 个历史 Run 只有 12% 做到）"
+    - "每解 token 成本"
+    - "worker_command 总数（判断是方法变了还是只是跑得更多）"
+
+analysis:
+  method: "两组比例差 + 逐题结果表（20 个样本不做显著性检验，只读效应量方向）"
+  reporting_rules:
+    - "必须同时打印两组样本量与分母"
+    - "必须列出每一题的结局，不允许只报汇总"
+    - "必须标注 infra 剔除项及原因"
+  decision_rule: >
+    实验组解出数 >= 对照组 + 2 且 first_action 事件 10/10 出现 ⇒ 认为 FA 曝光值得扩大，
+    进入 coordinator 门条件改造；否则不改代码，把结论写回计划文档。
+
+artifacts:
+  - "experiments/fa-causal-v1.grouping.json   （分组名单，开跑前生成并锁定）"
+  - "experiments/fa-causal-v1.fa/             （每题的手写 FA，一项一个文件）"
+  - "data/backups/fa-causal-v1.result.json    （跑完的原始计数）"
+
+# 生成与执行（脚本化，避免手工挑题）
+#   1) 生成分组:  scripts/fa_causal_prepare.py --emit-grouping
+#   2) 填写 FA:   每题一个文件 experiments/fa-causal-v1.fa/<challenge_id>.txt
+#   3) 跑实验:    scripts/fa_causal_prepare.py --print-run-plan

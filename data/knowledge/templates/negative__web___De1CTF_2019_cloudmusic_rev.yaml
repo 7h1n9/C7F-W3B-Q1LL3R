@@ -1,0 +1,20 @@
+name: '[De1CTF 2019]cloudmusic_rev'
+category: web
+keywords:
+- de1ctf
+- cloudmusic_rev
+- github
+- impakho
+- de1ctf_cloudmusic_rev
+steps:
+- 'SUID /usr/bin/tac cannot read /flag on this deployment: pod runs with NoNewPrivs=1
+  (seccomp filter active), so SUID elevation is stripped - ''/usr/bin/tac /flag''
+  returns ''Permission denied'' even though'
+- '/media/share.php arbitrary read and php://filter cannot reach /flag: open_basedir=/var/www/html:/tmp
+  excludes it, and no copy exists under /var/www/html or /tmp.'
+- RACE_WORKER_TIMEOUT
+evidence_chain: []
+success_format: CTF2\{[^}]+\}
+source: 08234edd-2358-46fb-a54f-81c04d923db8 (run 7d4456f1-0ad0-4951-a139-9200671dad7a)
+notes: NO_VERIFIED_FLAG
+kind: negative

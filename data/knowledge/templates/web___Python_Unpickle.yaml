@@ -1,0 +1,29 @@
+name: '[Python]Unpickle'
+category: web
+keywords:
+- python
+- unpickle
+- github
+- vulhub
+- blob
+- master
+steps:
+- '[claude] Target http://direct-ctf2.dasctf.com:27841 is vulnerable to Python unpickle
+  deserialization via the ''user'' cookie parameter'
+- '[claude] FLAG is stored in environment variable FLAG=<FLAG>'
+- '[claude] Successful exploitation uses eval() with subprocess.check_output to return
+  command output as a dict username field'
+- '[claude] VERIFIED_FACT=Successful exploitation uses eval() with subprocess.check_output
+  to return command output as a dict username field'
+- Native Worker completed a bounded evidence-backed observation
+evidence_chain:
+- '[claude] Target http://direct-ctf2.dasctf.com:27841 is vulnerable to Python unpickle
+  deserialization via the ''user'' cookie parameter'
+- '[claude] FLAG is stored in environment variable FLAG=<FLAG>'
+- '[claude] Successful exploitation uses eval() with subprocess.check_output to return
+  command output as a dict username field'
+- '[claude] VERIFIED_FACT=Successful exploitation uses eval() with subprocess.check_output
+  to return command output as a dict username field'
+success_format: CTF2\{[^}]+\}
+source: 122c4006-ae63-4745-9753-89c2514b5b29 (solver cb8768bc-2e83-4471-9ae6-fb3a281bc64e)
+notes: ''

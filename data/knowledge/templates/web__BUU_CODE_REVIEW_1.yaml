@@ -1,0 +1,22 @@
+name: BUU CODE REVIEW 1
+category: web
+keywords:
+- buu
+- code
+- review
+- github
+- glzjin
+- buusec_2019_code_review_1
+steps:
+- '[claude] md5 bypass via array params: `md51[]=1&md52[]=2` (md5(array)=NULL, NULL==NULL
+  passes, arrays != each other).'
+- '[claude] unserialize payload `O:3:"BUU":2:{s:7:"correct";N;s:5:"input";R:2;}` makes
+  `input` a reference to `correct`; __destruct''s base64_encode write updates both
+  → strict `===` holds → reads /flag. POST to `'
+- '[claude] Flag: `<FLAG>`'
+- Native Worker completed a bounded evidence-backed observation
+evidence_chain:
+- '[claude] Flag: `<FLAG>`'
+success_format: flag\{[^}]+\}
+source: 2e303e13-63d9-496c-b814-99f2b8e69c31 (solver e15036fb-d49b-4130-a8e2-a17bcbf2a9fe)
+notes: ''

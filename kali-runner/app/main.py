@@ -59,7 +59,6 @@ async def health() -> dict:
 
 async def capability_registry() -> dict:
     tools = [item.name for item in TOOL_REGISTRY]
-    placeholder_tools = {item.name for item in TOOL_REGISTRY if item.placeholder}
     command_map = {"python_run": ("python", "--version"), "script_run": ("python", "--version"), "sandbox_exec": ("file", "--version"), "sqlmap_detect": ("sqlmap", "--version"), "sqlmap_run": ("sqlmap", "--version")}
     async def self_test(command: tuple[str, str] | None) -> tuple[bool, str | None]:
         if command is None:

@@ -1,0 +1,45 @@
+name: '[NewStarCTF 2023 公开赛道]泄漏的秘密 41bf8e51a323'
+category: web
+keywords:
+- newstarctf
+- web
+steps:
+- '[claude] robots.txt in www.zip does not contain a Disallow line — it literally
+  contains `PART ONE: flag{r0bots_1s_s0_us3ful` (34 bytes); server''s live /robots.txt
+  is a different file (Disallow: /static/secretk'
+- '[claude] index.php from www.zip only defines $PART_TWO = `_4nd_www.zip_1s_s0_d4ng3rous}`
+  and echoes the hint heading; the live server''s index.php is not this same file.'
+- '[claude] FOUND_FLAG=<FLAG>'
+- '[codex] Live target robots.txt (`GET /robots.txt`, 200) says `Disallow: /static/secretkey.txt`;
+  local `z/robots.txt` copy is stale/different (it held PART ONE) — trust the server.'
+- '[codex] `GET /static/secretkey.txt` → 200, body `you-will-never-guess` (20 bytes)
+  — a decoy; not part of the flag.'
+- '[codex] `GET /www.zip` → 200, 892 bytes; extracted `robots.txt` = `PART ONE: flag{r0bots_1s_s0_us3ful`
+  and `index.php` = `$PART_TWO = "_4nd_www.zip_1s_s0_d4ng3rous}";` (zip also contains
+  `__MACOSX/._index.php'
+- '[codex] The flag concatenates the `robots.txt` fragment with the `index.php` fragment
+  recovered from the leaked `www.zip` on the real target.'
+- '[claude] Live target /robots.txt returns `Disallow: /static/secretkey.txt`; /www.zip
+  (200, 892 bytes) contains robots.txt with `PART ONE: flag{r0bots_1s_s0_us3ful` and
+  index.php with `$PART_TWO = "_4nd_www.zip'
+- '[codex] Re-fetched /www.zip from the live target is byte-identical (md5 match)
+  to the saved copy; extracting it reproduces both flag fragments verbatim, so the
+  two-piece assembly is confirmed directly from re'
+- '[codex] FOUND_FLAG=<FLAG>'
+- Native Worker completed a bounded evidence-backed observation
+evidence_chain:
+- '[claude] FOUND_FLAG=<FLAG>'
+- '[codex] The flag concatenates the `robots.txt` fragment with the `index.php` fragment
+  recovered from the leaked `www.zip` on the real target.'
+- '[codex] FOUND_FLAG=<FLAG>'
+success_format: CTF2\{[^}]+\}
+source: 41bf8e51-a323-48c3-bd9b-f733e605fdf1 (solver 3a8fe905-d77c-46b0-b1ee-7133e400896b)
+notes: ''
+flag_evidence_chains:
+  'flag #1':
+  - '[claude] FOUND_FLAG=<FLAG>'
+  'flag #2':
+  - '[claude] FOUND_FLAG=<FLAG>'
+  - '[codex] The flag concatenates the `robots.txt` fragment with the `index.php`
+    fragment recovered from the leaked `www.zip` on the real target.'
+  - '[codex] FOUND_FLAG=<FLAG>'

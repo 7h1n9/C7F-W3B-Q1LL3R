@@ -23,7 +23,10 @@ from typing import Any, Optional
 
 from muteki.core.event_bus import EventBus
 from muteki.core.events import (
-    Event, EventType, hitl_translated_payload, node_summarized_payload,
+    Event,
+    EventType,
+    hitl_translated_payload,
+    node_summarized_payload,
 )
 from muteki.core.llm import LLMClient
 

@@ -12,17 +12,16 @@ import asyncio
 import hashlib
 import json
 import re
-import shutil
-import tempfile
 from datetime import UTC, datetime
 from typing import Any
 
 import httpx
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.config import get_settings
 from app.core.database import SessionLocal
 from app.models.run import SolveRun
+from app.schemas.model_config import OPENAI_WIRE_PROVIDER_TYPES
 
 SEMANTIC_CACHE_KEY = "muteki_board_semantic"
 _locks: dict[str, asyncio.Lock] = {}
@@ -171,10 +170,7 @@ def parse_bridge_events(events: list[dict[str, Any]], expected_ids: set[str]) ->
 async def _call_llm(run_id: str, items: list[dict[str, Any]]) -> tuple[list[dict[str, str]], dict[str, int]]:
     """Use the Run's Reason model (or the first enabled openai_compatible config)
     for board semantic analysis."""
-    from app.core.config import get_settings
-    from app.core.database import SessionLocal
     from app.models.model_config import ModelConfig
-    from app.models.run import SolveRun
     from app.services.crypto import decrypt_api_key
     from app.solver.muteki.runtime.configuration import runtime_selection_from_hints
 
@@ -186,10 +182,18 @@ async def _call_llm(run_id: str, items: list[dict[str, Any]]) -> tuple[list[dict
         config = None
         if reason_id:
             config = await session.get(ModelConfig, reason_id)
-        if not config or not config.enabled or config.provider_type != "openai_compatible":
-            # Fallback to first enabled openai_compatible config
+        if (
+            not config
+            or not config.enabled
+            or config.provider_type not in OPENAI_WIRE_PROVIDER_TYPES
+        ):
+            # Fallback to the first enabled OpenAI-wire config. A local_proxy
+            # config qualifies: it is the same protocol on a loopback endpoint.
             config = (await session.scalars(
-                select(ModelConfig).where(ModelConfig.enabled, ModelConfig.provider_type == "openai_compatible").limit(1)
+                select(ModelConfig).where(
+                    ModelConfig.enabled,
+                    ModelConfig.provider_type.in_(sorted(OPENAI_WIRE_PROVIDER_TYPES)),
+                ).limit(1)
             )).first()
         if not config or not config.encrypted_api_key or not config.base_url:
             raise ValueError("BOARD_SEMANTIC_MODEL_UNAVAILABLE")

@@ -15,7 +15,6 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import Base, UUIDTimestampMixin
 
-
 SCRIPT_RECORD_STATUSES = frozenset(
     {
         "CREATED",
@@ -33,7 +32,17 @@ SCRIPT_RECORD_STATUSES = frozenset(
 
 class SolveRun(UUIDTimestampMixin, Base):
     __tablename__ = "solve_runs"
+    __table_args__ = (
+        UniqueConstraint(
+            "control_source_run_id",
+            name="uq_solve_run_control_source_run",
+        ),
+    )
     challenge_id: Mapped[str] = mapped_column(ForeignKey("challenges.id"), nullable=False)
+    control_source_run_id: Mapped[str | None] = mapped_column(
+        ForeignKey("solve_runs.id", ondelete="SET NULL"),
+        nullable=True,
+    )
     engine_type: Mapped[str] = mapped_column(String(40), default="openai_compatible")
     # New Runs default to the structured multi-agent controller.  Existing
     # rows keep their persisted mode, and single_agent remains supported as an

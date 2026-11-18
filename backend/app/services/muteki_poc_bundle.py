@@ -340,6 +340,148 @@ def build_poc_bundle(
     )
 
 
+_LANGUAGE_LABELS = {"python": "Python", "bash": "Shell 脚本", "shell": "Shell 脚本"}
+
+
+def _language_label(language: str) -> str:
+    """Chinese label for a script language shown in the README."""
+
+    return _LANGUAGE_LABELS.get(str(language or "").strip().lower(), "脚本")
+
+
+def build_recovered_bundle(
+    *,
+    run_id: str,
+    challenge_name: str,
+    recovered: Any,
+    target_url: str = "",
+    flag_pattern: str = "",
+) -> PocBundle:
+    """Package a PoC recovered from the Worker's own durable artifacts.
+
+    Used when no HTTP ToolCall carries Evidence — which is the *normal* shape for
+    a native Muteki Worker, whose whole CLI turn is one opaque
+    ``muteki_native_worker`` ToolCall.  Everything in the package comes from
+    bytes the Worker already wrote; nothing is inferred from the flag or prose.
+    """
+
+    from app.services.muteki_poc_recovery import RecoveredPoc
+
+    assert isinstance(recovered, RecoveredPoc)
+    primary = recovered.primary
+    derived = recovered.derived
+    best = recovered.best
+
+    files: dict[str, str] = {}
+    if primary is not None:
+        files[f"worker/{primary.filename}"] = primary.content
+    if derived is not None:
+        files[derived.filename] = derived.content
+
+    notes = [
+        "# 可复现攻击 PoC（从 Worker 产物恢复）",
+        "",
+        "> **本管线未自动执行验证。** 包内脚本取自 Muteki Worker 工作时真实写入/执行过的产物，",
+        "> 未经本管线复跑确认。不要把它当作已验证的结论。",
+        "",
+        f"- 运行 ID：`{run_id}`",
+        f"- 题目：{challenge_name}",
+        f"- 主 PoC：`{best.filename}`（{_language_label(best.language)}）",
+        f"- 来源：{best.provenance}",
+        f"- 源文件：`{best.source_path}`",
+    ]
+    if primary is not None:
+        notes.extend(
+            [
+                "",
+                "## Worker 自写脚本",
+                "",
+                f"`worker/{primary.filename}` 是 Worker 解题时自己写的，**逐字节原样**收录，",
+                "没有经过改写或重构，因此它比任何转录都更忠实。",
+            ]
+        )
+    if derived is not None:
+        notes.extend(
+            [
+                "",
+                "## 解题过程转录（Python）",
+                "",
+                f"`{derived.filename}` 由 Worker 对话原文中真实出现过的 HTTP 请求转写而成，",
+                "每个步骤都把原始 shell 命令保留为注释，便于对照。",
+            ]
+        )
+        if derived.unresolved:
+            notes.extend(
+                [
+                    "",
+                    "### 未解析参数（必须手工补齐）",
+                    "",
+                    "以下参数在捕获时仍是 shell 变量，无法从转录还原，脚本会**跳过**这些步骤：",
+                    "",
+                ]
+            )
+            notes.extend(f"- {item}" for item in derived.unresolved)
+    notes.extend(
+        [
+            "",
+            "## 使用方法",
+            "",
+            "```bash",
+            f"export TARGET_URL='{target_url or 'http://授权目标示例'}'",
+            "python reproduce.py      # 若由 worker/ 下的脚本驱动，请先阅读该脚本原文",
+            "```",
+            "",
+            "- 原始响应、Token、密码与 Cookie 不会写入包；敏感字面量已替换为占位符。",
+            "- 目标必须属于你已获授权的范围；脚本只做读取，不修改任何远端状态。",
+        ]
+    )
+
+    manifest = {
+        "format": "muteki-poc-bundle/v2",
+        "run_id": str(run_id),
+        "challenge": str(challenge_name)[:200],
+        "recovery": "worker_artifacts",
+        "verified_by_pipeline": False,
+        "primary": (
+            {
+                "filename": primary.filename,
+                "language": primary.language,
+                "provenance": primary.provenance,
+                "source_path": primary.source_path,
+            }
+            if primary is not None
+            else None
+        ),
+        "derived": (
+            {
+                "filename": derived.filename,
+                "language": derived.language,
+                "provenance": derived.provenance,
+                "source_path": derived.source_path,
+                "unresolved": list(derived.unresolved),
+            }
+            if derived is not None
+            else None
+        ),
+        "scanned_sources": list(recovered.scanned_sources),
+        "flag_pattern": flag_pattern,
+    }
+    files["README.zh-CN.md"] = "\n".join(notes) + "\n"
+    files["recovery-manifest.json"] = json.dumps(manifest, ensure_ascii=False, indent=2)
+    files["requirements.txt"] = "# 仅依赖 Python 标准库，无需安装第三方包\n"
+
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for path, content in files.items():
+            archive.writestr(path, content.encode("utf-8"))
+    return PocBundle(
+        filename=f"muteki-{run_id}-poc.zip",
+        content=buffer.getvalue(),
+        request_plan=(),
+        evidence_refs=(),
+    )
+
+
 async def build_poc_bundle_for_run(session: Any, run: Any, challenge: Any, graph_state: Mapping[str, Any]) -> PocBundle:
     """Collect the existing trace and build a bundle without a new model call."""
 
@@ -414,22 +556,53 @@ async def build_poc_bundle_for_run(session: Any, run: Any, challenge: Any, graph
             target_url=str(getattr(challenge, "target_url", "") or ""),
         )
         replayable = trace.get("replayable_steps", []) if trace.get("available") else []
-        if not replayable:
-            raise
-        recovered_refs = {
-            str(ref): [str(ref)]
-            for item in trace.get("evidence", [])
-            for ref in [item.get("id")]
-            if ref and str(item.get("status") or "").upper() == "VERIFIED"
-        }
-        return build_poc_bundle(
-            run_id=str(run.id),
-            challenge_name=str(getattr(challenge, "name", "") or ""),
-            steps=replayable,
-            evidence_by_tool_call={},
-            evidence_by_artifact=recovered_refs,
-            graph_pocs=graph_state.get("pocs", ()) if isinstance(graph_state, Mapping) else (),
+        if replayable:
+            recovered_refs = {
+                str(ref): [str(ref)]
+                for item in trace.get("evidence", [])
+                for ref in [item.get("id")]
+                if ref and str(item.get("status") or "").upper() == "VERIFIED"
+            }
+            return build_poc_bundle(
+                run_id=str(run.id),
+                challenge_name=str(getattr(challenge, "name", "") or ""),
+                steps=replayable,
+                evidence_by_tool_call={},
+                evidence_by_artifact=recovered_refs,
+                graph_pocs=graph_state.get("pocs", ()) if isinstance(graph_state, Mapping) else (),
+            )
+
+    # A native Worker's whole CLI turn is ONE opaque ``muteki_native_worker``
+    # ToolCall, so the ORM path above can never satisfy the Evidence gate and
+    # the recovered trace only sees ``.txt`` audit files.  Fall back to what the
+    # Worker actually left on disk: its own exploit scripts and the real HTTP
+    # requests in the captured transcripts.
+    from app.services.muteki_poc_recovery import recover_poc
+
+    recovered = await asyncio.to_thread(
+        recover_poc,
+        str(getattr(run, "workspace_path", "") or ""),
+        target_url=str(getattr(challenge, "target_url", "") or ""),
+        flag_pattern=str(getattr(challenge, "flag_pattern", "") or ""),
+    )
+    if recovered is None:
+        raise PocBundleUnavailable(
+            "MUTEKI_POC_NOT_REPRODUCIBLE: no completed HTTP request has a durable "
+            "Evidence reference, and the Worker left no scripts or captured requests"
         )
+    return build_recovered_bundle(
+        run_id=str(run.id),
+        challenge_name=str(getattr(challenge, "name", "") or ""),
+        recovered=recovered,
+        target_url=str(getattr(challenge, "target_url", "") or ""),
+        flag_pattern=str(getattr(challenge, "flag_pattern", "") or ""),
+    )
 
 
-__all__ = ["PocBundle", "PocBundleUnavailable", "build_poc_bundle", "build_poc_bundle_for_run"]
+__all__ = [
+    "PocBundle",
+    "PocBundleUnavailable",
+    "build_poc_bundle",
+    "build_poc_bundle_for_run",
+    "build_recovered_bundle",
+]

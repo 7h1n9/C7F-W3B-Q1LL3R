@@ -8,17 +8,22 @@ in an offline thesis-evaluation workflow.
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.benchmark.case_definition import BenchmarkCase
 from app.models.multi_agent import AgentTask, PlannerProposal
-from app.models.run import AgentTurn, RunEvent, SolveRun, ToolCall
+from app.models.run import AgentTurn, FlagCandidate, RunEvent, SolveRun, ToolCall
 from app.models.solver_state import SolverState
+
+EVALUATOR_NAME = "c7f-benchmark-evaluator"
+EVALUATOR_SCHEMA_VERSION = 1
+EVALUATION_FINAL_RESULTS = frozenset({"SUCCESS", "PARTIAL", "INCOMPLETE"})
 
 
 def _items(value: Any) -> list[Mapping[str, Any]]:
@@ -123,6 +128,7 @@ def evaluate_run(case: BenchmarkCase, snapshot: Mapping[str, Any], output_dir: s
     exploits = _items(context.get("exploit_results"))
     impacts = _items(context.get("impact_assessments"))
     findings = _items(context.get("findings"))
+    flag_candidates = _items(snapshot.get("flag_candidates"))
 
     planner_tasks = [task for task in tasks if str(task.get("task_kind") or "").upper() in {"PLANNING", "PLANNER"}]
     planner_calls = len(planner_tasks) or len(proposals) or sum(_event_type(event) == "planner.proposal.created" for event in events)
@@ -147,13 +153,43 @@ def evaluate_run(case: BenchmarkCase, snapshot: Mapping[str, Any], output_dir: s
     finding_created = _status(findings, "CREATED") or any(
         _event_type(event) == "security.finding.created" for event in events
     )
+    verified_flag = any(
+        item.get("verified") is True
+        and str(item.get("review_state") or "").upper() == "VALID"
+        for item in flag_candidates
+    )
     discovered = bool(hypotheses or validations or exploits or impacts or findings)
     validation_success = _status(validations, "VALIDATED", "SUCCESS")
     exploit_complete = _status(exploits, "SUCCESS")
     strategy_changes = [*feedback_events, *migration_events]
-    explicit_result = snapshot.get("final_result")
-    final_result = str(explicit_result) if explicit_result else (
-        "SUCCESS" if finding_created else "PARTIAL" if discovered else "INCOMPLETE"
+    final_result = (
+        "SUCCESS"
+        if verified_flag or finding_created
+        else "PARTIAL"
+        if discovered
+        else "INCOMPLETE"
+    )
+
+    # ── Pass@k framing (CTF-Dojo comparable) ────────────────────────────────
+    # One Run is one *attempt* — the same unit the CTF-Dojo paper reports Pass@1
+    # over — so ``pass_at_1`` is simply the share of Runs that ended SUCCESS.
+    # ``turns_used`` is what makes "solved, but slower" visible, and
+    # ``verified_flag_rank`` records how many candidate submissions were needed
+    # before one passed the gate (1 = first submission accepted).
+    turns_used = agent_calls
+    solved_within_budget = (
+        None
+        if case.turn_budget is None
+        else bool(final_result == "SUCCESS" and turns_used <= case.turn_budget)
+    )
+    verified_flag_rank = next(
+        (
+            index
+            for index, item in enumerate(flag_candidates, start=1)
+            if item.get("verified") is True
+            and str(item.get("review_state") or "").upper() == "VALID"
+        ),
+        None,
     )
 
     report = {
@@ -166,12 +202,32 @@ def evaluate_run(case: BenchmarkCase, snapshot: Mapping[str, Any], output_dir: s
         "evidence_chain": _evidence_chain(context, snapshot.get("evidence_chain"), events),
         "strategy_changes": strategy_changes,
         "final_result": final_result,
+        "evaluator": {
+            "name": EVALUATOR_NAME,
+            "schema_version": EVALUATOR_SCHEMA_VERSION,
+            "run_id": snapshot.get("run_id"),
+            "basis": "durable_run_evidence",
+            "evidence": {
+                "verified_flag_candidates": sum(
+                    item.get("verified") is True
+                    and str(item.get("review_state") or "").upper() == "VALID"
+                    for item in flag_candidates
+                ),
+                "finding_created": finding_created,
+            },
+        },
         # Flat lifecycle flags make thesis aggregation possible without
         # parsing the nested metrics object.
         "validation_success": validation_success,
         "exploit_success": exploit_complete,
         "impact_confirmed": _status(impacts, "CONFIRMED"),
         "finding_created": finding_created,
+        # Pass@k framing: one Run == one attempt.
+        "attempt": 1,
+        "turns_used": turns_used,
+        "turn_budget": case.turn_budget,
+        "solved_within_budget": solved_within_budget,
+        "verified_flag_rank": verified_flag_rank,
         "metrics": {
             "agent": {
                 "agent_calls": agent_calls,
@@ -209,6 +265,52 @@ def evaluate_run(case: BenchmarkCase, snapshot: Mapping[str, Any], output_dir: s
     return report
 
 
+def aggregate_pass_at_k(reports: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    """Aggregate per-Run reports into CTF-Dojo-comparable headline numbers.
+
+    ``pass_at_1`` is the share of attempts (Runs) that ended ``SUCCESS`` — the
+    same unit CTF-Dojo reports — and ``success_within_budget`` narrows it to the
+    attempts that succeeded inside the challenge's declared interaction budget.
+    Both are ``None`` when there is nothing to average, never a fabricated 0.0,
+    so an empty experiment cannot be mistaken for a failed one.
+    """
+
+    total = len(reports)
+    if total == 0:
+        return {
+            "attempts": 0,
+            "pass_at_1": None,
+            "success_within_budget": None,
+            "mean_turns_used": None,
+        }
+
+    successes = sum(
+        1 for report in reports if str(report.get("final_result") or "") == "SUCCESS"
+    )
+    budgeted = [
+        report
+        for report in reports
+        if report.get("solved_within_budget") is not None
+    ]
+    turns = [
+        int(report["turns_used"])
+        for report in reports
+        if isinstance(report.get("turns_used"), (int, float))
+        and not isinstance(report.get("turns_used"), bool)
+    ]
+    return {
+        "attempts": total,
+        "pass_at_1": successes / total,
+        "success_within_budget": (
+            sum(1 for report in budgeted if report["solved_within_budget"])
+            / len(budgeted)
+            if budgeted
+            else None
+        ),
+        "mean_turns_used": (sum(turns) / len(turns)) if turns else None,
+    }
+
+
 async def evaluate_session(
     session: AsyncSession,
     run_id: str,
@@ -224,6 +326,7 @@ async def evaluate_session(
     calls = list((await session.scalars(select(ToolCall).where(ToolCall.run_id == run_id).order_by(ToolCall.created_at))).all())
     proposals = list((await session.scalars(select(PlannerProposal).where(PlannerProposal.run_id == run_id).order_by(PlannerProposal.created_at))).all())
     events = list((await session.scalars(select(RunEvent).where(RunEvent.run_id == run_id).order_by(RunEvent.sequence))).all())
+    flags = list((await session.scalars(select(FlagCandidate).where(FlagCandidate.run_id == run_id).order_by(FlagCandidate.created_at))).all())
     state = await session.scalar(select(SolverState).where(SolverState.run_id == run_id))
     snapshot = {
         "run_id": run.id,
@@ -237,7 +340,15 @@ async def evaluate_session(
         "tool_calls": [{"id": item.id, "tool_name": item.tool_name, "status": item.status} for item in calls],
         "planner_proposals": [{"id": item.id, "current_stage": item.current_stage} for item in proposals],
         "events": [{"sequence": item.sequence, "event_type": item.event_type, **(item.payload_json or {})} for item in events],
+        "flag_candidates": [
+            {
+                "id": item.id,
+                "candidate": item.candidate,
+                "verified": item.verified,
+                "review_state": item.review_state,
+            }
+            for item in flags
+        ],
         "security_context": (state.security_context_json if state else {}) or {},
-        "final_result": "SUCCESS" if run.status == "COMPLETED_SOLVED" else run.status,
     }
     return evaluate_run(case, snapshot, output_dir)

@@ -1,0 +1,12 @@
+name: Unkonwn Web 1
+category: web
+keywords:
+- unkonwn
+- web
+steps:
+- ROUND_BUDGET_EXHAUSTED_BEFORE_REASON
+evidence_chain: []
+success_format: CTF2\{[^}]+\}
+source: 01526db6-a2ad-47fa-85cc-2f0fb1f02cfa (run f08196e7-11b4-43dc-81db-6126f68f1d5d)
+notes: NO_VERIFIED_FLAG
+kind: negative

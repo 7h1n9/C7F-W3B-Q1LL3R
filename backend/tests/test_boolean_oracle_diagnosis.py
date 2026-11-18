@@ -3,9 +3,12 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
 from app.models.base import Base
-from app.models.solver_state import SolverState
 from app.models.run import SolveRun
-from app.services.boolean_oracle_diagnosis import diagnose_boolean_oracle, boolean_oracle_diagnosis_service
+from app.models.solver_state import SolverState
+from app.services.boolean_oracle_diagnosis import (
+    boolean_oracle_diagnosis_service,
+    diagnose_boolean_oracle,
+)
 
 
 def _payload(**values):

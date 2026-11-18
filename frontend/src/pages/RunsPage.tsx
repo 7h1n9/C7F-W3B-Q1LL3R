@@ -1,21 +1,31 @@
-import { ArrowRightOutlined, DeleteOutlined, ReloadOutlined } from "@ant-design/icons";
+import { ArrowRightOutlined, DeleteOutlined, ExperimentOutlined, ReloadOutlined } from "@ant-design/icons";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Button, Card, Empty, message, Modal, Popconfirm, Space, Table, Tag } from "antd";
+import { Alert, Button, Card, Empty, message, Modal, Popconfirm, Radio, Space, Table, Tag } from "antd";
 import type { Key } from "react";
 import { useState } from "react";
 import { Link } from "react-router-dom";
 import { RunStatusTag, runStatusLabel } from "../components/RunStatusTag";
 import { api } from "../services/api";
-import type { SolveRun } from "../types/api";
-import { solverModeLabel } from "../utils/run";
+import type { KnowledgeMode, SolveRun } from "../types/api";
+import { isControlSourceRunStatus, solverModeLabel } from "../utils/run";
 
 const formatTime = (value?: string | null) =>
   value ? new Date(value).toLocaleString("zh-CN", { hour12: false }) : "—";
+
+const knowledgeModeFromRun = (run: SolveRun): KnowledgeMode => {
+  const value = run.hints_json?.knowledge_mode;
+  return value === "on" ? "on" : "off";
+};
+
+const oppositeKnowledgeMode = (run: SolveRun): KnowledgeMode =>
+  knowledgeModeFromRun(run) === "on" ? "off" : "on";
 
 export function RunsPage() {
   const client = useQueryClient();
   const [selectedRowKeys, setSelectedRowKeys] = useState<Key[]>([]);
   const [page, setPage] = useState({ current: 1, pageSize: 10 });
+  const [controlRun, setControlRun] = useState<SolveRun | null>(null);
+  const [controlValue, setControlValue] = useState<KnowledgeMode>("on");
   const query = useQuery({ queryKey: ["runs"], queryFn: api.listRuns });
   const runs = query.data ?? [];
 
@@ -40,7 +50,34 @@ export function RunsPage() {
     onError: (error: Error) => message.error(error.message),
   });
 
+  const createControl = useMutation({
+    mutationFn: ({ runId, value }: { runId: string; value: KnowledgeMode }) =>
+      api.createControlRun(runId, {
+        factor: "knowledge_mode",
+        counterfactual_value: value,
+        start: true,
+      }),
+    onSuccess: (result) => {
+      void client.invalidateQueries({ queryKey: ["runs"] });
+      void client.invalidateQueries({ queryKey: ["knowledge-experiments"] });
+      void client.invalidateQueries({ queryKey: ["knowledge-experiment"] });
+      const started = result.started_run_ids.includes(result.control_run.id);
+      const shortId = result.control_run.id.slice(0, 8);
+      if (started) {
+        message.success(`已创建并启动对照组 ${shortId}`);
+      } else if (result.start_error) {
+        message.warning(`已创建对照组 ${shortId}，但启动失败：${result.start_error.message}`);
+      } else {
+        message.success(`已创建对照组 ${shortId}，未启动`);
+      }
+      setControlRun(null);
+    },
+    onError: (error: Error) => message.error(error.message),
+  });
+
   const selectedIds = selectedRowKeys.map(String);
+  const sourceKnowledgeMode = controlRun ? knowledgeModeFromRun(controlRun) : undefined;
+  const sameAsSource = Boolean(controlRun && sourceKnowledgeMode === controlValue);
   const currentPageRuns = runs.slice(
     (page.current - 1) * page.pageSize,
     page.current * page.pageSize,
@@ -57,6 +94,25 @@ export function RunsPage() {
       cancelText: "取消",
       onOk: () => removeMany.mutate(selectedIds),
     });
+  };
+
+  const openControlModal = (run: SolveRun) => {
+    if (!isControlSourceRunStatus(run.status)) return;
+    setControlRun(run);
+    setControlValue(oppositeKnowledgeMode(run));
+  };
+
+  const closeControlModal = () => {
+    if (!createControl.isPending) setControlRun(null);
+  };
+
+  const submitControl = () => {
+    if (!controlRun || !isControlSourceRunStatus(controlRun.status)) return;
+    if (sameAsSource) {
+      message.warning("对照值与源 Run 相同，请选择相反值。");
+      return;
+    }
+    createControl.mutate({ runId: controlRun.id, value: controlValue });
   };
 
   return (
@@ -168,23 +224,22 @@ export function RunsPage() {
             { title: "启动时间", dataIndex: "started_at", render: formatTime },
             { title: "结束时间", dataIndex: "finished_at", render: formatTime },
             {
-              title: "评分",
-              render: (_, run) =>
-                run.score?.total_score !== undefined && run.score?.total_score !== null ? (
-                  <span className="id-code">{Number(run.score.total_score).toFixed(1)}</span>
-                ) : (
-                  "—"
-                ),
-            },
-            {
               title: "操作",
               render: (_, run) => (
-                <Space>
+                <Space wrap>
                   <Link to={`/runs/${run.id}`}>
                     <Button type="link" icon={<ArrowRightOutlined />}>
                       进入工作区
                     </Button>
                   </Link>
+                  <Button
+                    type="link"
+                    icon={<ExperimentOutlined />}
+                    disabled={!isControlSourceRunStatus(run.status)}
+                    onClick={() => openControlModal(run)}
+                  >
+                    添加对照
+                  </Button>
                   <Popconfirm
                     title="确认删除这个解题任务？"
                     description="任务时间线、工具调用、证据和本地工作区都会被删除。"
@@ -202,6 +257,44 @@ export function RunsPage() {
           ]}
         />
       </Card>
+      <Modal
+        open={Boolean(controlRun)}
+        title="快速添加对照组"
+        okText="创建并启动"
+        cancelText="取消"
+        confirmLoading={createControl.isPending}
+        maskClosable={!createControl.isPending}
+        onOk={submitControl}
+        onCancel={closeControlModal}
+      >
+        {controlRun ? (
+          <Space direction="vertical" size="middle" style={{ width: "100%" }}>
+            <div>
+              <Tag className="id-code">knowledge_mode</Tag>
+              <span style={{ marginInlineStart: 8, color: "#6b948d" }}>
+                源 Run（{runStatusLabel(controlRun.status)}）：{sourceKnowledgeMode}
+              </span>
+            </div>
+            <Radio.Group
+              optionType="button"
+              buttonStyle="solid"
+              value={controlValue}
+              disabled={createControl.isPending}
+              onChange={(event) => setControlValue(event.target.value as KnowledgeMode)}
+            >
+              <Radio.Button value="off">关闭 off</Radio.Button>
+              <Radio.Button value="on">开启 on</Radio.Button>
+            </Radio.Group>
+            {sameAsSource ? (
+              <Alert
+                type="warning"
+                showIcon
+                message="对照值与源 Run 相同，请选择相反值。"
+              />
+            ) : null}
+          </Space>
+        ) : null}
+      </Modal>
     </>
   );
 }

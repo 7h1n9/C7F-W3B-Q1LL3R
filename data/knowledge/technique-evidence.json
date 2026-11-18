@@ -1,0 +1,64 @@
+{
+  "schema_version": 1,
+  "source": "data/training transitions (train split, accepted runs)",
+  "min_evidence_runs": 4,
+  "min_evidence_rate": 0.3,
+  "techniques": {
+    "recon.dir": {
+      "runs_fact": 1,
+      "runs_dead": 11
+    },
+    "rce.ognl": {
+      "runs_fact": 11,
+      "runs_dead": 8
+    },
+    "recon.port": {
+      "runs_fact": 2,
+      "runs_dead": 2
+    },
+    "lfi.traversal": {
+      "runs_fact": 8,
+      "runs_dead": 16
+    },
+    "rce.deser": {
+      "runs_fact": 5,
+      "runs_dead": 6
+    },
+    "ssrf.internal": {
+      "runs_fact": 1,
+      "runs_dead": 4
+    },
+    "lfi.wrapper": {
+      "runs_fact": 3,
+      "runs_dead": 8
+    },
+    "sqli.time": {
+      "runs_fact": 0,
+      "runs_dead": 1
+    },
+    "sqli.union": {
+      "runs_fact": 7,
+      "runs_dead": 7
+    },
+    "upload.bypass": {
+      "runs_fact": 1,
+      "runs_dead": 5
+    },
+    "auth.jwt": {
+      "runs_fact": 0,
+      "runs_dead": 2
+    },
+    "recon.source": {
+      "runs_fact": 7,
+      "runs_dead": 20
+    },
+    "ssti.eval": {
+      "runs_fact": 5,
+      "runs_dead": 4
+    },
+    "sqli.boolean": {
+      "runs_fact": 4,
+      "runs_dead": 9
+    }
+  }
+}

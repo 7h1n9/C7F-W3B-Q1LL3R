@@ -4,7 +4,6 @@ from sqlalchemy import select
 
 from app.models.run import RunEvent
 
-
 RESUME_EVENTS = {
     "planner.task.created", "agent.task.created", "analysis.review.created",
     "analysis.plan_review.dispatched", "approved_action.created", "tool.requested", "tool.started",

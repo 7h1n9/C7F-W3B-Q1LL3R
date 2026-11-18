@@ -1,0 +1,25 @@
+name: PyCalX 1&2
+category: web
+keywords:
+- pycalx
+- cgi
+- bin
+- pycalx2
+steps:
+- 'recon lane: no public static/source/backup/env endpoint exposes /var/www/flag;
+  flag only via in-process FLAG variable'
+- '[codex] static file / backup / source-map / env route exposing the flag — none
+  exist.'
+- '[codex] pycalx1 expression injection: blacklist `( ) [ ] '' "` trips before the
+  empty-string check (`F[0:1]` → `Invalid value`), and outside comparisons only digit/True/False
+  output is printed.'
+- '[codex] pycalx2 `op` eval injection: `get_value` truncates to 64 chars and `get_op`
+  to 2 chars, so only one injected character survives into `eval`.'
+- RACE_WORKER_TIMEOUT
+- RECOVERY_CANDIDATES_REJECTED 1 value(s) under the challenge banner did not satisfy
+  the gate
+evidence_chain: []
+success_format: CTF2\{[^}]+\}
+source: 680e036b-6dce-4030-90eb-5c63e2f0eb93 (run 9738715c-92ed-4b1f-996b-fb895335c437)
+notes: NO_VERIFIED_FLAG
+kind: negative

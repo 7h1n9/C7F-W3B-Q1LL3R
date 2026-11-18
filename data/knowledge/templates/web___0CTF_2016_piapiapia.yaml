@@ -1,0 +1,16 @@
+name: '[0CTF 2016]piapiapia'
+category: web
+keywords:
+- ctf
+- piapiapia
+steps:
+- '[claude] Confirmed from real output: the base64 photo in my profile page decoded
+  to `/var/www/html/config.php` source, obtained via the nickname-array serialization
+  desync (`where`→`hacker` growth) that rewrot'
+evidence_chain:
+- '[claude] Confirmed from real output: the base64 photo in my profile page decoded
+  to `/var/www/html/config.php` source, obtained via the nickname-array serialization
+  desync (`where`→`hacker` growth) that rewrot'
+success_format: CTF2\{[^}]+\}
+source: 0ff84920-9ad9-4c5a-97af-f81a18c2552d (solver 1d8ef326-298f-4c5a-bcd4-4af30c70ba22)
+notes: ''

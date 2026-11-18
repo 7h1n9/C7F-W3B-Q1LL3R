@@ -9,7 +9,14 @@ from sqlalchemy.pool import StaticPool
 
 from app.models import Base
 from app.models.challenge import Challenge
-from app.models.multi_agent import AgentTask, AgentTaskResult, AnalysisReview, ApprovedAction, PlannerProposal, VerifiedFact
+from app.models.multi_agent import (
+    AgentTask,
+    AgentTaskResult,
+    AnalysisReview,
+    ApprovedAction,
+    PlannerProposal,
+    VerifiedFact,
+)
 from app.models.run import Artifact, Observation, SolveRun, ToolCall
 from app.models.solver_state import SolverState
 from app.orchestration.multi_agent_orchestrator import MultiAgentOrchestrator

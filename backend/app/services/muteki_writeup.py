@@ -66,20 +66,160 @@ def _classification(facts: Sequence[Mapping[str, Any]]) -> str:
     return "待由已验证事实确认"
 
 
+_TIER_LABELS = {"simple": "简单", "medium": "中等", "complex": "复杂"}
+_SEMANTIC_STATUS_LABELS = {
+    "not_run": "未运行",
+    "running": "进行中",
+    "completed": "已完成",
+    "failed": "失败",
+}
+
+# The step classifier returns stable ASCII markers; the report shows Chinese.
+_STEP_KIND_LABELS = {"READ": "读取", "OBSERVE": "观察", "WRITE": "写入"}
+
+# A fact's importance arrives as an ASCII enum; the report shows Chinese.
+_IMPORTANCE_LABELS = {
+    "critical": "关键",
+    "high": "重要",
+    "medium": "中等",
+    "low": "次要",
+    "info": "提示",
+}
+
+
+def _importance_label(importance: Any) -> str:
+    """Chinese label for a fact's importance marker."""
+
+    text = str(importance or "").strip().lower()
+    return _IMPORTANCE_LABELS.get(text, str(importance or "中等"))
+
+
+# Vulnerability classes are shown to readers, so each English abbreviation gets a
+# Chinese gloss. The abbreviation is kept in parentheses: it is what the scanner
+# emits and what a reviewer greps for, so dropping it would lose precision.
+_VULN_TYPE_LABELS = {
+    "SQLI": "SQL 注入",
+    "SQL_INJECTION": "SQL 注入",
+    "IDOR": "越权访问（IDOR）",
+    "PATH_TRAVERSAL": "路径穿越",
+    "CMD_INJECTION": "命令注入",
+    "COMMAND_INJECTION": "命令注入",
+    "SSRF": "服务端请求伪造（SSRF）",
+    "XSS": "跨站脚本（XSS）",
+    "SSTI": "服务端模板注入（SSTI）",
+    "LFI": "本地文件包含（LFI）",
+    "RFI": "远程文件包含（RFI）",
+    "XXE": "XML 外部实体注入（XXE）",
+    "CSRF": "跨站请求伪造（CSRF）",
+    "MODEL_INVERSION": "模型反演",
+    "MODEL_MEMORIZATION_EXTRACTION": "训练数据记忆提取",
+    "ARBITRARY_FILE_WRITE": "任意文件写入",
+    "FILE_UPLOAD": "文件上传",
+    "WEAK_CREDENTIALS": "弱口令",
+    "AUTH_BYPASS": "认证绕过",
+    "INFO_DISCLOSURE": "信息泄露",
+    "DESERIALIZATION": "反序列化",
+    "LOGIC_FLAW": "业务逻辑缺陷",
+    "GENERIC_WEB": "通用 Web 漏洞",
+}
+
+
+def _vuln_type_label(vuln_type: Any) -> str:
+    """Chinese gloss for a vulnerability class, keeping the ASCII code visible.
+
+    Handles the composite the renderer builds when the model and the heuristic
+    disagree (``X（模型判定）/ Y（启发式）``) by glossing each code on its own,
+    so no part of the string stays untranslated.
+    """
+
+    text = str(vuln_type or "").strip()
+    if not text:
+        return ""
+
+    def _gloss(part: str) -> str:
+        # Peel the "（模型判定）" / "（启发式）" annotation off before matching the
+        # code, then put it back — otherwise the lookup misses on the suffix.
+        match = re.match(r"^(?P<code>[^（(]+?)\s*(?P<note>[（(].*)$", part.strip())
+        if not match:
+            code, note = part.strip(), ""
+        else:
+            code, note = match.group("code").strip(), match.group("note")
+        label = _VULN_TYPE_LABELS.get(code.upper())
+        if not label:
+            return part.strip()
+        return f"{label}（{code}）{note}"
+
+    if "（模型判定）" in text or "（启发式）" in text:
+        parts = re.split(r"\s*/\s*", text)
+        return " / ".join(_gloss(part) for part in parts if part.strip())
+    return _gloss(text)
+
+
+def _tier_label(tier: Any) -> str:
+    """Chinese label for the complexity tier, keeping the raw value as a fallback."""
+
+    text = str(tier or "").strip()
+    return _TIER_LABELS.get(text, text or "未评估")
+
+
+def _semantic_status_label(status: Any) -> str:
+    """Chinese label for the semantic-analysis status."""
+
+    text = str(status or "").strip() or "not_run"
+    return _SEMANTIC_STATUS_LABELS.get(text, text)
+
+
 def _evidence_rows(evidence: Sequence[Any]) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for item in evidence:
         rows.append(
             {
                 "id": str(_value(item, "id", "")),
-                "type": _safe_text(_value(item, "evidence_type", "Evidence"), limit=120),
-                "status": _safe_text(_value(item, "status", ""), limit=40),
+                "type": _evidence_type_label(_value(item, "evidence_type", "Evidence")),
+                "status": _evidence_status_label(_value(item, "status", "")),
                 "summary": _safe_text(_value(item, "summary", ""), limit=500),
                 "tool_call_id": str(_value(item, "tool_call_id", "") or ""),
                 "artifact_id": str(_value(item, "artifact_id", "") or ""),
             }
         )
     return rows
+
+
+# Evidence type / status arrive as stable ASCII enums from the database. They are
+# rendered for humans, so each known value gets a Chinese gloss; anything unknown
+# passes through unchanged rather than being silently blanked.
+_EVIDENCE_TYPE_LABELS = {
+    "HTTP_RESPONSE": "HTTP 响应",
+    "HTTP_REQUEST": "HTTP 请求",
+    "MUTEKI_NATIVE_WORKER": "Muteki 原生 Worker 输出",
+    "TOOL_ARTIFACT": "工具制品",
+    "FILE": "文件",
+    "LOG": "日志",
+    "SCREENSHOT": "截图",
+    "EVIDENCE": "证据",
+}
+_EVIDENCE_STATUS_LABELS = {
+    "VERIFIED": "已验证",
+    "PENDING": "待验证",
+    "UNVERIFIED": "未验证",
+    "REJECTED": "已否决",
+    "STALE": "已过期",
+    "INVALID": "无效",
+}
+
+
+def _evidence_type_label(evidence_type: Any) -> str:
+    """Chinese gloss for an evidence type, keeping the raw enum as a fallback."""
+
+    text = _safe_text(evidence_type, limit=120)
+    return _EVIDENCE_TYPE_LABELS.get(text.strip().upper(), text)
+
+
+def _evidence_status_label(status: Any) -> str:
+    """Chinese gloss for an evidence status."""
+
+    text = _safe_text(status, limit=40)
+    return _EVIDENCE_STATUS_LABELS.get(text.strip().upper(), text)
 
 
 
@@ -168,7 +308,7 @@ def _group_by_phase(calls, semantic_by_card, target_url):
 
 def _build_semantic_narrative(phases, vuln_type, template, verified):
     lines=[]
-    lines.extend(["## \u4e00\u53e5\u8bdd\u89e3\u6cd5",""])
+    lines.extend(["## \u4e00\u53e5\u8bdd\u89e3\u6cd5\uff08\u89e3\u9898\u601d\u8def\uff09",""])
     if template: lines.append(template.get("recon_intro",""))
     else: lines.append(f"\u901a\u8fc7\u81ea\u52a8\u5316\u63a2\u6d4b\u4e0e\u89e3\u9898\u5f15\u64ce\uff0c\u5bf9\u76ee\u6807\u6267\u884c\u4e86{sum(len(v)for v in phases.values())}\u6b65\u64cd\u4f5c\u3002")
     lines.extend(["","## \u653b\u51fb\u94fe",""])
@@ -196,13 +336,34 @@ def _build_semantic_narrative(phases, vuln_type, template, verified):
                 try:
                     js=json.dumps(ags,ensure_ascii=False,indent=2)
                     if len(js)<400: lines.extend(["   \u53c2\u6570\uff1a","   \u60f3\u5173\u7b26","   "+js,"   \u201d\u201d\u201d"])
-                except: pass
+                except Exception: pass
             lines.append("")
     return lines
 
+def _step_kind(tool: str, args: Any) -> str:
+    """Classify one step as READ / OBSERVE / WRITE for a readable chain.
+
+    A wall of tool names hides the shape of the attack; whether a step merely
+    read target data, confirmed a behaviour, or changed target state is the one
+    distinction a reader actually needs.  The marker is kept as an internal
+    constant (``_STEP_KIND_LABELS`` localizes it for display).
+    """
+
+    name = str(tool or "").lower()
+    arguments = args if isinstance(args, Mapping) else {}
+    method = str(arguments.get("method") or "").upper()
+    if name in {"file_write", "file_write_lines", "command_execution", "node_repl", "node_repl.js", "python_exec", "sqlmap_run"}:
+        return "WRITE"
+    if name.startswith("sql") or method in {"POST", "PUT", "PATCH", "DELETE"}:
+        return "WRITE"
+    if method in {"GET", "HEAD", "OPTIONS"} or name in {"file_read", "http_request", "http_session_request", "browser_navigate"}:
+        return "READ"
+    return "OBSERVE"
+
+
 def _build_template_narrative(calls, vuln_type, template, verified, semantic_by_card, target_url):
     lines=[]
-    lines.extend(["## \u4e00\u53e5\u8bdd\u89e3\u6cd5",""])
+    lines.extend(["## \u4e00\u53e5\u8bdd\u89e3\u6cd5\uff08\u89e3\u9898\u601d\u8def\uff09",""])
     if template:
         disc=template.get("discovery",""); lines.append(f"\u901a\u8fc7{vuln_type}\u6f0f\u6d1e\uff0c{disc}"[:200])
     elif verified: lines.append(_safe_text(_value(verified[0],"content",""),limit=200))
@@ -220,13 +381,63 @@ def _build_template_narrative(calls, vuln_type, template, verified, semantic_by_
             elif path in {"/","/index",""}: chain.append("\u8bbf\u95ee\u9996\u9875")
             else: chain.append(f"GET {path}")
     seen=[]; [seen.append(s) for s in chain if s not in seen]
-    lines.append(" \u2192 ".join(seen[:6]) if seen else "\u81ea\u52a8\u5316\u5de5\u5177\u8c03\u7528")
+    lines.append(" → ".join(seen[:6]) if seen else "自动化工具调用")
+    lines.extend(["", "阶段标记：读取=读取目标数据 / 观察=确认响应或现象 / 写入=对目标产生写入或状态变更。", ""])
     lines.extend(["","## \u6267\u884c\u8fc7\u7a0b",""])
     for i,call in enumerate(calls[:20]):
         tool=str(_value(call,"tool_name","")); args=_value(call,"normalized_arguments") or _value(call,"arguments_json") or {}
         url=str(args.get("url") or ""); path=urlsplit(url).path or ""
-        lines.extend([f"**{i+1}. {_tool_to_zh(tool,args,path)}**",""])
+        _reason = _safe_text(args.get("reason") or args.get("intent") or "", limit=200)
+        _label = _reason or _tool_to_zh(tool,args,path)
+        lines.extend([f"**{i+1}. [{_STEP_KIND_LABELS.get(_step_kind(tool,args), _step_kind(tool,args))}] {_label}**",""])
+        _ags = _safe_argument(args, target_url="")
+        if isinstance(_ags, dict) and _ags:
+            try:
+                _js = json.dumps(_ags, ensure_ascii=False, indent=2)
+            except Exception:
+                _js = ""
+            if _js and len(_js) < 600:
+                lines.extend(["   参数：", "   ```", *["   " + row for row in _js.split(chr(10))], "   ```"])
     return lines
+
+def _build_llm_narrative(
+    one_liner: str,
+    attack_chain: Sequence[str],
+    execution: Sequence[Mapping[str, Any]],
+) -> list[str]:
+    """Render the model-authored narrative sections.
+
+    These three sections are the ones the template renderer was structurally
+    unable to write: it could only quote the single promoted fact, and it had
+    no record of intermediate steps at all.  Anything missing here falls through
+    to the deterministic renderer for that section.
+    """
+
+    lines: list[str] = []
+    lines.extend(["## 一句话解法", ""])
+    lines.append(_safe_text(one_liner, limit=400) or "（模型未给出结论）")
+    lines.extend(["", "## 攻击链", ""])
+    if attack_chain:
+        for index, step in enumerate(list(attack_chain)[:10], start=1):
+            lines.append(f"{index}. {_safe_text(step, limit=300)}")
+    else:
+        lines.append("（模型未给出链路）")
+    lines.extend(["", "## 执行过程", ""])
+    if execution:
+        for index, item in enumerate(list(execution)[:20], start=1):
+            step = int(item.get("step") or index)
+            title = _safe_text(item.get("title"), limit=120) or f"步骤 {step}"
+            detail = _safe_text(item.get("detail"), limit=1200)
+            lines.append(f"**{step}. {title}**")
+            lines.append("")
+            if detail:
+                lines.append(detail)
+                lines.append("")
+    else:
+        lines.append("（模型未给出执行过程）")
+    lines.append("")
+    return lines
+
 
 def render_muteki_writeup(
     *,
@@ -240,10 +451,10 @@ def render_muteki_writeup(
     poc_available: bool,
     recovered_trace: Mapping[str, Any] | None = None,
     semantic_analysis: Mapping[str, Any] | None = None,
+    llm_report: Mapping[str, Any] | None = None,
 ) -> str:
     target_url = str(getattr(challenge, "target_url", "") or "")
     facts = [item for item in (graph_state.get("facts", []) or []) if isinstance(item, Mapping)]
-    intents = [item for item in (graph_state.get("intents", []) or []) if isinstance(item, Mapping)]
     dead_ends = [item for item in (graph_state.get("dead_ends", []) or []) if isinstance(item, Mapping)]
     evidence_rows = _evidence_rows(evidence)
     recovered_trace = recovered_trace or {}
@@ -262,34 +473,67 @@ def render_muteki_writeup(
             flag = str(result.get("flag") or result.get("candidate") or "")
         else:
             flag = str(getattr(result, "flag", "") or getattr(result, "candidate", "") or "")
+    llm_report = dict(llm_report or {})
+    llm_status = str(llm_report.get("status") or "not_run")
+    llm_sections = dict(llm_report.get("sections") or {}) if llm_status == "completed" else {}
+    llm_one_liner = _safe_text(llm_sections.get("one_liner"), limit=400)
+    llm_chain = [str(item).strip() for item in (llm_sections.get("attack_chain") or []) if str(item).strip()]
+    llm_execution = [item for item in (llm_sections.get("execution") or []) if isinstance(item, Mapping)]
+    llm_repro = str(llm_sections.get("repro") or "").strip()
+    llm_failures = [str(item).strip() for item in (llm_sections.get("failed_paths") or []) if str(item).strip()]
+    llm_fixes = [str(item).strip() for item in (llm_sections.get("remediation") or []) if str(item).strip()]
+    llm_notes = _safe_text(llm_sections.get("notes"), limit=600)
+    llm_vuln_type = _safe_text(llm_sections.get("vuln_type"), limit=60)
+    has_llm = bool(llm_one_liner or llm_chain or llm_execution or llm_repro or llm_fixes)
+    if llm_vuln_type:
+        vuln_type = f"{llm_vuln_type}（模型判定）/ {vuln_type}（启发式）"
     unique_tools = sorted({str(_value(c, "tool_name", "")) for c in calls if _value(c, "tool_name", "")})
-    lines = ["# CTF Writeup", ""]
+    lines = ["# CTF Writeup（解题报告）", ""]
+    _conv_note = (
+        f"对话 {int(llm_report.get('conversation_chars') or 0)} 字符"
+        if llm_report.get("conversation_available")
+        else "无可用 Worker 对话"
+    )
+    model_note = (
+        f"LLM 章节：已生成（模型 {_safe_text(llm_report.get('model') or 'reason-model', limit=40)}"
+        f"；{_conv_note}）"
+        if has_llm
+        else "LLM 章节：未启用或生成失败，正文为确定性模板渲染"
+    )
     lines.extend([
         "## 题目信息与结果", "",
         f"- **题目：**{_safe_text(getattr(challenge, 'name', '') or getattr(challenge, 'title', ''), limit=200)}",
         f"- **目标：**{_safe_text(target_url, limit=200)}",
         f"- **解题模式：**{getattr(run, 'solver_mode', 'unknown') or 'unknown'}",
-        f"- **???**{'solved' if solved else 'unsolved'}",
-        f"- **漏洞类型：**{vuln_type}（自动识别）/ {classification}（Blackboard）",
-        f"- **复杂度：**{tier}（评分 {score}）",
-        f"- **?????**{semantic_analysis.get('status') or 'not_run'}?{len(semantic_items)}????",
+        f"- **解题状态：**{'已解出' if solved else '未解出'}",
+        f"- **漏洞类型：**{_vuln_type_label(vuln_type)}",
+        f"- **黑板判定：**{classification}",
+        f"- **复杂度：**{_tier_label(tier)}（评分 {score}）",
+        f"- **语义分析：**{_semantic_status_label(semantic_analysis.get('status'))}（{len(semantic_items)} 项）",
+        f"- **{model_note}**",
         "",
     ])
     phases = _group_by_phase(calls, semantic_by_card, target_url)
-    if tier == "simple":
-        lines += _build_template_narrative(calls, vuln_type, template, verified, semantic_by_card, target_url)
-    elif tier == "medium":
-        lines += _build_template_narrative(calls, vuln_type, template, verified, semantic_by_card, target_url)
-        if semantic_items:
-            lines.extend(["## AI语义解析（案情分析板同源）", ""])
-            for item in semantic_items[:15]:
-                cat = _safe_text(item.get("category", "已确认事实"), limit=40)
-                imp = item.get("importance", "medium")
-                summary = _safe_text(item.get("summary_zh", ""), limit=200)
-                lines.append(f"- **{cat}** ({imp}): {summary}")
-            lines.append("")
-    else:
-        lines += _build_semantic_narrative(phases, vuln_type, template, verified)
+    narrative: list[str] = []
+    if has_llm:
+        narrative = _build_llm_narrative(llm_one_liner, llm_chain, llm_execution)
+    if not narrative:
+        if tier in ("simple", "medium"):
+            narrative = list(_build_template_narrative(calls, vuln_type, template, verified, semantic_by_card, target_url))
+        else:
+            narrative = list(_build_semantic_narrative(phases, vuln_type, template, verified))
+    # Card summaries are a UI-garde, already-model-authored projection; show them
+    # whenever they exist regardless of tier — a "simple" run with semantics is
+    # still more informative than the template path alone.
+    if semantic_items:
+        narrative.extend(["## AI 语义解析（与案情分析板同源）", ""])
+        for item in semantic_items[:15]:
+            cat = _safe_text(item.get("category", "已确认事实"), limit=40)
+            imp = item.get("importance", "medium")
+            summary = _safe_text(item.get("summary_zh", ""), limit=200)
+            narrative.append(f"- **AI 语义摘要 · {cat}**（重要度：{_importance_label(imp)}）：{summary}")
+        narrative.append("")
+    lines.extend(narrative)
     lines.extend(["## 已确认事实与证据链", ""])
     if verified:
         for item in verified[:30]:
@@ -298,46 +542,98 @@ def render_muteki_writeup(
             sem = semantic_by_card.get(card_id, {})
             summary = _safe_text(sem.get("summary_zh") or _value(item, "content", ""), limit=300)
             importance = sem.get("importance", "medium")
-            lines.append(f"- **[{importance.upper()}]** {summary}")
+            lines.append(f"- **[{_importance_label(importance)}]** {summary}")
             if refs:
-                lines.append("  Evidence: " + ", ".join(f"{r}" for r in refs[:3]))
+                lines.append("  证据引用：" + "、".join(f"{r}" for r in refs[:3]))
             lines.append("")
     else:
         lines.append("无已验证事实")
     if evidence_rows:
-        lines.extend(["", "### Evidence Ledger", ""])
+        lines.extend(["", "### 证据台账（Evidence Ledger）", ""])
         for row in evidence_rows[:40]:
             lines.append(f"- {row['id']} · {row['type']} · {row['status']} · {_safe_text(row['summary'] or '无摘要', limit=200)}")
         lines.append("")
     lines.extend(["## 可复现方式", ""])
     if poc_available:
-        lines.extend(["已生成Evidence-backed PoC包：inal/muteki-poc.zip。", "解压后设置TARGET_URL，然后执行python reproduce.py。", ""])
-    else:
-        lines.append("当前没有足够的已验证HTTP请求和Evidence引用生成可执行PoC")
+        lines.extend(["已生成含证据引用的 PoC 包：`final/muteki-poc.zip`。", "解压后设置 TARGET_URL，再执行 `python reproduce.py`。", ""])
+    if llm_repro:
+        verified = str(llm_report.get("repro_verification") or "").strip()
+        lines.append(
+            f"> 以下执行命令/脚本由模型撰写，**尚未在本管线内自动执行验证**"
+            + (f"（核验状态：{_safe_text(verified, limit=120)}）。" if verified else "。")
+        )
+        lines.append("")
+        lines.append(llm_repro[:6000])
+        lines.append("")
+    elif not poc_available:
+        lines.append(
+            "当前没有足够的已验证HTTP请求和Evidence引用生成可执行PoC；"
+            "本报告不会用猜测内容伪造脚本。"
+        )
     lines.extend(["", "## 失败路线与策略切换", ""])
+    recorded_failures = False
     if dead_ends:
         for item in dead_ends[:20]:
-            lines.append(f"- Dead End: {_safe_text(_value(item, 'description', ''), limit=300)}")
-    else:
+            lines.append(f"- 死胡同：{_safe_text(_value(item, 'description', ''), limit=300)}")
+        recorded_failures = True
+    if llm_failures:
+        origin = "模型补充" if recorded_failures else "模型校正的失败路线"
+        lines.append(f"- {origin}：")
+        for item in llm_failures[:12]:
+            lines.append(f"  - {_safe_text(item, limit=300)}")
+        recorded_failures = True
+    if not recorded_failures:
         lines.append("无记录的失败路线")
-    lines.extend(["", "## Completion Gate", ""])
+    lines.extend(["", "## 完成门禁（Completion Gate）", ""])
     _fc = "已通过" if solved else "未通过"
     _eb = "是" if evidence_rows else "否"
-    lines.extend([f"- Finding/Flag：{_fc}", f"- Evidence-backed：{_eb}"])
+    lines.extend([f"- 结果判定 / Flag：{_fc}", f"- 是否有证据支撑：{_eb}"])
     if flag:
-        lines.append(f"- Verified Flag：{_display_verified_flag(flag)}")
+        lines.append(f"- 已验证 Flag：{_display_verified_flag(flag)}")
     lines.extend(["", "## 修复建议", ""])
-    fix_map = {
-        "SQLI": "对所有用户输入实施参数化查询，使用ORM也禁止字符串接；添加WAF规则接最常规注入特征",
-        "IDOR": "在服务端对所有资源访问实施基于当前用户身份的所有权校验，不依赖前端隐厣",
-        "PATH_TRAVERSAL": "禁止路径穿越字符（../、..\\等），使用白名单限制可访问目录，或使用API抽象文件访问",
-        "CMD_INJECTION": "避免将用户输入拼接到系统命令；使用参数化API或沙箱化执行环境",
-        "SSRF": "禁止内网IP段（127.0.0.1、169.254.169.254等）；URL白名单校验；禁止跟随重定向到用户可控地址",
-        "GENERIC_WEB": "实施参数化查询、严格授权校验，最小权限和审计日志",
-    }
-    lines.append(fix_map.get(vuln_type, fix_map["GENERIC_WEB"]))
+    if llm_fixes:
+        for item in llm_fixes[:8]:
+            lines.append(f"- {_safe_text(item, limit=400)}")
+    else:
+        fix_map = {
+            "SQLI": "对所有用户输入实施参数化查询，使用ORM也禁止字符串拼接；添加WAF规则拦截最常规的注入特征",
+            "IDOR": "在服务端对所有资源访问实施基于当前用户身份的所有权校验，不依赖前端隐藏参数",
+            "PATH_TRAVERSAL": "禁止路径穿越字符（../、..\\等），使用白名单限制可访问目录，或使用API抽象文件访问",
+            "CMD_INJECTION": "避免将用户输入拼接到系统命令；使用参数化API或沙箱化执行环境",
+            "SSRF": "禁止内网IP段（127.0.0.1、169.254.169.254等）；URL白名单校验；禁止跟随重定向到用户可控地址",
+            "GENERIC_WEB": "实施严格的输入校验、授权校验、最小权限与审计日志，并对暴露面做定期攻防验证",
+        }
+        # Only reached with no model-authored fixes: the templated line names the
+        # class it guessed, so a wrong guess is visible instead of looking curated.
+        lines.append(fix_map.get(vuln_type, fix_map["GENERIC_WEB"]))
     tools_str = (", ".join(f"{t}" for t in unique_tools) if unique_tools else "未记录")
     lines.extend(["", f"- 本次实际使用工具: {tools_str}", ""])
+    lines.extend(["", "## 报告来源", ""])
+    if has_llm:
+        conv_chars = int(llm_report.get("conversation_chars") or 0)
+        if llm_report.get("conversation_available"):
+            source = f"Worker 对话（{conv_chars} 字符）"
+        else:
+            source = (
+                "黑板事实与事件时间线"
+                f"（未捕获到可用的 Worker 对话，仅 {conv_chars} 字符占位记录）"
+            )
+        lines.append(
+            f"- 叙事章节（一句话解法 / 攻击链 / 执行过程 / 可复现方式 / 修复建议）由 LLM 依据{source}生成，输入 {conv_chars} 字符。"
+        )
+        usage = llm_report.get("usage") if isinstance(llm_report.get("usage"), Mapping) else {}
+        if usage:
+            lines.append(
+                f"- 生成开销：模型 {_safe_text(usage.get('model'), limit=60)}，"
+                f"tokens {int(usage.get('total_tokens') or 0)}。"
+            )
+    else:
+        reason = _safe_text(llm_report.get("error_code"), limit=120) if llm_status == "failed" else "未调用"
+        lines.append(f"- 叙事章节使用确定性模板渲染（LLM 生成状态：{llm_status}；原因：{reason or 'N/A'}）。")
+    lines.append("- 题目信息 / 已确认事实与证据链 / 证据台账 / 完成门禁 / 工具清单均由代码按数据库与黑板状态生成，不做改写。")
+    if llm_notes:
+        lines.append(f"- 模型标注的证据缺口：{llm_notes}")
+    lines.append("")
     return "\n".join(lines)
 
 __all__ = ["render_muteki_writeup"]

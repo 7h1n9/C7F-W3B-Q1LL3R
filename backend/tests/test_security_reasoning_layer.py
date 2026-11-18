@@ -6,9 +6,10 @@ from sqlalchemy.pool import StaticPool
 from app.models import Base
 from app.models.challenge import Challenge
 from app.models.multi_agent import VerifiedFact
-from app.models.run import SolveRun
-from app.models.run import RunEvent
+from app.models.run import RunEvent, SolveRun
 from app.models.solver_state import SolverState
+from app.orchestration.multi_agent_orchestrator import MultiAgentOrchestrator
+from app.security.decision import security_decision_engine
 from app.security.schemas import (
     ExploitResult,
     ExploitStatus,
@@ -18,10 +19,8 @@ from app.security.schemas import (
     ValidationStatus,
     VulnerabilityHypothesis,
 )
-from app.security.decision import security_decision_engine
 from app.security.service import security_finding_service
 from app.services.solver_state import solver_state_service
-from app.orchestration.multi_agent_orchestrator import MultiAgentOrchestrator
 
 
 @pytest.fixture

@@ -1,0 +1,29 @@
+name: '[PHP]XXE'
+category: web
+keywords:
+- php
+- xxe
+- github
+- vulhub
+- blob
+- master
+- php_xxe
+steps:
+- '[claude] XXE confirmed on `/simplexml_load_string.php` and `/SimpleXMLElement.php`
+  (PHP 7.0.30, libxml 2.8.0, built-in server, no disable_functions/open_basedir, documentURI=/var/www/html)'
+- '[claude] Flag lives in `/proc/1/environ` as `FLAG=` (readable thanks to php running
+  as PID 1 with Uid 0 — /proc/self/status shows Tgid 1)'
+- '[claude] Raw entity read of /proc/1/environ dies on NUL; must use `php://filter/convert.base64-encode/resource=/proc/1/environ`'
+- '[claude] FOUND_FLAG=<FLAG>'
+- '[codex] `GET http://direct-ctf2.dasctf.com:27917/` returns `phpinfo()` (PHP/7.0.30),
+  whose environment section leaks `FLAG` / `$_ENV[''FLAG'']` directly at line 686
+  of the page. No XXE needed to read it; use th'
+- '[codex] Recovered from real output: `/tmp/root.html:686` → `<tr><td class="e">FLAG
+  </td><td class="v"><FLAG> </td></tr>`, and repeated at line 733 as `$_ENV[''FLAG'']`.'
+evidence_chain:
+- '[claude] FOUND_FLAG=<FLAG>'
+- '[codex] Recovered from real output: `/tmp/root.html:686` → `<tr><td class="e">FLAG
+  </td><td class="v"><FLAG> </td></tr>`, and repeated at line 733 as `$_ENV[''FLAG'']`.'
+success_format: CTF2\{[^}]+\}
+source: f9d4163e-2415-4c3d-a09b-89c7e695708c (solver 5f0b4e16-d18b-4e44-a6aa-41e800e4ab1d)
+notes: ''

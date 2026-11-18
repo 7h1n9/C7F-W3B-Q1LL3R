@@ -69,3 +69,77 @@ def test_workspace_refresh_updates_target_without_deleting_notes(
     assert manifest["target_url"] == "http://new.test/"
     assert manifest["allowed_hosts"] == ["new.test"]
     assert note.read_text(encoding="utf-8") == "preserve me"
+
+
+def test_agents_md_opens_with_recon_discipline_in_the_first_screen(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The reconnaissance block must be readable before the Worker acts.
+
+    Workers open ``AGENTS.md`` with ``... | head -50`` (seen verbatim in
+    ``run_events`` for run ``c88aaf79``), so a block placed after the recipe or
+    the hint text is never read.  Measured 2026-10-29 on that Run: 215 tool
+    commands, no flag, and its first moves were guesses at filenames
+    (``for p in post.php commitbug.php about``).
+    """
+
+    monkeypatch.setattr(
+        "app.services.workspace.get_settings",
+        lambda: SimpleNamespace(workspace_root=tmp_path),
+    )
+    challenge = SimpleNamespace(
+        id="challenge-recon",
+        name="[CISCN2019 华东北赛区]Web6",
+        challenge_type="WEB_TARGET",
+        target_url="http://box.test/",
+        allowed_hosts=["box.test"],
+        flag_pattern=r"flag\{[^}]+\}",
+        metadata_json={},
+    )
+
+    workspace = create_workspace("run-recon", challenge)
+    text = (workspace / "AGENTS.md").read_text(encoding="utf-8")
+
+    first_screen = "\n".join(text.splitlines()[:40])
+    assert "Before your first payload" in first_screen
+    assert "At most 5 flag paths" in text
+    assert "Follow links instead of inventing filenames" in text
+
+    # Ordering contract: run policy first (it sets the rules of engagement),
+    # then the discipline, then everything that is reference material.
+    assert text.index("# Run Policy") < text.index("Before your first payload")
+    if "## Code execution checklist" in text:
+        assert text.index("Before your first payload") < text.index(
+            "## Code execution checklist"
+        )
+
+
+def test_recon_discipline_does_not_prescribe_a_scanner(tmp_path: Path, monkeypatch) -> None:
+    """The block replaces guessing with a fixed pass; it must not invite fuzzing.
+
+    The lane goal already forbids ``ffuf``/``dirb``/``gobuster`` because those
+    burned entire rounds (see ``TECHNIQUE_GOAL_MAX_CHARS`` history).  A recon
+    checklist that reintroduces them would undo that fix from the other side.
+    """
+
+    monkeypatch.setattr(
+        "app.services.workspace.get_settings",
+        lambda: SimpleNamespace(workspace_root=tmp_path),
+    )
+    challenge = SimpleNamespace(
+        id="challenge-recon-2",
+        name="WarmUp",
+        challenge_type="WEB_TARGET",
+        target_url="http://box2.test/",
+        allowed_hosts=["box2.test"],
+        flag_pattern=r"flag\{[^}]+\}",
+        metadata_json={},
+    )
+
+    workspace = create_workspace("run-recon-2", challenge)
+    text = (workspace / "AGENTS.md").read_text(encoding="utf-8")
+
+    head = text[text.index("Before your first payload"):text.index("Before your first payload") + 400]
+    for scanner in ("ffuf", "dirb", "gobuster"):
+        assert scanner not in head
+    assert "One fixed reconnaissance pass" in text

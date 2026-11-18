@@ -16,6 +16,10 @@ const readinessLevelLabels: Record<string, string> = {
 
 const checkNameLabels: Record<string, string> = {
   database: "数据库",
+  // The legacy Runner checks only appear when the deployment still fronts one;
+  // the two below are what a container-native deployment reports instead.
+  tool_channel: "工具执行通道",
+  docker_cli: "Docker CLI",
   runner: "Runner",
   runner_token: "Runner Token",
   web_tool: "Web 工具",
@@ -28,6 +32,10 @@ const checkNameLabels: Record<string, string> = {
 
 function readinessMessage(name: string, message: string): string {
   if (name === "database") return message.replace("Migration revision:", "迁移版本：");
+  if (message === "container-native Worker (Muteki); legacy Kali Runner disabled.") return "容器原生 Worker（Muteki），未启用旧版 Kali Runner";
+  if (message === "legacy Kali Runner enabled.") return "已启用旧版 Kali Runner";
+  if (message === "docker CLI visible to the backend") return "后端可见 docker CLI";
+  if (message === "docker CLI not found on PATH") return "PATH 中未找到 docker CLI";
   if (message === "Runner is reachable") return "Runner 可达";
   if (message === "Runner client token is configured") return "Runner Token 已配置";
   if (message === "Runner reports a healthy execution backend") return "Runner 执行后端正常";
@@ -72,7 +80,7 @@ export function DashboardPage() {
             <span className="readiness-float readiness-float-top">{readinessPercent}%</span>
             <span className="readiness-float readiness-float-bottom">{checks.length} 项检查</span>
           </div>
-          <div><div className="readiness-status">{readinessTitle}</div><p>{readiness.isLoading ? "正在检查数据库、Runner 与工具能力…" : `${healthyChecks} / ${checks.length} 项检查通过`}</p></div>
+          <div><div className="readiness-status">{readinessTitle}</div><p>{readiness.isLoading ? "正在检查数据库、模型与工具能力…" : `${healthyChecks} / ${checks.length} 项检查通过`}</p></div>
         </div>
         <div className="readiness-progress"><div className="readiness-progress-meta"><span>系统能力覆盖率</span><strong>{readinessPercent}%</strong></div><div className="readiness-progress-track"><span style={{ width: `${readinessPercent}%` }} /></div><small>每 30 秒自动刷新一次</small></div>
       </div>

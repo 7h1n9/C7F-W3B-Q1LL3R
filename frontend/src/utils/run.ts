@@ -11,8 +11,30 @@ export const TERMINAL_RUN_STATUSES = [
   "POLICY_BLOCKED",
 ] as const;
 
+const ACTIVE_EXECUTION_RUN_STATUSES = [
+  "RUNNING",
+  "PREPARING",
+  "ANALYZING",
+  "PLANNING",
+  "EXECUTING",
+  "EVALUATING",
+  "VERIFYING_FLAG",
+  "REPORTING",
+  "RETRYING",
+] as const;
+
 export function isTerminalRunStatus(status?: string | null): boolean {
   return Boolean(status && (TERMINAL_RUN_STATUSES as readonly string[]).includes(status));
+}
+
+export function isControlSourceRunStatus(status?: string | null): boolean {
+  return Boolean(
+    status
+    && (
+      (TERMINAL_RUN_STATUSES as readonly string[]).includes(status)
+      || (ACTIVE_EXECUTION_RUN_STATUSES as readonly string[]).includes(status)
+    ),
+  );
 }
 
 export function solverModeLabel(mode?: SolverMode | string | null): string {

@@ -30,13 +30,35 @@ import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { ChallengeChatDrawer } from "../components/ChallengeChatDrawer";
 import { api } from "../services/api";
-import type { Challenge } from "../types/api";
+import type { Challenge, ModelConfig, WorkerEngineType } from "../types/api";
 
 type ChallengePayload = Omit<Challenge, "id" | "created_at" | "updated_at">;
 type ChallengeFormValues = Omit<ChallengePayload, "allowed_hosts" | "source_path" | "metadata_json"> & {
   allowed_hosts?: string;
   source_path?: string;
 };
+
+// The `{...}` body is boilerplate; operators only really know the banner
+// (`CTF2`, `flag`, `DASCTF`). Keep the same expansion the backend applies so the
+// editor, the回填 and the detail view always agree on one representation.
+const FLAG_BODY = "\\{[^}]+\\}";
+const REGEX_META = /[\\^$.|?*+()[\]{}]/;
+
+function normalizeFlagPattern(value?: string | null): string {
+  const text = (value ?? "").trim();
+  if (!text) return `flag${FLAG_BODY}`;
+  // Already a full expression -> leave the operator's own pattern untouched.
+  if (REGEX_META.test(text)) return text;
+  const head = text.replace(/^\{+/, "").replace(/\}+$/, "").trim();
+  return head ? `${head}${FLAG_BODY}` : `flag${FLAG_BODY}`;
+}
+
+function flagHeadOf(pattern?: string | null): string {
+  const text = (pattern ?? "").trim();
+  if (!text || !text.endsWith(FLAG_BODY)) return text;
+  const head = text.slice(0, -FLAG_BODY.length);
+  return head && !REGEX_META.test(head) ? head : text;
+}
 
 function toPayload(values: ChallengeFormValues): ChallengePayload {
   const traffic = values.challenge_type === "TRAFFIC_ANALYSIS";
@@ -56,10 +78,39 @@ function toPayload(values: ChallengeFormValues): ChallengePayload {
     target_url: traffic ? null : values.target_url,
     allowed_hosts: traffic ? [] : allowedHosts,
     source_path: values.source_path || null,
-    flag_pattern: values.flag_pattern || "flag\\{[^}]+\\}",
+    flag_pattern: normalizeFlagPattern(values.flag_pattern),
     status: traffic ? "DRAFT" : values.status || "ACTIVE",
     metadata_json: {},
   };
+}
+
+// One single-select per CLI engine: a CLI agent runs one model at a time, so
+// each contributes at most one Worker. openai_compatible is the odd one out --
+// it accepts several configs at once, and local_proxy configs execute on it too
+// (see RUNTIME_ENGINE_TYPE_BY_PROVIDER in app/schemas/model_config.py).
+//
+// cursor_cli is not offered: the channel is retired (the headless Cursor CLI
+// speaks a private ConnectRPC API that an OpenAI-compatible relay cannot serve).
+const CLI_WORKER_ENGINES: Array<{ key: WorkerEngineType; label: string; field: string }> = [
+  { key: "codex_cli", label: "Codex CLI", field: "codex_cli_model_config_id" },
+  { key: "claude_cli", label: "Claude CLI", field: "claude_cli_model_config_id" },
+];
+const CLI_WORKER_FIELDS = CLI_WORKER_ENGINES.map((engine) => engine.field);
+// Provider types that execute through the openai_compatible engine.
+const OPENAI_WIRE_PROVIDERS = new Set(["openai_compatible", "local_proxy"]);
+
+function workerOptionsFor(configs: ModelConfig[], engine: WorkerEngineType) {
+  return configs
+    .filter((item) => item.enabled && (item.roles ?? ["worker"]).includes("worker"))
+    .filter((item) =>
+      engine === "openai_compatible"
+        ? OPENAI_WIRE_PROVIDERS.has(item.provider_type)
+        : item.provider_type === engine,
+    )
+    .map((item) => ({
+      value: item.id,
+      label: `${item.name} · ${item.model_name ?? ""}${item.provider_type === "local_proxy" ? "（本地反代）" : ""}`,
+    }));
 }
 
 export function ChallengesPage() {
@@ -99,13 +150,19 @@ export function ChallengesPage() {
     mutationFn: (values: Record<string, unknown>) => {
       const workerTypes = Array.isArray(values.worker_engine_types) ? values.worker_engine_types.filter((item): item is string => typeof item === "string") : [];
       const workerConfigIds = Array.isArray(values.worker_model_config_ids) ? values.worker_model_config_ids.filter((item): item is string => typeof item === "string") : [];
-      const codexCliConfigId = typeof values.codex_cli_model_config_id === "string" ? values.codex_cli_model_config_id : "";
-      const workerEngines = [
+      const workerEngines: Array<{ engine_type: string; model_config_id?: string }> = [
         ...(workerTypes.includes("openai_compatible") ? workerConfigIds.map((model_config_id) => ({ engine_type: "openai_compatible", model_config_id })) : []),
-        ...(workerTypes.includes("codex_cli") && codexCliConfigId ? [{ engine_type: "codex_cli", model_config_id: codexCliConfigId }] : []),
+        ...CLI_WORKER_ENGINES.flatMap(({ key, field }) => {
+          const configId = typeof values[field] === "string" ? (values[field] as string) : "";
+          return workerTypes.includes(key) && configId ? [{ engine_type: key, model_config_id: configId }] : [];
+        }),
       ];
-      const primary: { engine_type: string; model_config_id?: string } = workerEngines[0] ?? { engine_type: "openai_compatible" };
-      const { worker_engine_types: _types, worker_model_config_ids: _configs, codex_cli_model_config_id: _codexConfig, ...rest } = values;
+      const primary = workerEngines[0] ?? { engine_type: "openai_compatible", model_config_id: undefined };
+      // Drop the UI-only engine pickers so they never reach the API payload.
+      const rest: Record<string, unknown> = { ...values };
+      delete rest.worker_engine_types;
+      delete rest.worker_model_config_ids;
+      for (const field of CLI_WORKER_FIELDS) delete rest[field];
       return api.createRun(runChallenge!.id, { ...rest, engine_type: primary.engine_type, model_config_id: primary.model_config_id, worker_engines: workerEngines });
     },
     onSuccess: (run) => {
@@ -135,8 +192,10 @@ export function ChallengesPage() {
             ...challenge,
             allowed_hosts: challenge.allowed_hosts.join(", "),
             source_path: challenge.source_path ?? undefined,
+            // Show the bare banner again: the stored value is the expanded regex.
+            flag_pattern: flagHeadOf(challenge.flag_pattern),
           }
-        : { challenge_type: "WEB_TARGET", status: "ACTIVE", flag_pattern: "flag\\{[^}]+\\}" }) as ChallengeFormValues,
+        : { challenge_type: "WEB_TARGET", status: "ACTIVE", flag_pattern: "flag" }) as ChallengeFormValues,
     );
     setEditorOpen(true);
   };
@@ -259,7 +318,13 @@ export function ChallengesPage() {
             )}
           </Form.Item>
           <Form.Item name="description" label="题目说明"><Input.TextArea rows={3} /></Form.Item>
-          <Form.Item name="flag_pattern" label="Flag 正则"><Input /></Form.Item>
+          <Form.Item
+            name="flag_pattern"
+            label="Flag 头"
+            extra="只填头即可，例如 CTF2 或 flag；系统自动补全为 CTF2\\{[^}]+\\}。也可直接填完整正则（原样保存）。"
+          >
+            <Input placeholder="CTF2" />
+          </Form.Item>
           <Form.Item name="source_path" label="源码路径（Web 可选）"><Input /></Form.Item>
         </Form>
       </Modal>
@@ -272,7 +337,7 @@ export function ChallengesPage() {
           { key: "target", label: "目标地址", children: detail.target_url || "不适用" },
           { key: "hosts", label: "允许主机", children: detail.allowed_hosts.length ? detail.allowed_hosts.join(", ") : "不适用" },
           { key: "attachment", label: "主附件", children: detail.primary_attachment_id || "未上传" },
-          { key: "flag", label: "Flag 正则", children: detail.flag_pattern },
+          { key: "flag", label: "Flag 格式", children: detail.flag_pattern },
         ]} />}
       </Modal>
 
@@ -281,9 +346,17 @@ export function ChallengesPage() {
           <Form.Item name="engine_type" hidden><Input /></Form.Item>
           <Form.Item name="solver_mode" label="解题架构" rules={[{ required: true }]}><Select options={[{ value: "muteki", label: "Muteki（Blackboard 多 Worker）" }, { value: "single_agent", label: "Single-Agent 兼容模式" }]} /></Form.Item>
           <Form.Item name="reason_model_config_id" label="Coordinator Reason 模型" extra="只负责读取 Blackboard 和规划 Intent，不执行工具"><Select allowClear placeholder="使用 Muteki 本地 Reason 回退" options={(modelConfigs.data ?? []).filter((item) => item.enabled && (item.roles ?? ["worker"]).includes("coordinator_reason")).map((item) => ({ value: item.id, label: `${item.name} · ${item.model_name ?? ""}` }))} /></Form.Item>
-          <Form.Item name="worker_engine_types" label="Worker 引擎（可多选）" extra="不同引擎会作为独立 EngineProfile 并行调度"><Checkbox.Group options={[{ value: "codex_cli", label: "Codex CLI" }, { value: "openai_compatible", label: "OpenAI-compatible 模型" }]} /></Form.Item>
-          <Form.Item noStyle shouldUpdate={(previous, current) => previous.worker_engine_types !== current.worker_engine_types}>{({ getFieldValue }) => (getFieldValue("worker_engine_types") ?? []).includes("openai_compatible") ? <Form.Item name="worker_model_config_ids" label="OpenAI-compatible Worker 模型（可多选）" extra="例如 step-xxx、deepseek-chat；模型配置需包含 Worker 角色" rules={[{ required: true, type: "array", min: 1, message: "请选择至少一个 Worker 模型" }]}><Checkbox.Group options={(modelConfigs.data ?? []).filter((item) => item.enabled && item.provider_type === "openai_compatible" && (item.roles ?? ["worker"]).includes("worker")).map((item) => ({ value: item.id, label: `${item.name} · ${item.model_name ?? ""}` }))} /></Form.Item> : null}</Form.Item>
-          <Form.Item noStyle shouldUpdate={(previous, current) => previous.worker_engine_types !== current.worker_engine_types}>{({ getFieldValue }) => (getFieldValue("worker_engine_types") ?? []).includes("codex_cli") ? <Form.Item name="codex_cli_model_config_id" label="Codex CLI Worker 模型" extra="选择 Settings 中已配置且已启用的 Codex CLI 模型；Codex CLI 只作为 Worker。" rules={[{ required: true, message: "请选择 Codex CLI 模型" }]}><Select options={(modelConfigs.data ?? []).filter((item) => item.enabled && item.provider_type === "codex_cli" && (item.roles ?? ["worker"]).includes("worker")).map((item) => ({ value: item.id, label: `${item.name} · ${item.model_name ?? ""}` }))} /></Form.Item> : null}</Form.Item>
+          <Form.Item name="worker_engine_types" label="Worker 引擎（可多选）" extra="不同引擎会作为独立 EngineProfile 并行调度；本地反代通过 OpenAI-compatible 引擎执行"><Checkbox.Group options={[{ value: "openai_compatible", label: "OpenAI-compatible（含本地反代）" }, ...CLI_WORKER_ENGINES.map((engine) => ({ value: engine.key, label: engine.label }))]} /></Form.Item>
+          <Form.Item noStyle shouldUpdate={(previous, current) => previous.worker_engine_types !== current.worker_engine_types}>{({ getFieldValue }) => (getFieldValue("worker_engine_types") ?? []).includes("openai_compatible") ? <Form.Item name="worker_model_config_ids" label="OpenAI-compatible Worker 模型（可多选）" extra="例如 step-xxx、deepseek-chat；本地反代也在这里选择，模型配置需包含 Worker 角色" rules={[{ required: true, type: "array", min: 1, message: "请选择至少一个 Worker 模型" }]}><Checkbox.Group options={workerOptionsFor(modelConfigs.data ?? [], "openai_compatible")} /></Form.Item> : null}</Form.Item>
+          {CLI_WORKER_ENGINES.map((engine) => (
+            <Form.Item key={engine.key} noStyle shouldUpdate={(previous, current) => previous.worker_engine_types !== current.worker_engine_types}>
+              {({ getFieldValue }) => (getFieldValue("worker_engine_types") ?? []).includes(engine.key) ? (
+                <Form.Item name={engine.field} label={`${engine.label} Worker 模型`} extra={`选择 Settings 中已配置且已启用的 ${engine.label} 模型；CLI 引擎只作为 Worker。`} rules={[{ required: true, message: `请选择 ${engine.label} 模型` }]}>
+                  <Select options={workerOptionsFor(modelConfigs.data ?? [], engine.key)} />
+                </Form.Item>
+              ) : null}
+            </Form.Item>
+          ))}
           <Form.Item name="max_agent_steps" label="Run 累计最大 Agent 步数"><InputNumber min={1} max={300} style={{ width: "100%" }} /></Form.Item>
           <Form.Item name="max_tool_calls" label="Run 累计最大逻辑工具调用"><InputNumber min={0} max={300} style={{ width: "100%" }} /></Form.Item>
           <Form.Item name="max_runtime_seconds" label="单 Attempt 最大运行时长（秒）"><InputNumber min={10} max={3600} style={{ width: "100%" }} /></Form.Item>

@@ -37,6 +37,13 @@ _STOP = {
 }
 
 
+# Rejection-sampling labels (CTF-Dojo-style: only execution-verified material is
+# reusable).  A "case" template may only come from a Run that actually captured
+# a flag; anything else is either a "negative" (a ruled-out route) or not stored.
+KIND_CASE = "case"
+KIND_NEGATIVE = "negative"
+
+
 def _keywords(text: str, k: int = 12) -> list[str]:
     toks = re.findall(r"[a-zA-Z][a-zA-Z0-9_]{2,}", text.lower())
     seen: list[str] = []
@@ -68,6 +75,11 @@ class Template:
     # gets its own proof path (intent-linked, with a temporal fallback). Empty for a
     # single-flag run (the flat evidence_chain is authoritative there).
     flag_evidence_chains: dict[str, list[str]] = field(default_factory=dict)
+    # Rejection-sampling label.  "case" is a flag-verified success path (safe to
+    # reuse as a positive prior); "negative" is a route the swarm actually tried
+    # and ruled out (safe to reuse as an explicit "do not repeat this").  Only a
+    # flag-verified Run may produce a "case" template.
+    kind: str = KIND_CASE
 
     def to_yaml(self) -> str:
         body = {
@@ -84,6 +96,10 @@ class Template:
         # single-flag YAML byte-identical to before).
         if self.flag_evidence_chains:
             body["flag_evidence_chains"] = self.flag_evidence_chains
+        # same rule for kind: an existing "case" template must serialize exactly
+        # as before, so the field only appears when it deviates.
+        if self.kind != KIND_CASE:
+            body["kind"] = self.kind
         return yaml.safe_dump(body, sort_keys=False, allow_unicode=True)
 
     @classmethod
@@ -101,6 +117,7 @@ class Template:
             flag_evidence_chains={
                 str(k): list(v) for k, v in (d.get("flag_evidence_chains") or {}).items()
             },
+            kind=str(d.get("kind") or KIND_CASE),
         )
 
 
@@ -198,6 +215,77 @@ def distill_from_events(shared_graph, *, winner: Optional[str] = None) -> Templa
     return distill(snap, winner=winner, per_flag_chains=per_flag)
 
 
+def distill_negative_from_events(
+    shared_graph,
+    *,
+    winner: Optional[str] = None,
+    reason: str = "",
+) -> Optional[Template]:
+    """Distil a FAILED run's ruled-out routes into a ``negative`` template.
+
+    Rejection sampling keeps only flag-verified trajectories as positives.  The
+    discarded runs are still informative — they are the swarm's own record of
+    what did *not* work.  Keeping them as ``negative`` (instead of dropping
+    them) is the cheapest way to stop the next Run from re-walking the same
+    dead directions, and it is deliberately a separate ``kind`` because nothing
+    here was ever verified against the flag.
+
+    Returns ``None`` when nothing was ruled out, i.e. when there is genuinely
+    nothing to warn about.
+    """
+    snap = shared_graph.snapshot()
+    c = snap.challenge
+
+    dead_ends: list[str] = []
+    getter = getattr(shared_graph, "dead_end_reasons", None)
+    if callable(getter):
+        try:
+            dead_ends = [str(item).strip() for item in getter(limit=12)]
+        except Exception:
+            dead_ends = []
+    if not dead_ends:
+        # Older/alternate graphs may not expose the accessor; the snapshot's own
+        # dead-end list is the documented fallback.
+        dead_ends = [
+            str(item).strip() for item in (snap.dead_ends or []) if str(item).strip()
+        ][-12:]
+
+    refuted = [
+        h.statement.strip()
+        for h in snap.hypotheses
+        if h.status is HypothesisStatus.REFUTED and h.statement.strip()
+    ]
+    steps: list[str] = []
+    for text in [*dead_ends, *refuted]:
+        if text and text not in steps:
+            steps.append(text)
+    if not steps:
+        return None
+
+    all_flags = [f for f in (snap.flags or ([snap.flag] if snap.flag else [])) if f]
+
+    def _sanitize(fact: str) -> str:
+        for fl in all_flags:
+            if fl in fact:
+                fact = fact.replace(fl, "<FLAG>")
+        return fact
+
+    steps = [_sanitize(step) for step in steps][:12]
+    return Template(
+        name=c.name or c.id,
+        category=c.category,
+        keywords=_keywords(f"{c.name} {c.description}"),
+        steps=steps,
+        success_format=c.flag_format,
+        source=f"{c.id}" + (f" (run {winner})" if winner else ""),
+        notes=(
+            reason or "Run ended without a verified flag; the routes below were ruled out."
+        )[:400],
+        evidence_chain=[],
+        kind=KIND_NEGATIVE,
+    )
+
+
 class TemplateStore:
     """Directory of YAML templates (the 'knowledge base' of §16/§18)."""
 
@@ -207,8 +295,11 @@ class TemplateStore:
 
     def save(self, tpl: Template) -> Path:
         safe = re.sub(r"[^a-zA-Z0-9_-]+", "_", tpl.name) or "template"
-        # de-dup by name: one template per challenge name (latest wins)
-        path = self.root / f"{tpl.category}__{safe}.yaml"
+        # de-dup by name: one template per challenge name (latest wins).  A
+        # negative template must never overwrite the positive one recorded for
+        # the same challenge, so it carries its own kind prefix.
+        prefix = "" if tpl.kind == KIND_CASE else f"{tpl.kind}__"
+        path = self.root / f"{prefix}{tpl.category}__{safe}.yaml"
         path.write_text(tpl.to_yaml(), encoding="utf-8")
         return path
 

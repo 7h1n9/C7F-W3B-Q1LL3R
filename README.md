@@ -183,7 +183,7 @@ cd frontend && npm run build
 
 ## 当前项目缺陷（已知限制）
 
-> 以下内容反映 2026-08 实测状态（代码审计 + 真实运行记录 + `docs/phase2.4/` 阶段报告），会随版本迭代更新。
+> 以下内容反映 2026-08 实测状态（代码审计 + 真实运行记录 + `docs/archive/2026-08/phase2.4/` 阶段报告），会随版本迭代更新。
 
 ### 1.  不足
 
@@ -405,7 +405,7 @@ cd frontend && npm run build
 
 - 完整解题链路：Challenge → RunSupervisor → Muteki Runtime（Prepare → Race → Coordinator → Finalize）→ Tool Gateway → Evidence → Completion Gate，并有真实靶场成功案例。
 - 完整方法论支撑：基于 Muteki（無敵）的黑板 + 协调器 + 多 Solver Loop + Review + Gate 架构，具备明确的研究问题与创新点。
-- 文档齐全：架构 / API / 数据库 / 部署 / 阶段报告（`docs/`、`docs/phase2.4/`）。
+- 文档齐全：架构 / API / 数据库 / 部署 / 阶段报告（`docs/`、`docs/archive/2026-08/phase2.4/`）。
 - 后端测试 112 个文件，历史全量 362 passed；真实运行样本（13 次 11 解）可作为早期实验数据。
 
 ### 与毕设答辩要求的差距（按优先级）
@@ -437,6 +437,6 @@ cd frontend && npm run build
 - API：`docs/api.md`
 - 数据库：`docs/database.md`
 - 部署：`docs/deployment.md`
-- Muteki 方法论与迁移：`docs/multi-agent-core.md`、`docs/phase2.4/`
+- Muteki 方法论与迁移：`docs/archive/2026-07/multi-agent-core.md`、`docs/archive/2026-08/phase2.4/`
 - 上游项目：<https://github.com/FishCodeTech/muteki>
 - 第三方声明：`THIRD_PARTY_NOTICES.md`、`backend/NOTICE_MUTeki.md`

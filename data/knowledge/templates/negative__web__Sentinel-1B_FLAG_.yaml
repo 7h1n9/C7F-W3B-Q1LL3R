@@ -1,0 +1,25 @@
+name: Sentinel-1B:被记忆的 FLAG(模型反演 / 训练数据提取)
+category: web
+keywords:
+- sentinel
+- sentinelai
+- next
+- token
+- canary
+- model
+- context_len
+- topk
+- vocab
+- predict
+- text
+- top
+steps:
+- '[claude] Greedy top-1 decoding from "CTF2" — converges to a canary "CTF2XdbSNGmZ)AplcolL;jqX@?g02J3+HrS^?8}"
+  (wrong, submit says canary class). Rank-2 walk also useless (drops to background
+  noise ~0.025 immedi'
+- 'runtime failure: name ''payload'' is not defined'
+evidence_chain: []
+success_format: CTF2\{[^}]+\}
+source: 87942332-d346-4602-864c-5d6c3956792b (run d3ac62f0-c85f-4508-8016-71eb3e6f7850)
+notes: MUTEKI_RUNTIME_ERROR
+kind: negative

@@ -28,14 +28,14 @@ if TYPE_CHECKING:
 
 from muteki.core.cost import CostController
 from muteki.core.event_bus import EventBus
-from muteki.core.runtime_env import is_web_container
 from muteki.core.events import Event, EventType, blackboard_delta_payload
 from muteki.core.llm import LLMClient, ModelSpec
+from muteki.core.runtime_env import is_web_container
 from muteki.models.solve_graph import Challenge
 from muteki.sandbox.manager import SandboxManager
-from muteki.solver.result import ArtifactStore
-from muteki.solver.types import SolverConfig, SolveOutcome
 from muteki.solver.credential_accounts import runtime_env_for_engine
+from muteki.solver.result import ArtifactStore
+from muteki.solver.types import SolveOutcome, SolverConfig
 from muteki.solver.worker_profiles import (
     base_engine_for_profile,
     coerce_nonneg_int,
@@ -45,8 +45,8 @@ from muteki.solver.worker_profiles import (
 )
 from muteki.solver.workspace import cleanup_worker_scratch, ensure_workspace
 from muteki.swarm.insight_bus import InsightBus
-from muteki.swarm.stage_policy import StagePolicy
 from muteki.swarm.shared_graph import SharedGraph, SQLiteSharedGraph, canonicalize_lane
+from muteki.swarm.stage_policy import StagePolicy
 
 # P0 defect-4: max operator standing hints kept (LRU). The cumulative text is
 # injected into EVERY new worker's prompt, so an unbounded list bloated it to the
@@ -1482,7 +1482,8 @@ class Swarm:
             # falling back to the winner's private graph if no shared graph.
             if self.knowledge is not None:
                 from muteki.learning.distill import (
-                    distill_from_events, distill_and_store,
+                    distill_and_store,
+                    distill_from_events,
                 )
                 try:
                     if self.shared_graph is not None:
@@ -2582,7 +2583,7 @@ class Swarm:
         if self.shared_graph is None or self.llm is None:
             return 0
         try:
-            from muteki.solver.reason import run_reason, dispatch_intents
+            from muteki.solver.reason import dispatch_intents, run_reason
             # P1.5: un-blind the planner. The default max_evidence=16 hard-capped
             # Reason at the last 16 facts (swarm re-planned against a truncated view
             # and kept dispatching re-work — a co-equal root cause of the long-chain
@@ -3837,7 +3838,7 @@ class Swarm:
                 for t in done:
                     is_review_task = t in self._active_review_tasks
                     engine = tasks.pop(t)
-                    intent_id = task_intents.pop(t, None)
+                    task_intents.pop(t, None)
                     solver = task_solvers.pop(t, None)
                     self._release_worker_account(solver)
                     # key per-solver outcomes by the worker's UNIQUE solver_id (e.g.

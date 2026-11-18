@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .events import EventEnvelope, EventType
-from .gate import MutekiFlagGate
+from .gate import DEFAULT_FLAG_PATTERN, MutekiFlagGate
 
 
 def _now() -> str:
@@ -97,11 +97,15 @@ class MutekiGraph:
         challenge_id: str,
         event_subscriber: Callable[[EventEnvelope], None] | None = None,
         gate: MutekiFlagGate | None = None,
+        flag_pattern: str | None = None,
     ) -> None:
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.challenge_id = challenge_id
-        self.gate = gate or MutekiFlagGate()
+        # The challenge's flag shape travels with the graph so Workers, the
+        # container-side blackboard script and the gate all agree on it.
+        self.flag_pattern = str(flag_pattern or "").strip() or DEFAULT_FLAG_PATTERN
+        self.gate = gate or MutekiFlagGate(self.flag_pattern)
         self._subscriber = event_subscriber
         self._lock = threading.RLock()
         self._db = sqlite3.connect(self.db_path, timeout=10, check_same_thread=False)
@@ -487,6 +491,35 @@ class MutekiGraph:
             self._db.commit()
             return event.sequence
 
+    def record_flag_decision(self, *, actor: str, decision, evidence: str = "") -> int:
+        """Store an already-decided flag claim.
+
+        Exists so a caller that had to verify a candidate by a *different*
+        evidence rule (``gate.verify_recovered``, where the banner was supplied
+        by us and therefore cannot appear in the output) still writes through
+        one place.  Keeping the write here -- rather than letting the caller
+        insert rows -- means the event type, the ``verified`` column and the
+        ``flags`` row can never disagree.
+        """
+
+        accepted = bool(getattr(decision, "accepted", False))
+        value = str(getattr(decision, "flag", "") or "")
+        reason = str(getattr(decision, "reason", "") or "")
+        event_type = EventType.FLAG_FOUND if accepted else EventType.FLAG_CANDIDATE
+        with self._lock:
+            event = self._append(
+                actor,
+                event_type,
+                {"flag": value, "reason": reason, "evidence": str(evidence or "")[:400]},
+                verified=accepted,
+            )
+            self._db.execute(
+                "INSERT INTO flags VALUES (?, ?, ?, ?, ?)",
+                (event.sequence, value, actor, int(accepted), event.timestamp),
+            )
+            self._db.commit()
+            return event.sequence
+
     def save_poc(self, *, actor: str, poc_id: str, content: str) -> str:
         with self._lock:
             event = self._append(actor, EventType.POC_SAVED, {"poc_id": poc_id, "content": content})
@@ -589,6 +622,19 @@ class MutekiGraph:
         rows = self._db.execute(query + " ORDER BY flag_id").fetchall()
         return [Flag(row["flag_id"], row["flag_value"], row["source_worker_id"], bool(row["verified_by_gate"]), row["created_at"]) for row in rows]
 
+    def suspected_flags(self) -> list[Flag]:
+        """Candidates this graph recorded but that its gate refused.
+
+        The compatibility graph runs the gate inside ``write_flag``, so a value
+        it stored with ``verified_by_gate=0`` is exactly the "not a solve, ask a
+        human" set the upstream facade also exposes.  Present so callers can
+        treat both backends identically.
+        """
+
+        query = "SELECT * FROM flags WHERE verified_by_gate=0"
+        rows = self._db.execute(query + " ORDER BY flag_id").fetchall()
+        return [Flag(row["flag_id"], row["flag_value"], row["source_worker_id"], False, row["created_at"]) for row in rows]
+
     def events_since(self, after: int = 0) -> list[EventEnvelope]:
         rows = self._db.execute("SELECT * FROM events WHERE sequence>? ORDER BY sequence", (int(after),)).fetchall()
         return [EventEnvelope(row["sequence"], row["timestamp"], row["challenge_id"], row["actor"], row["event_type"], _load(row["payload_json"], {}), bool(row["verified"]), float(row["confidence"])) for row in rows]
@@ -668,14 +714,125 @@ class MutekiGraph:
 
     def reject_fact(self, *, actor: str, fact_seq: int, reason: str = "") -> int:
         """Terminal fact lifecycle: rejected (no longer evidence)."""
+        return self._retire_fact(
+            actor=actor,
+            fact_seq=fact_seq,
+            state="rejected",
+            event_type=EventType.FACT_REJECTED,
+            payload={"fact_seq": int(fact_seq), "reason": reason},
+        )
+
+    def merge_fact(
+        self,
+        *,
+        actor: str,
+        fact_seq: int,
+        to_fact_seq: int,
+        reason: str = "",
+    ) -> int:
+        """Terminal fact lifecycle: merged into another (duplicate) fact."""
+
+        return self._retire_fact(
+            actor=actor,
+            fact_seq=fact_seq,
+            state="merged",
+            event_type=EventType.FACT_MERGED,
+            payload={
+                "fact_seq": int(fact_seq),
+                "to_fact_seq": int(to_fact_seq),
+                "reason": reason,
+            },
+        )
+
+    def supersede_fact(
+        self,
+        *,
+        actor: str,
+        fact_seq: int,
+        by_fact_seq: int | None = None,
+        reason: str = "",
+    ) -> int:
+        """Terminal fact lifecycle: replaced by a newer statement."""
+
+        payload: dict[str, Any] = {"fact_seq": int(fact_seq), "reason": reason}
+        if by_fact_seq is not None:
+            payload["by_fact_seq"] = int(by_fact_seq)
+        return self._retire_fact(
+            actor=actor,
+            fact_seq=fact_seq,
+            state="superseded",
+            event_type=EventType.FACT_SUPERSEDED,
+            payload=payload,
+        )
+
+    def _retire_fact(
+        self,
+        *,
+        actor: str,
+        fact_seq: int,
+        state: str,
+        event_type: EventType,
+        payload: dict[str, Any],
+    ) -> int:
         with self._lock:
-            event = self._append(actor, EventType.FACT_REJECTED, {"fact_seq": int(fact_seq), "reason": reason})
+            event = self._append(actor, event_type, payload)
             self._db.execute(
-                "INSERT OR REPLACE INTO fact_states(fact_seq, state, retired_seq, created_seq) VALUES (?, 'rejected', ?, ?)",
-                (int(fact_seq), event.sequence, event.sequence),
+                "INSERT OR REPLACE INTO fact_states(fact_seq, state, retired_seq, created_seq) VALUES (?, ?, ?, ?)",
+                (int(fact_seq), str(state), event.sequence, event.sequence),
             )
             self._db.commit()
             return event.sequence
+
+    def review_fact(
+        self,
+        *,
+        actor: str,
+        fact_seq: int,
+        action: str,
+        reason: str = "",
+        verification_goal: str = "",
+        to_fact_seq: int | None = None,
+    ) -> dict[str, Any]:
+        """Unified fact review dispatcher, matching the official SharedGraph.
+
+        The platform previously had no single door for fact lifecycle
+        transitions, so a candidate could only ever be *added*.  This mirrors
+        the official entry point so a Reviewer behaves identically on either
+        backend.
+        """
+
+        act = str(action or "").strip().lower()
+        if act in ("challenge", "challenged"):
+            seq = self.challenge_fact(
+                actor=actor,
+                fact_seq=fact_seq,
+                reason=reason,
+                verification_goal=verification_goal,
+            )
+            return {"action": "challenge", "fact_seq": int(fact_seq), "seq": int(seq)}
+        if act in ("revalidate", "revalidated"):
+            seq = self.revalidate_fact(actor=actor, fact_seq=fact_seq)
+            return {"action": "revalidate", "fact_seq": int(fact_seq), "seq": int(seq)}
+        if act in ("reject", "rejected"):
+            seq = self.reject_fact(actor=actor, fact_seq=fact_seq, reason=reason)
+            return {"action": "reject", "fact_seq": int(fact_seq), "seq": int(seq)}
+        if act in ("merge", "merged"):
+            seq = self.merge_fact(
+                actor=actor,
+                fact_seq=fact_seq,
+                to_fact_seq=int(to_fact_seq or 0),
+                reason=reason,
+            )
+            return {"action": "merge", "fact_seq": int(fact_seq), "seq": int(seq)}
+        if act in ("supersede", "superseded"):
+            seq = self.supersede_fact(
+                actor=actor,
+                fact_seq=fact_seq,
+                by_fact_seq=to_fact_seq,
+                reason=reason,
+            )
+            return {"action": "supersede", "fact_seq": int(fact_seq), "seq": int(seq)}
+        return {"action": act, "fact_seq": int(fact_seq), "seq": -1}
 
     def suppress_route(
         self,
@@ -730,7 +887,6 @@ class MutekiGraph:
         branch_id = f"br-{uuid.uuid4().hex[:12]}"
         with self._lock:
             event = self._append(actor, EventType.BRANCH_SPLIT, {"branch_id": branch_id, "title": title, "parent_id": parent_id, "branches": branches})
-            row = self._db.execute("SELECT COALESCE(MAX(created_seq), 0) FROM branches").fetchone()
             created_seq = event.sequence
             if branches:
                 for b in branches:

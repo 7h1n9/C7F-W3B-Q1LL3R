@@ -1,0 +1,22 @@
+name: '[极客大挑战 2019]HardSQL 7e8f44c4e1e1'
+category: web
+keywords:
+- hardsql
+- imported
+- from
+- buuctf
+- ctfd
+steps:
+- Path traversal under /static/ (static/x/../check.php, static/%2e%2e/...) only resolves
+  to in-webroot files and falls back to index for anything else -> no LFI on /static/
+- phpinfo.php, admin.php, config.php, www.zip, backup.zip, .git/HEAD, .DS_Store, flag.php
+  all 200-fallback or 404 -> not present
+- 'xmlrpc.php, xmlrpc_server.php, admin.php, info.php, phpinfo.php, getflag.php, flag*.php
+  variants: all 404 (real nginx 404, not fallback) - none exist'
+- RACE_WORKER_TIMEOUT
+- ROUND_BUDGET_EXHAUSTED_BEFORE_REASON
+evidence_chain: []
+success_format: CTF2\{[^}]+\}
+source: 7e8f44c4-e1e1-44e8-860e-fc064a5e4d9b (run 41c0e610-73bd-439a-beb7-33fb1082b5cd)
+notes: NO_VERIFIED_FLAG
+kind: negative

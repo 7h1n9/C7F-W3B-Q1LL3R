@@ -1,0 +1,13 @@
+name: '[FBCTF2019]Products Manager'
+category: web
+keywords:
+- fbctf2019
+- products
+- manager
+steps:
+- NO_HEALTHY_WORKER_PROFILE
+evidence_chain: []
+success_format: CTF2\{[^}]+\}
+source: 04f07812-2de0-43c4-997a-6b9adc6b8e46 (run 09d2186c-235c-4488-bfc2-bd529525d3ec)
+notes: NO_HEALTHY_WORKER_PROFILE
+kind: negative

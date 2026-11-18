@@ -1,0 +1,35 @@
+name: BUU LFI COURSE 1
+category: web
+keywords:
+- buu
+- lfi
+- course
+steps:
+- '[claude] LFI confirmed on index.php: `include $_GET[''file'']`, no filter. `GET
+  /?file=/flag` returns `<FLAG>` (cross-confirmed via base64 filter wrapper).'
+- '[claude] /root/flag is Permission denied for www-data; the real flag is at `/flag`
+  (world-readable). allow_url_include is OFF (data:// and php://input both fail).'
+- '[claude] DEADEND=php-fpm logs, /proc/self/fd, /proc/self/environ all non-viable
+  for RCE.'
+- The deployed PHP endpoint exposes include($_GET["file"]) via /robots.txt (and other
+  PHP-routed paths); php://filter/convert.base64-encode/resource=/flag returned <FLAG>,
+  saved at shared/recon-session-api/lfi/_flag with sha256 62aa3a7e91e8da240adb9758679fba718fe75e0451b1a361cf2db7dce2116fc3
+- '[codex] Decoded file evidence is saved at `shared/recon-session-api/lfi/_flag`.
+  The session/auth/API path enumeration was ruled out: those paths resolve to the
+  same PHP include sink rather than a separate aut'
+evidence_chain:
+- '[claude] LFI confirmed on index.php: `include $_GET[''file'']`, no filter. `GET
+  /?file=/flag` returns `<FLAG>` (cross-confirmed via base64 filter wrapper).'
+- '[claude] /root/flag is Permission denied for www-data; the real flag is at `/flag`
+  (world-readable). allow_url_include is OFF (data:// and php://input both fail).'
+- '[claude] DEADEND=php-fpm logs, /proc/self/fd, /proc/self/environ all non-viable
+  for RCE.'
+- The deployed PHP endpoint exposes include($_GET["file"]) via /robots.txt (and other
+  PHP-routed paths); php://filter/convert.base64-encode/resource=/flag returned <FLAG>,
+  saved at shared/recon-session-api/lfi/_flag with sha256 62aa3a7e91e8da240adb9758679fba718fe75e0451b1a361cf2db7dce2116fc3
+- '[codex] Decoded file evidence is saved at `shared/recon-session-api/lfi/_flag`.
+  The session/auth/API path enumeration was ruled out: those paths resolve to the
+  same PHP include sink rather than a separate aut'
+success_format: flag\{[^}]+\}
+source: 41de499b-4ac9-43b6-bf98-ca882f43e674 (solver 17951cfc-aaf8-4c89-9eb5-eb15c8659cc5)
+notes: ''

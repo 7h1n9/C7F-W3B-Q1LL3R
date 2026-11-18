@@ -1,0 +1,46 @@
+{
+  "id": "theory-sql-injection-001",
+  "type": "theory",
+  "category": "injection",
+  "subcategory": "sql_injection",
+  "name": "SQL",
+  "aliases": [
+    "SQL注入",
+    "SQLi",
+    "数据库注入",
+    "union注入",
+    "盲注"
+  ],
+  "severity": "high",
+  "description": "> 创建: 未知 | 更新: 2026-05-21 | 适用: PHP/MySQL通用 | ⚠️ 部分图片托管于image.3001.net等外部CDN，可能已失效 -1' union select 1,2,3# //-1使页面报错，方便显示 -1' union select 1,database(),3#",
+  "key_concepts": [
+    "# BigInt数据类型溢出",
+    "判断数据库名称长度",
+    "判断数据库名称组成",
+    "# sqlmap简介",
+    "# 布尔盲注",
+    "获取数据库名称组成",
+    "获取字段长度",
+    "sql预处理",
+    "set转换操作符",
+    "获取列名字符组成"
+  ],
+  "related_pocs": [
+    "pocs/high_value/afrog\\afrog-pocs\\CVE\\2022\\CVE-2022-21661.yaml"
+  ],
+  "related_payloads": [
+    "payloads/sql_injection/extracted.json"
+  ],
+  "tags": [
+    "SQL注入",
+    "SQLi",
+    "数据库注入",
+    "union注入",
+    "盲注",
+    "injection",
+    "ctf",
+    "web"
+  ],
+  "source": "Des-CTF-Knowledge/SQL.md",
+  "last_updated": "2026-10-22"
+}

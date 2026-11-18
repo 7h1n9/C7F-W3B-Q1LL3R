@@ -1,0 +1,140 @@
+{
+  "arms": [
+    "on"
+  ],
+  "cases": [
+    {
+      "case_id": "sql-injection-golden",
+      "definition_sha256": "e2d3a1c89e06e274ceacc855ee6cb8e321fb840af15609a9f97c3d197466c960",
+      "path": "sql-injection-golden.json",
+      "sha256": "678182218e0946bc5b62450652f1bc19493202d47ee6a62974d1062c3c4d4f67"
+    }
+  ],
+  "configuration_fingerprint": "4f7bbae0191cf71a3c302f6fcbeb7539d6d54fadf7724ce45d5cf2bc162e01df",
+  "created_at": "2026-10-18T17:51:10.776313+00:00",
+  "immutable": true,
+  "repeats": 1,
+  "runtime": {
+    "executor": {
+      "name": "real_run_supervisor",
+      "preflight": {
+        "reason_model": {
+          "capabilities": {
+            "agent_action": false,
+            "finish_action": false,
+            "incomplete_probe_count": 0,
+            "json_object": true,
+            "json_schema": false,
+            "latency": 1086,
+            "latency_ms": 1726,
+            "max_output_tokens": 2048,
+            "native_tool_call": false,
+            "normal_chat": true,
+            "probe_status": {
+              "agent_action": "failed",
+              "finish_action": "failed",
+              "json_object": "supported",
+              "json_schema": "unsupported",
+              "normal_chat": "supported",
+              "skill_action": "failed",
+              "tool_action": "failed"
+            },
+            "quota_state": "unknown",
+            "rate_limit_state": "unknown",
+            "reachable": true,
+            "recommended_protocol": "json_object",
+            "retry_after": null,
+            "roles": [
+              "worker",
+              "coordinator_reason"
+            ],
+            "skill_action": false,
+            "timed_out": false,
+            "tool_action": false,
+            "usage": {
+              "completion_tokens": 32,
+              "completion_tokens_details": {
+                "reasoning_tokens": 32
+              },
+              "prompt_cache_hit_tokens": 0,
+              "prompt_cache_miss_tokens": 37,
+              "prompt_tokens": 37,
+              "prompt_tokens_details": {
+                "cached_tokens": 0
+              },
+              "total_tokens": 69
+            }
+          },
+          "enabled": true,
+          "id": "8deec5f3-5714-4baa-bf3b-4e4bbcd4b01a",
+          "model_name": "deepseek-flash",
+          "name": "deepseek-v4-flash",
+          "provider_type": "openai_compatible"
+        },
+        "status": "ready",
+        "worker_model": {
+          "capabilities": {
+            "agent_action": false,
+            "finish_action": false,
+            "incomplete_probe_count": 0,
+            "json_object": true,
+            "json_schema": false,
+            "latency": 1086,
+            "latency_ms": 1726,
+            "max_output_tokens": 2048,
+            "native_tool_call": false,
+            "normal_chat": true,
+            "probe_status": {
+              "agent_action": "failed",
+              "finish_action": "failed",
+              "json_object": "supported",
+              "json_schema": "unsupported",
+              "normal_chat": "supported",
+              "skill_action": "failed",
+              "tool_action": "failed"
+            },
+            "quota_state": "unknown",
+            "rate_limit_state": "unknown",
+            "reachable": true,
+            "recommended_protocol": "json_object",
+            "retry_after": null,
+            "roles": [
+              "worker",
+              "coordinator_reason"
+            ],
+            "skill_action": false,
+            "timed_out": false,
+            "tool_action": false,
+            "usage": {
+              "completion_tokens": 32,
+              "completion_tokens_details": {
+                "reasoning_tokens": 32
+              },
+              "prompt_cache_hit_tokens": 0,
+              "prompt_cache_miss_tokens": 37,
+              "prompt_tokens": 37,
+              "prompt_tokens_details": {
+                "cached_tokens": 0
+              },
+              "total_tokens": 69
+            }
+          },
+          "enabled": true,
+          "id": "8deec5f3-5714-4baa-bf3b-4e4bbcd4b01a",
+          "model_name": "deepseek-flash",
+          "name": "deepseek-v4-flash",
+          "provider_type": "openai_compatible"
+        }
+      }
+    },
+    "git": {
+      "dirty": true,
+      "revision": "3ce21f67ce95f6535f8a5d9a626839a601bfe72b"
+    },
+    "platform": "Windows-10-10.0.22631-SP0",
+    "project_root": "D:\\desktop\\毕业设计\\C7F-W3B-Q1LL3R",
+    "python": "3.11.9"
+  },
+  "runtime_selection": {},
+  "schema_version": 1
+}

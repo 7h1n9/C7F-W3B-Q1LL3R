@@ -1,0 +1,48 @@
+name: '[XDCTF 2015]filemanager'
+category: web
+keywords:
+- xdctf
+- filemanager
+- github
+- ctftraining
+- xdctf_2015_filemanager
+steps:
+- 'NEW INSTANCE LIVE (port 80): X-Powered-By PHP/5.6.40, nginx/1.14.2+openresty; /www.tar.gz
+  downloadable (2228B) - identical source to upstream XDCTF2015, extracted to /home/kali/workspace/shared/recon/'
+- 'TARGET FALLBACK: any existing-on-disk non-.php file -> index.php (200/523B) e.g.
+  /flag.txt /flag /common.inc.php-served=0; nonexistent *.php and *.gif/jpg/png ->
+  nginx 404/169B. /favicon.ico is real ('
+- 'www.tar.gz listing: only www/common.inc.php delete.php index.php rename.php upload.php
+  xdctf.sql - NO flag in source, no admin/backup/.git/sqlite revealed by gobuster
+  common.txt.'
+- DB charset is utf8 => GBK wide-byte (0xbf5c/0xbf27/0x81') addslashes breakout does
+  NOT apply; single-quote payloads are neutralised. (tests against delete.php)
+- 'rename whitelist is addslashes-only (no pathinfo/ext check): newname=''x.php''
+  yields upload/x.php.txt; ext cannot be changed (upstream intended ''rename_fuck_ext''
+  bug is NOT present in this build).'
+- 'Upstream image plants flag at /flag_emmmmmmmmm (docker-entrypoint: echo $FLAG >
+  /flag_emmmmmmmmm); this platform''s /flag and /flag_emmmmmmmmm both return the 523B
+  index fallback, not the flag.'
+- 'nginx config (upstream vhost.nginx.conf, matches live): try_files $uri $uri/ /index.php;
+  PHP location ~ \.php$ with try_files $uri =404; no alias, no off-root static path
+  -> no HTTP path to /flag*.'
+- '[codex] FOUND_FLAG not recovered — the flag was not present in any real command
+  output I ran.'
+- '[claude] XDCTF2015 filemanager RCE chain: (1) 上传文件名为 `q'', filename=''s.php.jpg'',
+  extension=''''#.jpg` 的 shell 内容 —— 文件名（经转义后）被存储在 DB 行中，磁盘文件 `upload/q'', filename=''s.php.jpg'',
+  extension=''''#.jpg` 包含 shell 内容； (2) 重'
+- '[claude] Flag 位于 `/flag_emmmmmmmmm`，输出: <FLAG>。可用的 PoC 脚本位于 shared/exploit_filemanager.py；
+  nginx vhost 仅通过 `\.php$` + `try_files $uri =404` 执行 PHP（无 PATH_INFO / fix_pathinfo'
+- '[claude] DEADEND=PATH_INFO / fix_pathinfo 对 `xxx.php.jpg` 的执行失败（nginx `try_files
+  $uri =404`；以 image/jpeg 格式提供）；直接的 `.php` 扩展名上传被列入黑名单；重命名时 `newname` 不允许包含 "php"
+  字符串；重命名时 oldname 禁止 "php" 字符串。'
+evidence_chain:
+- '[claude] XDCTF2015 filemanager RCE chain: (1) 上传文件名为 `q'', filename=''s.php.jpg'',
+  extension=''''#.jpg` 的 shell 内容 —— 文件名（经转义后）被存储在 DB 行中，磁盘文件 `upload/q'', filename=''s.php.jpg'',
+  extension=''''#.jpg` 包含 shell 内容； (2) 重'
+- '[claude] DEADEND=PATH_INFO / fix_pathinfo 对 `xxx.php.jpg` 的执行失败（nginx `try_files
+  $uri =404`；以 image/jpeg 格式提供）；直接的 `.php` 扩展名上传被列入黑名单；重命名时 `newname` 不允许包含 "php"
+  字符串；重命名时 oldname 禁止 "php" 字符串。'
+success_format: CTF2\{[^}]+\}
+source: db37212c-38a4-4d88-81f6-e3c861556ece (solver f522e077-6ded-40ee-b0fa-fa589b75cfc8)
+notes: ''

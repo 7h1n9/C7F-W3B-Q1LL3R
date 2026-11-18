@@ -1,9 +1,10 @@
 :root { color: #123f3b; background: #effaf8; font-synthesis: none; text-rendering: optimizeLegibility; }
 html { scroll-behavior: smooth; }
 ::selection { color: #043d36; background: #9cf5e2; }
-body { min-width: 1120px; background: radial-gradient(circle at 86% 2%, #cbfff5 0, transparent 26%), radial-gradient(circle at 12% 70%, #ffffff 0, transparent 32%), #effaf8; }
+body { min-width: 0; overflow-x: hidden; background: radial-gradient(circle at 86% 2%, #cbfff5 0, transparent 26%), radial-gradient(circle at 12% 70%, #ffffff 0, transparent 32%), #effaf8; }
 body::before { position: fixed; inset: 0; z-index: -1; content: ""; opacity: .58; pointer-events: none; background-image: linear-gradient(rgba(0, 166, 143, .075) 1px, transparent 1px), linear-gradient(90deg, rgba(0, 166, 143, .075) 1px, transparent 1px); background-size: 28px 28px; }
 .app-shell { min-height: 100vh; background: transparent; }
+.app-shell > .ant-layout { min-width: 0; }
 .cyber-sider { position: relative; overflow: hidden; background: linear-gradient(180deg, #062c2b, #0b4440 72%, #073735) !important; border-right: 1px solid rgba(99, 255, 229, .38); box-shadow: 8px 0 34px rgba(2, 45, 42, .18); }
 .cyber-sider::after { position: absolute; right: 0; bottom: 0; width: 130px; height: 130px; content: ""; border-radius: 100%; background: #0ee5c024; filter: blur(20px); }
 .brand-lockup { display: flex; align-items: center; gap: 11px; height: 82px; padding: 0 20px; color: #f6fffd; }
@@ -23,7 +24,7 @@ body::before { position: fixed; inset: 0; z-index: -1; content: ""; opacity: .58
 .header-context { display: flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 600; letter-spacing: .3px; }
 .header-context span { color: #84bdb4; }
 .status-chip { margin-left: auto; color: #087d70 !important; font-size: 12px; background: #d9fff5 !important; }
-.cyber-content { min-height: calc(100vh - 66px); padding: 34px 34px 48px; background: transparent; }
+.cyber-content { min-width: 0; min-height: calc(100vh - 66px); overflow-x: hidden; padding: 34px 34px 48px; background: transparent; }
 .page-heading { position: relative; display: flex; align-items: flex-start; justify-content: space-between; margin-bottom: 28px; }
 .page-heading::after { position: absolute; bottom: -13px; left: 0; width: 58px; height: 3px; content: ""; background: linear-gradient(90deg, #00b89c, #79efda); border-radius: 99px; box-shadow: 0 0 12px #00b89c55; }
 .page-heading h1 { margin: 0; color: #104740; font-size: 28px; letter-spacing: -.6px; }
@@ -109,20 +110,6 @@ body::before { position: fixed; inset: 0; z-index: -1; content: ""; opacity: .58
 .muteki-usage-row strong, .muteki-usage-row small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .muteki-usage-row small { margin-top: 2px; color: #91aea8; font-size: 9px; }
 .muteki-usage-empty { padding: 10px 12px; color: #91aea8; font-size: 10px; }
-.muteki-score-card { margin-top: 14px; background: #ffffffdc !important; border: 1px solid #c8ece5 !important; border-radius: 12px !important; box-shadow: 0 8px 22px rgba(16, 109, 96, .08); }
-.muteki-score-card .ant-card-head { min-height: 46px; padding: 0 18px; background: linear-gradient(90deg, #ffffffa6, #f2fffbaa); border-bottom-color: #d7eee9; }
-.muteki-score-card .ant-card-head-title { color: #145b52; font-weight: 700; }
-.muteki-score-grid { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 10px; }
-.muteki-score-total { display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 10px 6px; color: #0b574c; background: linear-gradient(135deg, #e8fff8, #c9f6e9); border: 1px solid #b5ecdd; border-radius: 9px; }
-.muteki-score-total strong { font-size: 26px; line-height: 1.1; color: #066b58; }
-.muteki-score-total span { margin-top: 3px; color: #5f8b82; font-size: 11px; }
-.muteki-score-metric { display: flex; flex-direction: column; justify-content: center; min-width: 0; padding: 8px 10px; background: #f6fffc; border: 1px solid #d9f1ea; border-radius: 9px; }
-.muteki-score-metric span { color: #6f938b; font-size: 11px; }
-.muteki-score-metric strong { margin: 3px 0 1px; overflow: hidden; color: #104f46; font-size: 15px; text-overflow: ellipsis; white-space: nowrap; }
-.muteki-score-metric small { color: #9bb2ad; font-size: 10px; }
-.muteki-score-empty { margin-top: 10px; padding: 8px 10px; color: #a06a18; font-size: 12px; background: #fff6e3; border: 1px solid #f1dfae; border-radius: 8px; }
-.muteki-score-reason { display: flex; gap: 10px; margin-top: 10px; padding: 9px 12px; color: #4b6f68; font-size: 12px; line-height: 1.7; background: #f2fffb; border: 1px solid #d5f0e8; border-radius: 9px; }
-.muteki-score-reason span { flex: none; color: #0d806c; font-weight: 700; }
 .muteki-status-main { grid-column: 1 / -1; display: flex; align-items: center; gap: 9px; min-height: 44px; padding: 8px 13px; border-bottom: 1px solid #dcefe9; }
 .muteki-stat { display: flex; align-items: center; gap: 9px; min-height: 62px; padding: 10px 13px; border-right: 1px solid #dcefe9; }
 .muteki-status-main { flex-wrap: wrap; color: #2b665d; }
@@ -160,27 +147,49 @@ body::before { position: fixed; inset: 0; z-index: -1; content: ""; opacity: .58
 .muteki-case-note.is-fact { background: #edf7ec; border-color: #bfd7b8; }
 .muteki-case-note.is-finding { background: #fff0bf; border-color: #e0c76a; }
 .muteki-case-note.is-flag { color: #175f4e; background: #dff8e9; border-color: #72c79b; }
-.muteki-case-note.is-pending { filter: saturate(.75); }
 .muteki-case-note-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; color: #897a3d; font-family: Consolas, monospace; font-size: 9px; font-weight: 800; letter-spacing: .6px; }
 .muteki-case-note.is-fact .muteki-case-note-head { color: #63825d; }
 .muteki-case-note.is-flag .muteki-case-note-head { color: #23805e; }
 .muteki-case-note-head span { color: #aa9e78; font-size: 8px; }
-.muteki-case-note-content { max-height: 68px; overflow: hidden; margin-top: 6px; color: #514c36; font-size: 11px; line-height: 1.42; overflow-wrap: anywhere; }
+/* Folded to four lines by default, but never silently truncated: the toggle
+   below appears whenever the unclamped text is taller than the collapsed box,
+   and expanding removes every height limit (long URLs / base64 / multi-line
+   commands included). */
+.muteki-case-note-content { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 4; line-clamp: 4; overflow: hidden; margin-top: 6px; color: #514c36; font-size: 11px; line-height: 1.42; overflow-wrap: anywhere; }
+.muteki-case-note-content.is-expanded { display: block; -webkit-line-clamp: unset; line-clamp: unset; max-height: none; overflow: visible; user-select: text; cursor: text; }
 .muteki-case-note.is-flag .muteki-case-note-content { color: #175f4e; font-family: Consolas, monospace; font-weight: 700; }
-.muteki-case-note small { display: block; max-width: 100%; overflow: hidden; margin-top: 6px; color: #958b67; font-family: Consolas, monospace; font-size: 8px; text-overflow: ellipsis; white-space: nowrap; }
+.muteki-case-note-summary { margin-top: 6px; padding-top: 5px; border-top: 1px dashed #ded29c; color: #8b8160; font-size: 9.5px; line-height: 1.4; overflow-wrap: anywhere; user-select: text; }
+.muteki-case-note-toggle { display: inline-flex; align-items: center; gap: 4px; margin-top: 6px; padding: 0 7px; color: #6f6234; font-family: Consolas, monospace; font-size: 9px; line-height: 18px; background: #ffffffb8; border: 1px dashed #d5c384; border-radius: 6px; cursor: pointer; }
+.muteki-case-note-toggle:hover { color: #453a12; background: #fff; border-color: #b9a45f; }
+.muteki-case-note small { display: block; max-width: 100%; margin-top: 6px; color: #958b67; font-family: Consolas, monospace; font-size: 8px; line-height: 1.45; white-space: normal; overflow-wrap: anywhere; }
 .muteki-case-note.is-verified small { color: #3d8d6d; }
+.muteki-case-note.is-pending { background: #f4f1e9; border-color: #c8c2b4; border-style: dashed; color: #5e594c; filter: saturate(.6); }
+.muteki-case-note.is-pending .muteki-case-note-head { color: #7a7362; }
+.muteki-case-note.is-pending small { color: #8b8371; }
+.muteki-case-board.has-expanded-note { overflow: auto; }
+.muteki-case-board-pending { margin-top: 10px; }
+.muteki-case-board-pending-head { display: flex; align-items: baseline; gap: 8px; padding: 2px 3px 6px; color: #7d7466; font-family: Consolas, monospace; font-size: 9px; letter-spacing: .4px; }
+.muteki-case-board-pending-head span { display: inline-flex; align-items: center; gap: 5px; font-weight: 700; }
+.muteki-case-board-pending-head small { color: #9a9182; font-size: 9px; }
+.muteki-case-board.is-pending-board { min-height: 180px; max-height: 420px; border-style: dashed; border-color: #cdc6b8; background: repeating-linear-gradient(135deg, #f4f1ea 0 10px, #efeade 10px 20px); box-shadow: none; }
+.muteki-case-board.is-pending-board::before { opacity: .22; }
+.muteki-case-board-legend i.is-pending { background: #b9b2a3; }
 .muteki-case-board-empty { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; flex-direction: column; gap: 8px; color: #968d6e; font-size: 13px; }
 .muteki-case-board-empty .anticon { color: #c4b36f; font-size: 26px; }
 .muteki-case-board-empty small { color: #b0a88d; font-size: 10px; }
-.muteki-case-board-fullscreen { position: fixed; z-index: 1200; inset: 0; display: flex; flex-direction: column; gap: 12px; padding: 24px; background: #f4f0df; }
+.muteki-case-board-fullscreen { position: fixed; z-index: 1200; inset: 0; display: flex; flex-direction: column; gap: 12px; padding: 24px; overflow: auto; background: #f4f0df; }
 .muteki-case-board-fullscreen-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; color: #514c36; }
 .muteki-case-board-fullscreen-head > div { display: flex; flex-direction: column; gap: 4px; }
 .muteki-case-board-fullscreen-head strong { font-size: 20px; }
 .muteki-case-board-fullscreen-head span { color: #817b61; font-size: 12px; }
 .muteki-case-board-fullscreen .muteki-case-board-toolbar { padding: 0 2px; }
 .muteki-case-board-fullscreen .muteki-case-board { flex: 1; width: 100%; max-height: none; min-height: 0; padding: 18px; }
+.muteki-case-board-fullscreen .muteki-case-board-pending { flex: 0 0 auto; }
 .muteki-case-board-fullscreen .muteki-case-note { width: min(260px, 24%); min-height: 112px; padding: 12px; }
-.muteki-case-board-fullscreen .muteki-case-note-content { max-height: 82px; font-size: 12px; line-height: 1.5; }
+/* Fullscreen adds no extra height limit: the only fold is the same 4-line
+   clamp plus the explicit expand toggle. */
+.muteki-case-board-fullscreen .muteki-case-note-content { font-size: 12px; line-height: 1.5; }
+.muteki-case-board-fullscreen .muteki-case-note-content.is-expanded { max-height: none; }
 .muteki-case-board-fullscreen .muteki-case-note small { font-size: 10px; }
 @media (max-width: 720px) { .muteki-case-board-fullscreen { padding: 14px; } .muteki-case-board, .muteki-case-board-fullscreen .muteki-case-board { min-height: 520px; padding: 12px; } .muteki-case-note, .muteki-case-board-fullscreen .muteki-case-note { width: min(210px, 45%); } }
 .muteki-event-count, .muteki-subtle { color: #82a79f; font-family: Consolas, monospace; font-size: 10px; }
@@ -229,6 +238,8 @@ body::before { position: fixed; inset: 0; z-index: -1; content: ""; opacity: .58
 .muteki-canonical-flag-value, .muteki-blackboard-flag .ant-typography { display: block; margin-top: 8px; color: #196b5d; font-family: Consolas, monospace; font-size: 13px; font-weight: 700; word-break: break-all; }
 .muteki-canonical-flag small, .muteki-blackboard-flag small { display: block; margin-top: 5px; color: #76a79b; font-family: Consolas, monospace; font-size: 9px; }
 .muteki-poc-export { width: 100%; margin-top: 10px; color: #087d70 !important; border-color: #9edfcf !important; background: #f4fffb !important; }
+.muteki-export-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+.muteki-writeup-export { flex: 1 1 100%; color: #087d70 !important; border-color: #9edfcf !important; background: #f4fffb !important; }
 .muteki-inspector-section-title { margin: 17px 0 8px; color: #80a49c; font-family: Consolas, monospace; font-size: 10px; font-weight: 700; letter-spacing: .6px; text-transform: uppercase; }
 .muteki-flag-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 9px 0; border-bottom: 1px solid #e5f1ee; }
 .muteki-flag-row .ant-typography { min-width: 0; color: #8a640e; font-family: Consolas, monospace; font-size: 11px; }
@@ -271,6 +282,23 @@ body::before { position: fixed; inset: 0; z-index: -1; content: ""; opacity: .58
   .muteki-stat:nth-child(4) { border-right: 0; }
   .muteki-main-layout { grid-template-columns: 1fr; }
   .muteki-compact-rail { grid-template-columns: repeat(2, 1fr); gap: 12px; }
+}
+@media (max-width: 768px) {
+  .cyber-sider { width: 72px !important; min-width: 72px !important; max-width: 72px !important; flex: 0 0 72px !important; }
+  .brand-lockup { justify-content: center; padding: 0; }
+  .brand-lockup > div:last-child, .sider-footnote { display: none; }
+  .cyber-menu .ant-menu-item { width: calc(100% - 16px); margin-inline: 8px; padding-inline: 23px !important; }
+  .cyber-menu .ant-menu-title-content { display: none; }
+  .cyber-header { padding: 0 14px; }
+  .header-context { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .header-context span, .status-chip { display: none; }
+  .cyber-content { padding: 22px 14px 36px; }
+  .page-heading { align-items: flex-start; flex-direction: column; gap: 12px; margin-bottom: 24px; }
+  .page-heading > * { max-width: 100%; }
+  .page-heading h1 { font-size: 24px; }
+  .page-heading .ant-tag { white-space: normal; }
+  .panel-card .ant-card-head { min-height: 54px; padding-inline: 16px; }
+  .panel-card .ant-card-body { padding-inline: 14px; }
 }
 .empty-hint { color: #7d9e99; text-align: center; }
 .service-state { display: flex; align-items: center; gap: 8px; color: #368379; }

@@ -1,6 +1,49 @@
+import re
+from typing import ClassVar
 from urllib.parse import urlparse
 
 from pydantic import BaseModel, Field, field_validator, model_validator
+
+from app.core.net import ensure_absolute_http_url
+
+DEFAULT_FLAG_PATTERN = r"flag\{[^}]+\}"
+# A bare flag "banner" -- ``CTF2``, ``flag``, ``DASCTF`` -- is what operators
+# actually know; the ``{...}`` body is boilerplate.  Anything already containing
+# regex syntax is treated as the operator's own expression and left untouched,
+# so existing challenges keep working.
+_FLAG_BODY = r"\{[^}]+\}"
+_REGEX_META = frozenset("\\^$.|?*+()[]{}")
+
+
+def normalize_flag_pattern(value: str | None) -> str:
+    """Expand a bare flag banner into the full acceptance regex.
+
+    ``"CTF2"`` becomes ``CTF2\\{[^}]+\\}``.  A value that already looks like a
+    regular expression (``CTF2\\{[^}]+\\}``, ``(?i)flag\\{[^}]+\\}``) is returned
+    unchanged.
+    """
+
+    text = str(value or "").strip()
+    if not text:
+        return DEFAULT_FLAG_PATTERN
+    if any(char in _REGEX_META for char in text):
+        return text
+    head = text.strip("{}").strip()
+    if not head:
+        return DEFAULT_FLAG_PATTERN
+    return f"{re.escape(head)}{_FLAG_BODY}"
+
+
+def flag_head_of(pattern: str | None) -> str:
+    """Return the bare banner of a canonical pattern, else the value itself."""
+
+    text = str(pattern or "").strip()
+    if not text or not text.endswith(_FLAG_BODY):
+        return text
+    head = text[: -len(_FLAG_BODY)]
+    if head and not any(char in _REGEX_META for char in head):
+        return head
+    return text
 
 
 def _extract_hostname(value: str) -> str:
@@ -39,10 +82,18 @@ class ChallengeInput(BaseModel):
     challenge_type: str = Field(default="WEB_TARGET", pattern="^(WEB_TARGET|TRAFFIC_ANALYSIS)$")
     target_url: str | None = Field(default=None, max_length=2048)
     allowed_hosts: list[str] = Field(default_factory=list)
-    flag_pattern: str = r"flag\{[^}]+\}"
+    flag_pattern: str = DEFAULT_FLAG_PATTERN
     source_path: str | None = None
     status: str = "ACTIVE"
     metadata_json: dict = Field(default_factory=dict)
+
+    @field_validator("flag_pattern", mode="before")
+    @classmethod
+    def expand_flag_banner(cls, value: str | None) -> str:
+        """Accept a bare banner such as ``CTF2`` and store the full regex."""
+
+        return normalize_flag_pattern(value)
+
 
     @field_validator("allowed_hosts")
     @classmethod
@@ -53,18 +104,26 @@ class ChallengeInput(BaseModel):
         cleaned = sorted({_extract_hostname(value) for value in expanded if value.strip()})
         return cleaned
 
+    #: Whether this model enforces the *input* target contract.  It is an
+    #: operator-facing rule for creating and editing a challenge, not a property
+    #: of stored data, so the read schema clears it: a list endpoint that 500s
+    #: because one legacy row has a bare ``host:port`` or no target at all is
+    #: strictly worse than the row it failed on.
+    _enforce_target_contract: ClassVar[bool] = True
+
     @model_validator(mode="after")
     def target_must_be_allowed(self) -> "ChallengeInput":
-        if self.challenge_type == "WEB_TARGET":
-            parsed = urlparse(self.target_url or "")
-            if parsed.scheme not in {"http", "https"} or not parsed.hostname:
-                raise ValueError("target_url must be an absolute HTTP(S) URL")
-            if not self.allowed_hosts or parsed.hostname.lower() not in self.allowed_hosts:
-                raise ValueError("target URL host must be included in a non-empty allowed_hosts")
-        elif self.target_url or self.allowed_hosts:
-            raise ValueError(
-                "traffic-analysis challenges must not define target_url or allowed_hosts"
-            )
+        if self._enforce_target_contract:
+            if self.challenge_type == "WEB_TARGET":
+                parsed = urlparse(self.target_url or "")
+                if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+                    raise ValueError("target_url must be an absolute HTTP(S) URL")
+                if not self.allowed_hosts or parsed.hostname.lower() not in self.allowed_hosts:
+                    raise ValueError("target URL host must be included in a non-empty allowed_hosts")
+            elif self.target_url or self.allowed_hosts:
+                raise ValueError(
+                    "traffic-analysis challenges must not define target_url or allowed_hosts"
+                )
         self.metadata_json = normalize_asset_warranty_metadata(self)
         metadata = self.metadata_json
         if metadata.get("adapter") == "asset_warranty":
@@ -92,3 +151,16 @@ class ChallengeRead(ChallengeInput):
     primary_attachment_id: str | None = None
 
     model_config = {"from_attributes": True}
+
+    #: A read must render stored state.  Enforcing the input contract here made
+    #: one legacy row -- a bare ``host:port`` from before the arena solve path
+    #: normalised addresses, or a ``[无flag]`` teaching challenge with no target
+    #: at all -- fail the entire challenge list with HTTP 500.
+    _enforce_target_contract: ClassVar[bool] = False
+
+    @field_validator("target_url", mode="before")
+    @classmethod
+    def tolerate_a_legacy_scheme_less_address(cls, value: object) -> object:
+        """Normalise a stored bare ``host:port`` instead of rejecting it."""
+
+        return ensure_absolute_http_url(value if isinstance(value, str) else None)

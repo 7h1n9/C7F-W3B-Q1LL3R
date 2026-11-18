@@ -1,0 +1,24 @@
+# Workspace directories removed as unreferenced (partial run).
+# generated: 2026-10-08T00:27:54+08:00
+#
+# Selector : scripts/cleanup_orphan_workspaces.py --apply
+# Deletion was interrupted by the execution environment's bulk-delete guard
+# after 15 of 85 directories, so this file is the removed set, not the
+# original candidate set (see orphan_workspaces_20261008-002523.txt for that).
+#
+# name
+0095fcbb-0886-4d53-b1da-9d59d1e2c2ca
+03c0a8fe-be0d-4c65-8be8-0d85d032b3ac
+04cb6d6b-d315-4354-9578-af1a16b5748c
+0e25e5ae-3313-4760-9432-6246bafcb95f
+0fd3ebce-25c0-4bd1-92e6-2549628ff53d
+10fa8d41-418f-4936-bbe5-7545e726cf7d
+1285c7b1-8ae5-4949-be71-7cf9c54eabf6
+25d8a27d-d5cd-41f5-beaf-3cd9c7f4b4ba
+2de1d8ab-28f0-4613-bd97-f6c23373ea6b
+2f61c25c-e7f0-4bee-878a-615dfa7937a9
+307c5608-e632-4829-a228-2d859b09f2cc
+3087c768-c752-49f4-850a-7f60255a6dd2
+3128405c-7b9c-4f8d-894f-0b04b0eb647b
+349a29dc-5425-4225-b7ba-cbfb15d2c365
+35b2ec1c-c292-46d3-99c0-be68496b76d8

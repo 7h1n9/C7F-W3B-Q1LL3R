@@ -1,0 +1,21 @@
+name: '[WesternCTF2018]shrine'
+category: web
+keywords:
+- westernctf2018
+- shrine
+steps:
+- '[claude] SSTI at /shrine/<path>; blacklist nulls `config`/`self` and strips parens,
+  but `url_for.__globals__[''current_app''][''config''][''FLAG'']` bypasses it (dict-subscript,
+  no parens, bracket-keyed attribute ac'
+- '[claude] FLAG lives in app.config[''FLAG''] (env FLAG popped at startup); env dump
+  confirms it''s removed from os.environ.'
+- '[claude] FOUND_FLAG=<FLAG>'
+- Native Worker completed a bounded evidence-backed observation
+evidence_chain:
+- '[claude] SSTI at /shrine/<path>; blacklist nulls `config`/`self` and strips parens,
+  but `url_for.__globals__[''current_app''][''config''][''FLAG'']` bypasses it (dict-subscript,
+  no parens, bracket-keyed attribute ac'
+- '[claude] FOUND_FLAG=<FLAG>'
+success_format: CTF2\{[^}]+\}
+source: d4492442-3e56-47e5-a70b-c6eec693a6d0 (solver d0982e83-7945-4721-a5b2-025e291444d9)
+notes: ''

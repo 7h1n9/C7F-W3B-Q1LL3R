@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import re
 from datetime import UTC, datetime
 
@@ -14,7 +13,6 @@ from app.services.action_fingerprint import (
     normalize_request,
 )
 from app.services.solver_state import solver_state_service
-
 
 MAX_EXACT_RETRIES = 1
 STRATEGY_FAMILY_LIMITS = {

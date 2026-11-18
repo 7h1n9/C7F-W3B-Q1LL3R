@@ -1,0 +1,38 @@
+name: '[De1CTF 2019]Giftbox'
+category: web
+keywords:
+- de1ctf
+- giftbox
+- github
+- impakho
+- de1ctf_giftbox
+steps:
+- '[codex] No flag was retrievable from the public/framework surface. Nothing needed
+  from the operator — this lane''s direction is closed by design, not blocked.'
+- Native Worker completed a bounded evidence-backed observation
+- 'Giftbox exploit chain verified end-to-end: TOTP key GAXG24JTMZXGKZBU (8 digits,
+  5s interval) via pyotp; login admin ''hint{G1ve_u_hi33en_C0mm3nd-sh0w_hiiintttt_23333}''
+  works (SQLi password from users.sql, no re-derivation needed)'
+- 'Giftbox REMOTE_ADDR rotates behind gateway: md5(REMOTE_ADDR) sandbox dirs scatter
+  targeting files across dirs; repeat targeting rounds ~6x so one dir accumulates
+  full 19-file chain, then launch. Exploit script: /home/kali/workspace/exploit2.py'
+- 'Giftbox FLAG: <FLAG> recovered from real launch output (printf of file_get_contents(''/flag'')
+  after open_basedir bypass via chdir(''js'') + ini_set chains)'
+- '[claude] [De1CTF 2019] Giftbox: challenge source is public at github.com/impakho/de1ctf_giftbox
+  — TOTP key GAXG24JTMZXGKZBU (8 digits, 5s interval), admin password `hint{G1ve_u_hi33en_C0mm3nd-sh0w_hiiintttt_23'
+- '[claude] Giftbox REMOTE_ADDR rotates behind the gateway (md5(REMOTE_ADDR) sandbox
+  dirs): a single targeting round leaves launch reading only 6 of 19 missile files.
+  Fix confirmed working: repeat the 18-step tar'
+- '[claude] Giftbox flag chain: `chdir(''js'')` + `ini_set(''open_basedir'',''..'')`
+  (twice, using `..` and `/`) bypasses open_basedir, then `printf(file_get_contents(''/flag''))`
+  evaluated via the `eval` in launch.php.'
+- '[claude] DEADEND=`getflag`/`flag` commands in shell.php are decoys (`flag{congratulations!}`
+  placeholder, flag.jpg) — real flag is only at `/flag` behind open_basedir; no SQLi
+  re-derivation or directory brute-'
+evidence_chain:
+- '[claude] DEADEND=`getflag`/`flag` commands in shell.php are decoys (`flag{congratulations!}`
+  placeholder, flag.jpg) — real flag is only at `/flag` behind open_basedir; no SQLi
+  re-derivation or directory brute-'
+success_format: CTF2\{[^}]+\}
+source: 3837911c-45fc-418c-b296-00e2f97e87a3 (solver 9847adf6-92f3-4c1d-ac11-43c00c34094e)
+notes: ''

@@ -1,0 +1,30 @@
+name: '[struts2]s2-016'
+category: web
+keywords:
+- struts2
+- github
+- vulhub
+- tree
+- master
+steps:
+- '[claude] S2-016 OGNL injection via redirect parameter successful - command execution
+  confirmed'
+- '[claude] Flag retrieved from environment variable FLAG=<FLAG>'
+- '[claude] 4. Flag was directly exposed as `FLAG=<FLAG>`'
+- Native Worker completed a bounded evidence-backed observation
+evidence_chain:
+- '[claude] S2-016 OGNL injection via redirect parameter successful - command execution
+  confirmed'
+- '[claude] Flag retrieved from environment variable FLAG=<FLAG>'
+- '[claude] 4. Flag was directly exposed as `FLAG=<FLAG>`'
+success_format: CTF2\{[^}]+\}
+source: b541c60a-7c28-465d-939d-d6f7a494452a (solver 80634a7a-6992-4679-91fb-b0b8aa1aeef1)
+notes: ''
+flag_evidence_chains:
+  'flag #1':
+  - '[claude] 4. Flag was directly exposed as `FLAG=<FLAG>`'
+  'flag #2':
+  - '[claude] S2-016 OGNL injection via redirect parameter successful - command execution
+    confirmed'
+  - '[claude] Flag retrieved from environment variable FLAG=<FLAG>'
+  - '[claude] 4. Flag was directly exposed as `FLAG=<FLAG>`'

@@ -1,0 +1,17 @@
+name: '[uwsgi]UNACC'
+category: web
+keywords:
+- uwsgi
+- unacc
+- github
+- vulhub
+- blob
+- master
+steps:
+- RACE_WORKER_TIMEOUT
+- ROUND_BUDGET_EXHAUSTED_BEFORE_REASON
+evidence_chain: []
+success_format: CTF2\{[^}]+\}
+source: 3e2d85a3-2ad2-4d86-91dd-e3987d3ee764 (run 7f017541-43b4-4518-8bcb-95080fee4f44)
+notes: NO_VERIFIED_FLAG
+kind: negative

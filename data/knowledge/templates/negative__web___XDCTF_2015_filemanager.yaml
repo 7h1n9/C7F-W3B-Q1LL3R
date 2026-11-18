@@ -1,0 +1,22 @@
+name: '[XDCTF 2015]filemanager'
+category: web
+keywords:
+- xdctf
+- filemanager
+- github
+- ctftraining
+- xdctf_2015_filemanager
+steps:
+- gobuster common.txt + ext php/zip/tar.gz/bak/txt found no admin/info/git/backup
+  endpoints beyond www.tar.gz
+- 'SQLi via addslashes: plain quote escaped and GBK 0xbf27 bypass fails in delete.php/rename.php
+  (utf8 charset, no injection; 136B fatal line17 = no match). Not the vector.'
+- RACE_WORKER_TIMEOUT
+- 'No code execution via upload: whitelist gif/jpg/png/zip/txt, nginx serves .gif
+  statically (name.php.gif => image/gif, no PHP). Uploaded content never executed.'
+- ROUND_BUDGET_EXHAUSTED_BEFORE_REASON
+evidence_chain: []
+success_format: CTF2\{[^}]+\}
+source: db37212c-38a4-4d88-81f6-e3c861556ece (run 615b6d85-1707-48ea-92d9-a653a22f5b7d)
+notes: NO_VERIFIED_FLAG
+kind: negative

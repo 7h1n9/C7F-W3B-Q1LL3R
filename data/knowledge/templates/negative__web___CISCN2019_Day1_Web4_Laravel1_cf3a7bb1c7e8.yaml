@@ -1,0 +1,17 @@
+name: '[CISCN2019 总决赛 Day1 Web4]Laravel1 cf3a7bb1c7e8'
+category: web
+keywords:
+- ciscn2019
+- day1
+- web4
+- laravel1
+- github
+- glzjin
+- ciscn_2019_final_9_day1_web4
+steps:
+- RACE_WORKER_TIMEOUT
+evidence_chain: []
+success_format: CTF2\{[^}]+\}
+source: cf3a7bb1-c7e8-40cc-b5ad-2fa28c71f6ed (run bcd5a093-e270-422d-9e7d-f131eb8af305)
+notes: NO_VERIFIED_FLAG
+kind: negative

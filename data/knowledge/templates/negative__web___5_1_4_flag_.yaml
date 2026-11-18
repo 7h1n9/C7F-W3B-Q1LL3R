@@ -1,0 +1,18 @@
+name: '[5.1.4 仿射密码][无flag]仿射密码'
+category: web
+keywords:
+- ctf
+- shimo
+- sheets
+- jgmlqoid7pkw
+- modoc
+- book
+- dasc
+steps:
+- WORKER_BUDGET_EXHAUSTED
+- BARREN_LIMIT 199 fruitless Worker rounds
+evidence_chain: []
+success_format: flag\{[^}]+\}
+source: a3f2adce-1871-4d89-9b61-af122d36a3a2 (run 488f1f97-0981-4784-a73f-aa33ad18a5c6)
+notes: BARREN_LIMIT:199
+kind: negative

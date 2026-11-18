@@ -1,0 +1,20 @@
+name: '[De1CTF 2019]9calc'
+category: web
+keywords:
+- de1ctf
+- calc
+- github
+- glzjin
+- de1ctf_2019_web_9calc
+steps:
+- RACE_WORKER_TIMEOUT
+- '[codex] `/static/secretkey.txt` Flask key is a red herring here (matches the board:
+  no authenticated endpoints, session forgery useless).'
+- '[codex] Public-route/static-file enumeration for flag retrieval — the flag is bind-mounted
+  as `/flag` inside each backend container (docker-compose: flags/flag1..3), reachable
+  only through the calculator RCE,'
+evidence_chain: []
+success_format: CTF2\{[^}]+\}
+source: bc4788df-98af-4565-91c1-d0a390ed7f09 (run 8c6710af-6cf3-434c-bf76-662fac530b13)
+notes: NO_VERIFIED_FLAG
+kind: negative

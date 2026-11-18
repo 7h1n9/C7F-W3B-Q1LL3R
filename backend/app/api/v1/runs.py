@@ -68,15 +68,25 @@ from app.models.run import (
     ToolRequestFingerprint,
     WebResearchRecord,
 )
-from app.models.scoring import RunScore
 from app.models.skill import RunSkillSnapshot
 from app.models.solver_state import SolverState
 from app.orchestration.orchestrator import orchestrator
-from app.orchestration.state_machine import TERMINAL, RunStatus
+from app.orchestration.state_machine import TERMINAL, RunStatus, parse_run_status
 from app.orchestration.state_machine import restart as restart_state
 from app.schemas.compaction import CompactionDecisionAction
 from app.schemas.flag import FlagReviewUpdate
-from app.schemas.run import RunBatchDelete, RunCreate, RunRead
+from app.schemas.model_config import (
+    CLI_WORKER_ENGINE_TYPES,
+    OPENAI_WIRE_PROVIDER_TYPES,
+    WORKER_ENGINE_TYPES,
+    runtime_engine_type,
+)
+from app.schemas.run import (
+    RunBatchDelete,
+    RunControlExperimentCreate,
+    RunCreate,
+    RunRead,
+)
 from app.schemas.solver_state import SolverStateRead
 from app.services.assistance import classify_user_input
 from app.services.compaction import compaction_service
@@ -89,11 +99,19 @@ from app.services.muteki_board_semantics import (
     build_board_inputs,
     request_analysis_locked,
 )
+from app.services.muteki_llm_report import (
+    LLM_REPORT_CACHE_KEY,
+    build_llm_report,
+)
 from app.services.muteki_poc_bundle import PocBundleUnavailable, build_poc_bundle_for_run
 from app.services.muteki_recovered_trace import load_recovered_trace, merge_recovered_state
 from app.services.muteki_writeup import render_muteki_writeup
+from app.services.reports import ensure_muteki_report
 from app.services.role_loader import role_loader
 from app.services.run_attempts import run_attempt_service
+from app.services.run_control_experiment import (
+    create_control_experiment as create_control_experiment_service,
+)
 from app.services.run_diagnostics import run_diagnostics_service
 from app.services.run_finalizer import run_finalizer
 from app.services.run_lifecycle import cancel_run as cancel_run_lifecycle
@@ -101,12 +119,6 @@ from app.services.run_supervisor import run_supervisor
 from app.services.runner_client import runner_client
 from app.services.skill_selection import snapshot_run_skills
 from app.services.solver_state import solver_state_service
-from app.services.solver_scoring import (
-    get_run_score as get_run_score_service,
-    load_run_score,
-    request_prediction,
-    run_score_read,
-)
 from app.services.workspace import create_workspace
 from app.solver.muteki.adapter.cost_bridge import load_muteki_usage, load_muteki_usage_breakdown
 from app.solver.muteki.adapter.graph_snapshot import read_native_graph_snapshot
@@ -175,7 +187,6 @@ async def read_with_summary(
     item: SolveRun,
     *,
     include_diagnostics: bool = True,
-    score: dict | None = None,
 ) -> RunRead:
     challenge = await session.get(Challenge, item.challenge_id)
     model = await session.get(ModelConfig, item.model_config_id) if item.model_config_id else None
@@ -207,8 +218,8 @@ async def read_with_summary(
             "diagnostic_summary": item.last_error_message,
         }
     )
-    is_codex_cli = item.engine_type == "codex_cli"
-    is_openai = item.engine_type == "openai_compatible"
+    engine_type = item.engine_type or ""
+    engine_is_supported = engine_type in WORKER_ENGINE_TYPES
     payload = {
         **item.__dict__,
         "recovery_checkpoint_json": item.recovery_checkpoint_json or {},
@@ -222,15 +233,17 @@ async def read_with_summary(
         "reason_model_config_id": reason_model_config_id,
         "reason_model_name": reason_model.name if reason_model else None,
         "worker_engines": [selection.to_dict() for selection in worker_engines],
-        "model_source": "CODEX_CLI" if is_codex_cli else ("OPENAI_COMPATIBLE" if is_openai else None),
-        "model_config_required": is_openai or is_codex_cli,
-        "model_config_applicable": is_openai or is_codex_cli,
+        # Derived from the engine vocabulary rather than a per-engine ternary:
+        # every supported engine binds a model config, and a legacy row whose
+        # engine is no longer recognized reports "unknown" instead of a label.
+        "model_source": engine_type.upper() if engine_is_supported else None,
+        "model_config_required": engine_is_supported,
+        "model_config_applicable": engine_is_supported,
         "bridge_ready": False,
         "preflight_ready": False,
         "active_skill_names": active_skill_names,
         "diagnostic_tags": diagnostics["diagnostic_tags"],
         "diagnostic_summary": diagnostics["diagnostic_summary"],
-        "score": score,
         "created_at": read(item).created_at,
         "updated_at": read(item).updated_at,
         "started_at": read(item).started_at,
@@ -260,10 +273,10 @@ async def create_run(
         (item.engine_type for item in payload.worker_engines),
         payload.engine_type,
     )
-    if payload.solver_mode != "muteki" and requested_engine_type == "codex_cli":
+    if payload.solver_mode != "muteki" and requested_engine_type in CLI_WORKER_ENGINE_TYPES:
         raise DomainError(
-            "CODEX_CLI_WORKER_ONLY",
-            "Codex CLI is available only as a Muteki Worker.",
+            "CLI_ENGINE_WORKER_ONLY",
+            f"{requested_engine_type} is available only as a Muteki Worker.",
             status_code=422,
         )
     # Muteki's production Worker owns the run-scoped official Sandbox
@@ -294,6 +307,9 @@ async def create_run(
             "conversation_id",
             "reason_model_config_id",
             "worker_engines",
+            # Not a SolveRun column: it is a hint, and it is written into
+            # ``hints_json`` below rather than onto the ORM object.
+            "knowledge_mode",
         }
     )
     reason_model_config_id = payload.reason_model_config_id
@@ -351,15 +367,13 @@ async def create_run(
             fallback_engine_type=payload.engine_type,
             fallback_model_config_id=(
                 values.get("model_config_id")
-                if payload.engine_type in {"openai_compatible", "codex_cli"}
+                if payload.engine_type in WORKER_ENGINE_TYPES
                 else None
             ),
         )
     except ValueError as error:
         raise DomainError("WORKER_ENGINE_SELECTION_INVALID", str(error), status_code=422) from error
     for selection in worker_selections:
-        if selection.engine_type not in {"openai_compatible", "codex_cli"}:
-            continue
         config = await session.get(ModelConfig, selection.model_config_id)
         if not config or not config.enabled:
             raise DomainError(
@@ -367,15 +381,22 @@ async def create_run(
                 "Every configured Worker requires an enabled model configuration.",
                 status_code=422,
             )
-        expected_provider = selection.engine_type
-        if config.provider_type != expected_provider:
+        # Compare the engine the *config* executes as, not its provider name:
+        # a local_proxy config is a distinct provider that runs on the
+        # openai_compatible engine, so matching provider_type verbatim would
+        # reject a perfectly valid local-proxy Worker.
+        actual_engine = runtime_engine_type(config.provider_type)
+        if actual_engine != selection.engine_type:
             raise DomainError(
                 "MODEL_CONFIG_PROVIDER_INVALID",
-                f"Selected Worker requires provider_type={expected_provider}.",
+                f"Selected Worker requires provider_type={selection.engine_type} "
+                f"(or a provider that runs on it); got {config.provider_type}.",
                 status_code=422,
             )
         roles = (config.capabilities_json or {}).get("roles", ["worker"])
-        if "worker" not in roles or (selection.engine_type == "codex_cli" and "coordinator_reason" in roles):
+        if "worker" not in roles or (
+            selection.engine_type in CLI_WORKER_ENGINE_TYPES and "coordinator_reason" in roles
+        ):
             raise DomainError(
                 "MODEL_CONFIG_ROLE_INVALID",
                 "The selected model is not enabled for Worker execution.",
@@ -383,7 +404,11 @@ async def create_run(
             )
     if reason_model_config_id:
         reason_config = await session.get(ModelConfig, reason_model_config_id)
-        if not reason_config or not reason_config.enabled or reason_config.provider_type != "openai_compatible":
+        if (
+            not reason_config
+            or not reason_config.enabled
+            or reason_config.provider_type not in OPENAI_WIRE_PROVIDER_TYPES
+        ):
             raise DomainError(
                 "REASON_MODEL_CONFIG_REQUIRED",
                 "The Coordinator reasoning model must be enabled.",
@@ -412,6 +437,12 @@ async def create_run(
         reason_model_config_id=reason_model_config_id,
         worker_engines=worker_selections,
     )
+    # Record the caller's knowledge choice only when it actually made one.  The
+    # key's presence is what ``resolve_knowledge_mode`` reads as authoritative, so
+    # writing ``"off"`` for an unspecified caller would pin the baseline arm and
+    # make the treatment arm unreachable from the UI.
+    if payload.knowledge_mode is not None:
+        item.hints_json = {**item.hints_json, "knowledge_mode": payload.knowledge_mode}
     session.add(item)
     await session.flush()
     role = role_loader.load(challenge.challenge_type)
@@ -446,16 +477,6 @@ async def create_run(
     await session.commit()
     await session.refresh(item)
     await event_service.append(session, item.id, "run.created", {"challenge_id": challenge.id})
-    try:
-        await request_prediction(
-            session,
-            challenge=challenge,
-            attachments=attachments,
-            reason_model_config_id=reason_model_config_id,
-        )
-    except Exception:
-        # Prediction is opportunistic; it must never block Run creation.
-        await session.rollback()
     await session.commit()
     return {"data": read(item)}
 
@@ -477,16 +498,6 @@ async def list_runs(session: AsyncSession = Depends(get_session)) -> dict:
         # reprocessing.  Detail/diagnostic endpoints still materialize on
         # demand before returning workspace-level data.
         payload.append(await read_with_summary(session, item, include_diagnostics=False))
-    score_rows = list(
-        (
-            await session.scalars(
-                select(RunScore).where(RunScore.run_id.in_([item.id for item in items]))
-            )
-        ).all()
-    )
-    score_by_run = {row.run_id: run_score_read(row) for row in score_rows}
-    for row in payload:
-        row.score = score_by_run.get(row.id)
     return {"data": payload}
 
 
@@ -562,7 +573,6 @@ async def _delete_run_records(session: AsyncSession, run_id: str) -> None:
         AgentTurn,
         RunSkillSnapshot,
         SolverState,
-        RunScore,
         RunAttempt,
         FailureSignature,
         PlannerProposal,
@@ -628,20 +638,16 @@ async def get_run(run_id: str, session: AsyncSession = Depends(get_session)) -> 
     # Diagnostics scan the complete event/tool history. They are useful for
     # terminal/error views, but doing that work on every live polling request
     # makes the counters visibly lag as a run grows.
-    include_diagnostics = RunStatus(run.status) in TERMINAL or bool(run.last_error_code)
-    score = await load_run_score(session, run.id)
+    #
+    # Parsed tolerantly so a row whose status predates the enum (or was set by
+    # hand) still renders: the alternative is a 500 on the whole detail view,
+    # which hides the run rather than showing it with the state it actually has.
+    include_diagnostics = parse_run_status(run.status) in TERMINAL or bool(run.last_error_code)
     return {
         "data": await read_with_summary(
-            session, run, include_diagnostics=include_diagnostics, score=score
+            session, run, include_diagnostics=include_diagnostics
         )
     }
-
-
-@router.get("/runs/{run_id}/score")
-async def get_run_score(run_id: str, session: AsyncSession = Depends(get_session)) -> dict:
-    run = await require_run(run_id, session)
-    score = await get_run_score_service(session, run)
-    return {"data": score}
 
 
 @router.get("/runs/{run_id}/solver-state")
@@ -778,8 +784,21 @@ async def export_muteki_poc(run_id: str, session: AsyncSession = Depends(get_ses
     """
 
     run = await require_run(run_id, session)
+    solver_mode = str(run.solver_mode or "").lower()
+    status = str(run.status)
     report = dict(run.report_json or {})
-    if str(run.solver_mode or "").lower() != "muteki" or str(run.status) != "COMPLETED_SOLVED" or report.get("flag_verified") is not True:
+    if solver_mode != "muteki" or status != "COMPLETED_SOLVED" or report.get("flag_verified") is not True:
+        # A Run reconciled from the durable native terminal event has not run
+        # the report adapter yet; materialize it once so the PoC gate sees the
+        # same evidence a normally finished Run would.  Re-read every gate input
+        # from the refreshed Run rather than touching a possibly rolled-back ORM
+        # instance afterwards.
+        if await ensure_muteki_report(session, run):
+            await session.refresh(run)
+            solver_mode = str(run.solver_mode or "").lower()
+            status = str(run.status)
+            report = dict(run.report_json or {})
+    if solver_mode != "muteki" or status != "COMPLETED_SOLVED" or report.get("flag_verified") is not True:
         raise DomainError("MUTEKI_POC_NOT_AVAILABLE", "Only a verified Muteki result can export a PoC.", status_code=409)
     challenge = await session.get(Challenge, run.challenge_id)
     if challenge is None:
@@ -800,34 +819,34 @@ async def export_muteki_poc(run_id: str, session: AsyncSession = Depends(get_ses
     if not state.get("available"):
         raise DomainError("MUTEKI_BLACKBOARD_UNAVAILABLE", "The solved Blackboard is unavailable.", status_code=409)
     lines = [
-        "# Muteki Verified Answer PoC",
+        "# Muteki 已验证答案 PoC",
         "",
-        f"- Run: `{run.id}`",
-        f"- Challenge: {challenge.name}",
-        f"- Flag: `{report.get('flag') or ''}`",
-        "- Gate: `COMPLETED_SOLVED` / evidence-backed",
+        f"- 运行 ID：`{run.id}`",
+        f"- 题目：{challenge.name}",
+        f"- Flag：`{report.get('flag') or ''}`",
+        "- 完成门禁：`COMPLETED_SOLVED` / 含证据支撑",
         "",
-        "## Verified Evidence Chain",
+        "## 已验证证据链",
     ]
     facts = [item for item in state.get("facts", []) if item.get("verified")]
     if facts:
         for item in facts:
-            refs = ", ".join(f"`{ref}`" for ref in item.get("evidence_refs", [])) or "(none)"
-            lines.append(f"- {item.get('content', '')} — Evidence: {refs}")
+            refs = "、".join(f"`{ref}`" for ref in item.get("evidence_refs", [])) or "（无）"
+            lines.append(f"- {item.get('content', '')} —— 证据：{refs}")
     else:
-        lines.append("- No verified fact was exposed by the Blackboard projection.")
-    lines.extend(["", "## Saved PoC Metadata"])
+        lines.append("- 黑板投影未暴露任何已验证事实。")
+    lines.extend(["", "## 已保存的 PoC 元数据"])
     pocs = state.get("pocs", [])
     if pocs:
         for item in pocs:
             lines.append(
                 f"- `{item.get('name') or item.get('poc_id')}` · "
-                f"status={item.get('status', 'available')} · "
-                f"command=`{item.get('entry_command', '')}` · "
-                f"artifact=`{item.get('artifact_id') or 'n/a'}`"
+                f"状态：{item.get('status', '可用')} · "
+                f"命令：`{item.get('entry_command', '')}` · "
+                f"制品：`{item.get('artifact_id') or '无'}`"
             )
     else:
-        lines.append("- No separate PoC artifact metadata was saved; the verified flag and evidence chain are the answer record.")
+        lines.append("- 未单独保存 PoC 制品元数据；已验证的 Flag 与证据链即为本题的答案记录。")
     content = "\n".join(lines) + "\n"
     return Response(
         content=content,
@@ -841,12 +860,16 @@ async def download_muteki_poc_bundle(run_id: str, session: AsyncSession = Depend
     """Download a directly reusable, evidence-backed Muteki PoC bundle."""
 
     run = await require_run(run_id, session)
+    solver_mode = str(run.solver_mode or "").lower()
+    status = str(run.status)
     report = dict(run.report_json or {})
-    if (
-        str(run.solver_mode or "").lower() != "muteki"
-        or str(run.status) != "COMPLETED_SOLVED"
-        or report.get("flag_verified") is not True
-    ):
+    if solver_mode != "muteki" or status != "COMPLETED_SOLVED" or report.get("flag_verified") is not True:
+        if await ensure_muteki_report(session, run):
+            await session.refresh(run)
+            solver_mode = str(run.solver_mode or "").lower()
+            status = str(run.status)
+            report = dict(run.report_json or {})
+    if solver_mode != "muteki" or status != "COMPLETED_SOLVED" or report.get("flag_verified") is not True:
         raise DomainError(
             "MUTEKI_POC_NOT_AVAILABLE",
             "Only a verified Muteki result can export a PoC bundle.",
@@ -868,8 +891,12 @@ async def download_muteki_poc_bundle(run_id: str, session: AsyncSession = Depend
         target_url=str(getattr(challenge, "target_url", "") or ""),
     )
     state = merge_recovered_state(state, recovered_trace)
-    if not state.get("available"):
-        raise DomainError("MUTEKI_BLACKBOARD_UNAVAILABLE", "The solved Blackboard is unavailable.", status_code=409)
+    # The bundle is materialized from persisted ToolCall/EvidenceLedger rows and
+    # the Run-local recovered execution record; SharedGraph PoC metadata is
+    # optional decoration.  Requiring a readable Blackboard here blocked export
+    # of an otherwise reproducible solved Run, so an unavailable graph now falls
+    # through to the bundle builder, which fails truthfully (409
+    # MUTEKI_POC_NOT_REPRODUCIBLE) only when no evidence-backed step exists.
     try:
         bundle = await build_poc_bundle_for_run(session, run, challenge, state)
     except PocBundleUnavailable as error:
@@ -890,6 +917,23 @@ async def get_run_tool_manifest(run_id: str, session: AsyncSession = Depends(get
     if not item:
         raise DomainError("TOOL_MANIFEST_NOT_FOUND", "No Attempt Tool Manifest has been recorded.", status_code=404)
     return {"data": {"id": item.id, "run_id": item.run_id, "attempt_id": item.attempt_id, "role_snapshot_tools": item.role_snapshot_tools, "challenge_allowed_tools": item.challenge_allowed_tools, "backend_registry_tools": item.backend_registry_tools, "runner_capability_tools": item.runner_capability_tools, "mcp_advertised_tools": item.mcp_advertised_tools, "execution_mode": item.execution_mode, "mcp_required": item.mcp_required, "effective_tools": item.effective_tools, "missing_expected_tools": item.missing_expected_tools, "schema_hashes": item.schema_hashes, "manifest_sha256": item.manifest_sha256, "created_at": item.created_at.isoformat()}}
+
+
+@router.post("/runs/{run_id}/control", status_code=201)
+async def create_control_run(
+    run_id: str,
+    payload: RunControlExperimentCreate,
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    source_run = await require_run(run_id, session)
+    return await create_control_experiment_service(
+        session,
+        source_run,
+        payload,
+        create_run_fn=create_run,
+        start_run_fn=start_run,
+        read_run_fn=read,
+    )
 
 
 @router.post("/runs/{run_id}/start")
@@ -1139,13 +1183,26 @@ async def cancel_run(run_id: str, session: AsyncSession = Depends(get_session)) 
     run = await require_run(run_id, session)
     solver_mode = str(run.solver_mode or "").lower()
     # Native Muteki has its own Coordinator/Worker/Sandbox lifecycle.  Enter
-    # that cancellation path first so its official ``finally`` persists the
-    # final Graph events and tears down the run container before the outer
-    # Run row becomes terminal.  Legacy runs retain their existing cancel
-    # adapter and Runner session cleanup.
+    # that cancellation path first and let it wait for the Coordinator's
+    # Finalize handoff, so the official ``finally`` persists the final Graph
+    # events and tears down the run container before this request writes the
+    # terminal Run row.  Legacy runs retain their existing cancel adapter and
+    # Runner session cleanup.
+    muteki_handoff = None
     if solver_mode == "muteki":
-        await run_supervisor.cancel_muteki(str(run.id))
+        muteki_handoff = await run_supervisor.cancel_muteki_with_handoff(str(run.id))
     await cancel_run_lifecycle(session, run.id, "Run cancelled by user.")
+    if muteki_handoff is not None and muteki_handoff.forced:
+        # The Coordinator's Finalize handoff never landed inside the cancel +
+        # Finalize window (the supervisor already persisted that anomaly as a
+        # Run event).  Keep it visible on the Run row instead of reporting an
+        # ordinary user cancellation.
+        run.last_error_code = "MUTEKI_FINALIZE_GRACE_EXCEEDED"
+        run.last_error_message = (
+            "Run was cancelled after the Coordinator Finalize window expired; "
+            "the terminal Muteki handoff was not observed."
+        )
+        await session.commit()
     await run_finalizer.reconcile(session, run)
     if solver_mode != "muteki":
         await orchestrator.cancel(run.id)
@@ -1436,6 +1493,14 @@ async def get_report(run_id: str, session: AsyncSession = Depends(get_session)) 
         raise DomainError("REPORT_NOT_AVAILABLE", "Formal writeups are only available for completed runs.", status_code=409)
     active_report = await session.scalar(select(Artifact.id).where(Artifact.run_id == run.id, Artifact.artifact_type == "report", Artifact.status == "ACTIVE"))
     if active_report is None:
+        # A Muteki Run can go terminal through the native handoff / startup
+        # recovery, which never ran the in-process report adapter.  Materialize
+        # the canonical report on demand so a completed Run is never stuck
+        # without its Writeup and PoC.
+        if await ensure_muteki_report(session, run):
+            await session.refresh(run)
+            active_report = await session.scalar(select(Artifact.id).where(Artifact.run_id == run.id, Artifact.artifact_type == "report", Artifact.status == "ACTIVE"))
+    if active_report is None:
         raise DomainError("REPORT_NOT_FOUND", "No active formal report has been generated for this run.", status_code=404)
     path = Path(run.workspace_path) / "final" / "writeup.md"
     if not path.is_file():
@@ -1444,6 +1509,13 @@ async def get_report(run_id: str, session: AsyncSession = Depends(get_session)) 
         )
     report_json_path = Path(run.workspace_path) / "final" / "report.json"
     report_json = run.report_json or (json.loads(report_json_path.read_text(encoding="utf-8")) if report_json_path.is_file() else None)
+    # The Result panel needs the challenge's OWN banner to decide whether the
+    # verified flag is displayable.  Hardcoding ``flag{...}`` in the client made
+    # every non-default banner (CTF2{...}, DASCTF{...}) look unverified, so the
+    # pattern travels with the report.
+    report_pattern = str(
+        getattr(await session.get(Challenge, run.challenge_id), "flag_pattern", "") or ""
+    )
     if str(run.solver_mode or "").lower() == "muteki":
         semantic_analysis = dict((run.hints_json or {}).get(SEMANTIC_CACHE_KEY) or {})
         challenge = await session.get(Challenge, run.challenge_id)
@@ -1496,6 +1568,25 @@ async def get_report(run_id: str, session: AsyncSession = Depends(get_session)) 
                 flag=report_json.get("flag"),
                 flag_found=bool(report_json.get("flag_verified")),
             )
+            # A re-render must never pay for a second model turn: reuse the cached
+            # authoring when the inputs have not moved, and author once on demand
+            # when the run was generated before this existed (or the first try
+            # failed).
+            llm_report = dict((run.hints_json or {}).get(LLM_REPORT_CACHE_KEY) or {})
+            if not llm_report.get("sections"):
+                llm_report = await build_llm_report(
+                    session,
+                    run=run,
+                    challenge=challenge,
+                    graph_state=graph_state,
+                    calls=calls,
+                    evidence=evidence_rows,
+                    poc_available=bool(report_json["poc_reproducible"]),
+                    verified_flag=str(report_json.get("flag") or ""),
+                    usage_summary={},
+                    timeout=120.0,
+                )
+                await session.commit()
             content = render_muteki_writeup(
                 challenge=challenge,
                 run=run,
@@ -1507,9 +1598,30 @@ async def get_report(run_id: str, session: AsyncSession = Depends(get_session)) 
                 poc_available=bool(report_json["poc_reproducible"]),
                 recovered_trace=recovered_trace,
                 semantic_analysis=semantic_analysis,
+                llm_report=llm_report,
             )
-            return {"data": {"content": content, "path": "final/writeup.md", "report_json": report_json}}
-    return {"data": {"content": path.read_text(encoding="utf-8"), "path": "final/writeup.md", "report_json": report_json}}
+            return {"data": {"content": content, "path": "final/writeup.md", "report_json": report_json, "flag_pattern": report_pattern}}
+    return {"data": {"content": path.read_text(encoding="utf-8"), "path": "final/writeup.md", "report_json": report_json, "flag_pattern": report_pattern}}
+
+
+@router.get("/runs/{run_id}/report/download")
+async def download_report(run_id: str, session: AsyncSession = Depends(get_session)) -> Response:
+    """Export the formal Writeup as a Markdown attachment.
+
+    Reuses the ``/report`` resolution (including the Muteki self-healing path)
+    so the exported document is byte-identical to what the workspace shows.
+    """
+
+    payload = await get_report(run_id, session)
+    data = payload.get("data") or {}
+    content = str(data.get("content") or "")
+    if not content.strip():
+        raise DomainError("REPORT_NOT_FOUND", "The report is empty.", status_code=404)
+    return Response(
+        content=content,
+        media_type="text/markdown; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="muteki-{run_id}-writeup.md"'},
+    )
 
 
 @router.get("/runs/{run_id}/compaction/status")

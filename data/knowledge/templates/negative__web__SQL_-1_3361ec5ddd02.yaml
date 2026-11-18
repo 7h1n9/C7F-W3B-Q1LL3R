@@ -1,0 +1,14 @@
+name: SQL注入-1 3361ec5ddd02
+category: web
+keywords:
+- sql
+- ctfer
+- book
+- nu1l
+steps:
+- ROUND_BUDGET_EXHAUSTED_BEFORE_REASON
+evidence_chain: []
+success_format: CTF2\{[^}]+\}
+source: 3361ec5d-dd02-4f27-af29-42d5dd4f1e13 (run 383522ae-ec2c-4f0a-85c0-214c065b1e14)
+notes: NO_VERIFIED_FLAG
+kind: negative

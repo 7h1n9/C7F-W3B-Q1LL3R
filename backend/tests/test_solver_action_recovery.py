@@ -88,7 +88,7 @@ def make_loop(
         state_machine=TaskStateMachine(),
         planner=planner or DeterministicPlanner(),
         policy=ActionPolicyValidator(),
-        worker_manager=WorkerManager(workers={"mock": active_worker}),
+        worker_manager=WorkerManager(workers={"runner": active_worker}),
     )
     return loop, repository, active_worker
 

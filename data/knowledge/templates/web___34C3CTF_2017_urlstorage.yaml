@@ -1,0 +1,47 @@
+name: '[34C3CTF 2017]urlstorage'
+category: web
+keywords:
+- c3ctf
+- urlstorage
+steps:
+- 'urlstorage app: robots.txt points to /static/secretkey.txt = DJANGO SECRET KEY
+  ''you-will-never-guess'' (leaked). App at /, /urlstorage stores a URL per user,
+  /flag?token=HEX gives per-user flag but non-admin flag identical for all users:
+  34C3_4e5ebd7658283d8d74226d650409963c435344a7'
+- /contact accepts desc+url+captcha+optional PoW (static/pow.py, /static/vpow.py);
+  admin bot visits submitted URL ~3s (longer with PoW). Goal = admin flag via SSRF/XSS
+  as admin. Non-admin token 32hex stored per-user, not md5(username).
+- 'FLAG RECOVERED: logged into app as user ''admin'' using password from public challenge
+  source run_bot.py ''JJOIUQjouwqhirhq329pP!!!1sdqqweck1''; admin /flag page returns
+  <FLAG> (status ''admin (you are awesome!)''). Full output: /home/kali/workspace/admin_flag_output.txt'
+- '[codex] App is Django 1.11 urlstorage; `/flag?token=` validates with a prefix check
+  and returns the real flag only when `user.get_username == ''admin''`.'
+- '[codex] Admin credentials from challenge source `run_bot.py` (`admin` / `JJOIUQjouwqhirhq329pP!!!1sdqqweck1`)
+  work on this live target.'
+- '[codex] Admin `/flag` page output: `<FLAG>` (status `admin (you are awesome!)`),
+  captured in `/home/kali/workspace/admin_flag_output.txt`.'
+- '[codex] FOUND_FLAG=<FLAG>'
+- '[claude] Furthest confirmed fact: target is a Django "URL Storage" app (34C3CTF
+  urlstorage) behind openresty; POST to `/` requires valid csrftoken cookie+field
+  AND a same-origin Referer header — without Refere'
+evidence_chain:
+- 'urlstorage app: robots.txt points to /static/secretkey.txt = DJANGO SECRET KEY
+  ''you-will-never-guess'' (leaked). App at /, /urlstorage stores a URL per user,
+  /flag?token=HEX gives per-user flag but non-admin flag identical for all users:
+  34C3_4e5ebd7658283d8d74226d650409963c435344a7'
+- /contact accepts desc+url+captcha+optional PoW (static/pow.py, /static/vpow.py);
+  admin bot visits submitted URL ~3s (longer with PoW). Goal = admin flag via SSRF/XSS
+  as admin. Non-admin token 32hex stored per-user, not md5(username).
+- 'FLAG RECOVERED: logged into app as user ''admin'' using password from public challenge
+  source run_bot.py ''JJOIUQjouwqhirhq329pP!!!1sdqqweck1''; admin /flag page returns
+  <FLAG> (status ''admin (you are awesome!)''). Full output: /home/kali/workspace/admin_flag_output.txt'
+- '[codex] App is Django 1.11 urlstorage; `/flag?token=` validates with a prefix check
+  and returns the real flag only when `user.get_username == ''admin''`.'
+- '[codex] Admin credentials from challenge source `run_bot.py` (`admin` / `JJOIUQjouwqhirhq329pP!!!1sdqqweck1`)
+  work on this live target.'
+- '[codex] Admin `/flag` page output: `<FLAG>` (status `admin (you are awesome!)`),
+  captured in `/home/kali/workspace/admin_flag_output.txt`.'
+- '[codex] FOUND_FLAG=<FLAG>'
+success_format: CTF2\{[^}]+\}
+source: e989e460-78dc-49c7-80b0-f50d02b035ab (solver c714b2b0-afe6-43c9-9dc3-468f061ea35b)
+notes: ''

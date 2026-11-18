@@ -1,0 +1,19 @@
+name: '[RWCTF2018]Bookhub'
+category: web
+keywords:
+- rwctf2018
+- bookhub
+steps:
+- /download returns 0-byte 200 with fresh Last-Modified for ANY file= param (transient
+  platform proxy artifact, not a real route); /download no-param = 404. No nginx alias/path
+  traversal, no .env/Dockerfile/falg names under /. Flag may live in backend container
+  only (needs auth/forge).
+- '[codex] /download returns 0-byte 200 with fresh Last-Modified for ANY file= param
+  (transient platform proxy artifact, not a real route); no nginx alias/path traversal;
+  no flag-named files (flag, fl4g, flag_1,'
+- RACE_WORKER_TIMEOUT
+evidence_chain: []
+success_format: CTF2\{[^}]+\}
+source: 186069b6-5d30-4c6d-a8b0-f3c8efaba75a (run dba01bef-97b8-4caf-aa77-59c6463bd17a)
+notes: NO_VERIFIED_FLAG
+kind: negative

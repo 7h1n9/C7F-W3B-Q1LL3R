@@ -169,6 +169,113 @@ def test_official_worker_health_rejects_nonzero_upstream_cli_result(tmp_path, mo
     assert reason == "WORKER_HEALTHCHECK_FAILED"
 
 
+def test_official_worker_health_accepts_probe_answer_after_sighup(
+    tmp_path, monkeypatch
+) -> None:
+    """An ``OK`` already on stdout outranks a ``rc=-1`` teardown signal.
+
+    Measured 2026-10-26: 5/5 probe failures in one backend cycle were
+    ``rc=-1 timed_out=False stdout='OK'`` -- the engine answered and was hung up
+    during teardown.  Dropping the lane there costs the whole Run, so the answer
+    wins.
+    """
+
+    class Handle:
+        run_id = "health-cli-hangup"
+
+    def fake_run_cli_container(driver, argv, *, handle, cwd, timeout, env):
+        return SimpleNamespace(
+            text="OK",
+            raw_stderr="",
+            timed_out=False,
+            oom_killed=False,
+            cancelled=False,
+            runtime_status={"status": "finished", "rc": -1},
+        )
+
+    monkeypatch.setattr("muteki.solver.container_exec.run_cli_container", fake_run_cli_container)
+    adapter = OfficialWorkerAdapter(OfficialWorkerConfig(backend="container"))
+    adapter._container = Handle()
+
+    healthy, reason = asyncio.run(
+        adapter.health(EngineProfile("codex"), workspace=str(tmp_path))
+    )
+
+    assert healthy is True
+    assert reason == ""
+
+
+def test_official_worker_health_ignores_codex_stdin_notice(
+    tmp_path, monkeypatch
+) -> None:
+    """codex's stdin notice is transport chatter, not a failed probe.
+
+    Measured 2026-10-28, after the relay balance was restored: every codex probe
+    failure was ``rc=-1 timed_out=False stdout='OK'
+    stderr='Reading additional input from stdin...'``.  The engine had answered;
+    only the teardown was odd.  Treating that as unhealthy drops the codex lane
+    on every Run, so the notice is filtered and the answer still wins.
+    """
+
+    class Handle:
+        run_id = "health-cli-codex-stdin"
+
+    def fake_run_cli_container(driver, argv, *, handle, cwd, timeout, env):
+        return SimpleNamespace(
+            text="OK",
+            raw_stderr="Reading additional input from stdin...\n",
+            timed_out=False,
+            oom_killed=False,
+            cancelled=False,
+            runtime_status={"status": "finished", "rc": -1},
+        )
+
+    monkeypatch.setattr("muteki.solver.container_exec.run_cli_container", fake_run_cli_container)
+    adapter = OfficialWorkerAdapter(OfficialWorkerConfig(backend="container"))
+    adapter._container = Handle()
+
+    healthy, reason = asyncio.run(
+        adapter.health(EngineProfile("codex"), workspace=str(tmp_path))
+    )
+
+    assert healthy is True
+    assert reason == ""
+
+
+def test_official_worker_health_rejects_sighup_without_clean_answer(
+    tmp_path, monkeypatch
+) -> None:
+    """Only ``rc=-1`` qualifies, and only with an exact, stderr-free answer.
+
+    A different non-zero code still means a broken launch, and any stderr output
+    means the CLI complained after answering -- both stay unhealthy.
+    """
+
+    class Handle:
+        run_id = "health-cli-hangup-dirty"
+
+    def fake_run_cli_container(driver, argv, *, handle, cwd, timeout, env):
+        return SimpleNamespace(
+            text="OK",
+            raw_stderr="error: upstream refused",
+            timed_out=False,
+            oom_killed=False,
+            cancelled=False,
+            runtime_status={"status": "finished", "rc": -1},
+        )
+
+    monkeypatch.setattr("muteki.solver.container_exec.run_cli_container", fake_run_cli_container)
+    adapter = OfficialWorkerAdapter(OfficialWorkerConfig(backend="container"))
+    adapter._container = Handle()
+
+    healthy, reason = asyncio.run(
+        adapter.health(EngineProfile("codex"), workspace=str(tmp_path))
+    )
+
+    assert healthy is False
+    assert reason == "WORKER_HEALTHCHECK_FAILED"
+
+
 def test_official_worker_preserves_usage_when_cli_solver_fails(tmp_path, monkeypatch) -> None:
     class FailingSolver:
         def __init__(self, **kwargs):
@@ -350,7 +457,15 @@ def test_official_worker_outer_task_cancel_reaps_native_thread(tmp_path) -> None
     assert cancelled.is_set()
 
 
-def test_official_worker_adapter_projects_only_safe_step_metadata(tmp_path, monkeypatch) -> None:
+def test_official_worker_adapter_projects_redacted_step_output(tmp_path, monkeypatch) -> None:
+    """A tool_result step now carries its output, but only in redacted form.
+
+    The old contract dropped ``raw`` entirely, which made every post-mortem a
+    guess: the trace said a tool ran and never what it printed.  The command and
+    output are now forwarded -- with secrets masked and size bounded -- so this
+    test pins both halves of that trade-off.
+    """
+
     steps: list[dict[str, str]] = []
     adapter = OfficialWorkerAdapter(step_callback=steps.append)
 
@@ -367,10 +482,20 @@ def test_official_worker_adapter_projects_only_safe_step_metadata(tmp_path, monk
     def fake_run(driver, argv, **kwargs):
         kwargs["on_step"](
             SimpleNamespace(
-                kind="tool_result",
-                tool="http_request",
+                kind="tool",
+                tool="shell",
                 session="session-1",
-                raw="secret response",
+                text="curl -H 'Authorization: Bearer abcdefghijklmnop' http://t/",
+                call_id="call-1",
+            )
+        )
+        kwargs["on_step"](
+            SimpleNamespace(
+                kind="tool_result",
+                tool="shell",
+                session="session-1",
+                raw="secret response password=hunter2",
+                call_id="call-1",
             )
         )
         return SimpleNamespace(
@@ -392,14 +517,21 @@ def test_official_worker_adapter_projects_only_safe_step_metadata(tmp_path, monk
     assert result.success is True
     assert result.status == "COMPLETED"
     assert result.output == "bounded result"
-    assert steps == [
-        {
-            "worker_id": "worker-1",
-            "kind": "tool_result",
-            "tool": "http_request",
-            "session": "session-1",
-        }
-    ]
+    assert len(steps) == 2
+
+    invoke, outcome = steps
+    # 1. The command is recorded, so the round is replayable...
+    assert invoke["command"].startswith("curl ")
+    # ...but the bearer token never reaches the durable stream.
+    assert "abcdefghijklmnop" not in invoke["command"]
+    assert "[redacted]" in invoke["command"]
+
+    # 2. The result carries its output, paired with the command that produced it.
+    assert outcome["command"].startswith("curl ")
+    assert "secret response" in outcome["result_excerpt"]
+    assert "hunter2" not in outcome["result_excerpt"]
+    # The unbounded ``raw`` field itself is never projected.
+    assert "raw" not in outcome
 
 
 def test_official_worker_container_lifecycle_is_one_run_scoped(tmp_path, monkeypatch) -> None:
@@ -1300,3 +1432,562 @@ def test_native_orchestrator_defaults_to_codex_and_forwards_account_root(tmp_pat
         assert orchestrator.coordinator.config.official_account_root == "accounts"
     finally:
         graph.close()
+
+
+def test_official_worker_never_reprovisions_a_sandbox_after_teardown(monkeypatch) -> None:
+    """A torn-down Sandbox must not be started again.
+
+    Measured 2026-10-19: a Run reached COMPLETED_SOLVED while its container
+    was started *after* the Finalize teardown and then sat idle with only
+    ``runtime_agent`` inside -- nothing was left to reap it, so it leaked
+    until the next service restart.  Whatever the late caller is, an adapter
+    that has already stopped is not allowed to provision again.
+    """
+
+    adapter = OfficialWorkerAdapter(OfficialWorkerConfig(backend="container"))
+    started: list[str] = []
+
+    def fake_ensure_container(*_args, **_kwargs):
+        started.append("ensure")
+        return SimpleNamespace(account_root=None)
+
+    import app.solver.muteki.worker.official_worker as module
+
+    monkeypatch.setattr(module, "ensure_container", fake_ensure_container, raising=False)
+    import muteki.solver.container_exec as container_exec
+
+    monkeypatch.setattr(container_exec, "ensure_container", fake_ensure_container)
+
+    asyncio.run(adapter.stop())
+    asyncio.run(adapter.start(run_id="run-1", workspace="/tmp/ws"))
+
+    assert started == []
+    assert adapter._container is None
+
+
+def test_a_sandbox_provisioned_after_teardown_is_removed_again(monkeypatch) -> None:
+    """Provisioning that finishes after Finalize must undo itself.
+
+    ``ensure_container`` can take minutes (image pull, account projection),
+    which is longer than a Run that solves quickly.  Finalize's teardown can
+    therefore land *before* the Sandbox exists, and the container then appears
+    with nobody left to reap it -- measured 2026-10-19: ``muteki-run-6bcb7b31``
+    started in the same second its Run went COMPLETED_SOLVED and idled with
+    only ``runtime_agent`` inside.
+    """
+
+    adapter = OfficialWorkerAdapter(OfficialWorkerConfig(backend="container"))
+    torn_down: list[str] = []
+    import muteki.solver.container_exec as container_exec
+
+    monkeypatch.setattr(
+        container_exec,
+        "teardown_container",
+        lambda run_id, **_kwargs: torn_down.append(str(run_id)),
+    )
+
+    def slow_ensure_container(*_args, **_kwargs):
+        # Finalize's teardown lands while provisioning is still in flight.
+        adapter._stopped = True
+        return SimpleNamespace(account_root=None)
+
+    monkeypatch.setattr(container_exec, "ensure_container", slow_ensure_container)
+
+    asyncio.run(adapter.start(run_id="run-1", workspace="/tmp/ws"))
+
+    assert torn_down == ["run-1"]
+    assert adapter._container is None
+
+
+# ── the containerised Claude root guard (2026-10-25) ────────────────────────
+
+
+def test_the_claude_probe_gets_the_root_guard_escape_hatch() -> None:
+    """Measured: every containerised Claude Run lost its lane to this.
+
+    The worker image is ``uid=0``.  Claude CLI 2.1.98 refuses
+    ``--dangerously-skip-permissions`` under root and prints
+
+        --dangerously-skip-permissions cannot be used with root/sudo privileges
+
+    before any network call, so the PREPARE probe failed on every Run
+    (``muteki.prepare.engine.checked`` -> ``WORKER_HEALTHCHECK_FAILED``), the
+    Coordinator logged ``ENGINE_UNAVAILABLE``, and the Run ran a single Codex
+    lane.  The relay was reachable the whole time -- the host-side config test
+    answered in 3.2s.
+
+    ``IS_SANDBOX=1`` is the CLI's own opt-out.  It has to reach the process, so
+    it has to survive ``_safe_environment``, whose prefix filter would otherwise
+    drop it and produce exactly the same symptom as never setting it.
+    """
+
+    from app.solver.muteki.worker.official_worker import (
+        _claude_root_permission_env,
+        _safe_environment,
+    )
+
+    # The filter must not eat it: a dropped variable is indistinguishable from
+    # an unset one at the CLI.
+    kept = _safe_environment({"IS_SANDBOX": "1", "ANTHROPIC_API_KEY": "k", "UNRELATED": "x"})
+    assert kept["IS_SANDBOX"] == "1"
+    assert kept["ANTHROPIC_API_KEY"] == "k"
+    assert "UNRELATED" not in kept
+
+    environment: dict[str, str] = {}
+    _claude_root_permission_env("claude", environment)
+    assert environment["IS_SANDBOX"] == "1"
+
+
+def test_the_root_guard_is_only_set_for_claude() -> None:
+    """Codex has no such guard; setting it there would be noise in the env."""
+
+    from app.solver.muteki.worker.official_worker import _claude_root_permission_env
+
+    for engine in ("codex", "openai_compatible", "cursor"):
+        environment: dict[str, str] = {}
+        _claude_root_permission_env(engine, environment)
+        assert environment == {}, engine
+
+
+def test_an_operator_supplied_sandbox_flag_is_not_overwritten() -> None:
+    """``setdefault``, not assignment: an explicit value wins.
+
+    Someone debugging a non-container launch may need ``IS_SANDBOX=0``; forcing
+    ``1`` would make the override silently ineffective, which is worse than the
+    bug because it looks configured.
+    """
+
+    from app.solver.muteki.worker.official_worker import _claude_root_permission_env
+
+    environment = {"IS_SANDBOX": "0"}
+    _claude_root_permission_env("claude", environment)
+    assert environment["IS_SANDBOX"] == "0"
+
+
+def test_the_root_guard_recognises_the_engine_id_spelling() -> None:
+    """The first version of this fix shipped inert; this is the test that catches it.
+
+    ``OfficialWorkerAdapter.health`` passes ``profile.engine_id`` -- the value is
+    ``claude-cli:7e58443e-b983-...``, not ``claude``.  An equality test against
+    ``"claude"`` therefore never fired, ``IS_SANDBOX`` was never set, and the
+    health check kept failing in exactly the way the fix was supposed to cure.
+
+    The unit tests written alongside that fix all passed because they fed the
+    helper ``"claude"`` -- the one spelling the production caller never uses.
+    A test that only exercises the name you expect is not a test of the call
+    site.
+    """
+
+    from app.solver.muteki.worker.official_worker import _claude_root_permission_env
+
+    # Every spelling that has to work.
+    for engine_id in (
+        "claude-cli:7e58443e-b983-4876-b174-7b5358d6f77d",
+        "claude-cli",
+        "claude",
+        "claude_code",
+        "claude-code",
+        "Claude-CLI:abc",  # case is not a signal
+    ):
+        environment: dict[str, str] = {}
+        _claude_root_permission_env(engine_id, environment)
+        assert environment.get("IS_SANDBOX") == "1", engine_id
+
+    # And every spelling that must not.
+    for other in (
+        "codex-cli:7dc8b94a-802d-41b4-bb14-dfdd721a25ed",
+        "codex",
+        "cursor_cli",
+        "openai_compatible",
+        "claudeless",
+        "",
+    ):
+        environment = {}
+        _claude_root_permission_env(other, environment)
+        assert environment == {}, other
+
+
+# ── the dual-stack host alias (2026-10-26) ─────────────────────────────────
+
+
+def test_the_ipv6_row_for_the_proxy_alias_is_removed() -> None:
+    """Measured: one lane healthy and one dead, same container, same relay.
+
+    ``ensure_container`` launches the Worker with
+    ``--add-host host.docker.internal:host-gateway``.  On Docker Desktop that
+    writes **two** rows::
+
+        192.168.65.254      host.docker.internal
+        fdc4:f303:9324::254 host.docker.internal
+
+    Both proxy launchers bind ``0.0.0.0``, which is IPv4 only, so the alias
+    resolves to an address nothing listens on.  ``getent hosts`` inside the
+    container returned *only* the IPv6 row, which is the address Codex dials.
+
+    curl and Node fall back to the other family; Codex is Rust/reqwest with
+    Happy Eyeballs and does not, so every Codex probe died at
+    ``WORKER_HEALTHCHECK_FAILED`` while Claude on the same container was
+    healthy -- for days, while the relay was fine.
+    """
+
+    from app.solver.muteki.worker.official_worker import _PROXY_HOST_ALIAS, _pin_host_alias_to_ipv4
+
+    assert _PROXY_HOST_ALIAS == "host.docker.internal"
+    # A blank container name must not shell out.
+    assert _pin_host_alias_to_ipv4("") is False
+    assert _pin_host_alias_to_ipv4("   ") is False
+
+
+def test_the_alias_repair_is_best_effort() -> None:
+    """A repair that cannot run must not take the Run down with it.
+
+    The alias is a routing nicety: when the container is already gone, when the
+    image has no shell, or when ``/etc/hosts`` is not writable, the probe should
+    proceed and report the engine's own verdict.  Raising here would convert a
+    cosmetic fix-up into a lost Run.
+    """
+
+    from app.solver.muteki.worker.official_worker import _pin_host_alias_to_ipv4
+
+    # No such container: docker exec fails, the helper reports False, no raise.
+    assert _pin_host_alias_to_ipv4("muteki-nonexistent-container-for-test") is False
+
+
+# ── 体检失败必须留下证据（2026-10-26）───────────────────────────────────────
+
+
+def test_a_failed_probe_writes_its_real_output_to_the_log(caplog) -> None:
+    """``reason_code`` 是枚举，证据得另找地方放下。
+
+    为回答「codex 为什么体检失败」，2026-10-26 翻了几个小时的 ``run_events``：
+    里面只有一个 ``WORKER_HEALTHCHECK_FAILED``，而容器在结论落下时已经销毁，
+    stderr 跟着一起没了。原因码本身不能改（UI 与调度都读它），所以失败时留
+    一条带 rc / stdout / stderr 的 warning 是唯一的出口。
+    """
+
+    import logging
+    from types import SimpleNamespace
+
+    from app.solver.muteki.worker.official_worker import _log_health_failure
+
+    result = SimpleNamespace(
+        runtime_status={"rc": 127},
+        timed_out=False,
+        text="",
+        raw_stderr="sh: 1: codex: not found",
+    )
+    with caplog.at_level(logging.WARNING):
+        reason = _log_health_failure("codex-cli:abc", "WORKER_HEALTHCHECK_FAILED", result)
+
+    assert reason == "WORKER_HEALTHCHECK_FAILED"
+    logged = " ".join(record.getMessage() for record in caplog.records)
+    assert "codex: not found" in logged
+    assert "rc=127" in logged
+
+
+def test_a_healthy_probe_is_not_logged_as_a_failure(caplog) -> None:
+    """正常轮次不该刷 warning：这条路径每个 Run 至少走两次。"""
+
+    import logging
+    from types import SimpleNamespace
+
+    from app.solver.muteki.worker.official_worker import _log_health_failure
+
+    with caplog.at_level(logging.WARNING):
+        assert _log_health_failure("x", "HEALTHY", SimpleNamespace()) == "HEALTHY"
+
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+
+
+def test_codex_oauth_home_is_dropped_when_an_api_key_is_present() -> None:
+    """账号目录里的过期 OAuth 不能盖掉运行时注入的 key。
+
+    ``runtime_env_for_engine`` 只按账号文件判断是否设置 ``CODEX_HOME``，
+    看不到 runtime 已注入的 ``OPENAI_API_KEY``（本地 Responses 代理的 token）。
+    codex 优先用 auth.json 并刷新过期 token，该刷新被地区限制拒绝，
+    表现为探针已答 OK 仍以 rc=-1 收场 —— 即「引擎死了」。
+    """
+
+    from app.solver.muteki.worker.official_worker import _drop_stale_codex_oauth_home
+
+    environment = {
+        "OPENAI_API_KEY": "proxy-token",
+        "CODEX_HOME": "/muteki/accounts/codex-main/codex-home",
+    }
+
+    _drop_stale_codex_oauth_home(environment)
+
+    assert environment == {"OPENAI_API_KEY": "proxy-token"}
+
+
+def test_codex_oauth_home_survives_when_no_api_key_is_provided() -> None:
+    """真正靠 OAuth 登录的账号必须保留 CODEX_HOME。"""
+
+    from app.solver.muteki.worker.official_worker import _drop_stale_codex_oauth_home
+
+    environment = {"CODEX_HOME": "/muteki/accounts/codex-main/codex-home"}
+
+    _drop_stale_codex_oauth_home(environment)
+
+    assert environment["CODEX_HOME"].endswith("codex-home")
+
+
+def test_container_handle_maps_to_posix_paths_regardless_of_host_platform() -> None:
+    """The container is Linux: a backslash there is part of a FILE NAME.
+
+    Measured 2026-10-29: every Worker received
+    ``MUTEKI_BLACKBOARD_DB=/home/kali/workspace/graph\\upstream_shared_graph.db``,
+    so sqlite3 created a shadow database next to the real one and
+    ``blackboard.py`` answered ``no such table: events`` 404 times in one Run.
+    """
+
+    from muteki.solver.container_exec import CONTAINER_WORKSPACE, ContainerHandle
+
+    handle = ContainerHandle(
+        run_id="run-1",
+        host_workspace=str(Path("C:/runs/run-1/muteki")),
+        container="container-1",
+    )
+
+    mapped = handle.to_container_path(str(Path("C:/runs/run-1/muteki/graph/board.db")))
+
+    assert mapped == f"{CONTAINER_WORKSPACE}/graph/board.db"
+    assert "\\" not in mapped
+
+
+def test_containerize_environment_fixes_separators_of_an_already_mapped_path() -> None:
+    """A value that is already a container path is not automatically a good one.
+
+    ``cli_solver._worker_env`` overwrites ``MUTEKI_BLACKBOARD_DB`` with
+    ``to_container_path(...)``, so by the time the adapter sees it the value has
+    the container ROOT but host separators.  Skipping it as "already container"
+    is what let the broken path reach the Worker.
+    """
+
+    mapped = _containerize_environment(
+        {
+            "MUTEKI_WORKSPACE": "/home/kali/workspace",
+            "MUTEKI_BLACKBOARD_DB": "/home/kali/workspace/graph\\upstream_shared_graph.db",
+        },
+        SimpleNamespace(to_container_path=lambda _: "/home/kali/workspace/wrong"),
+    )
+
+    assert mapped["MUTEKI_BLACKBOARD_DB"] == (
+        "/home/kali/workspace/graph/upstream_shared_graph.db"
+    )
+    assert mapped["MUTEKI_WORKSPACE"] == "/home/kali/workspace"
+
+
+def test_shell_emitted_fact_markers_reach_the_board() -> None:
+    """A Worker's findings are printed by commands, not restated in its reply.
+
+    Run ``4b65af58`` (Web6) echoed ``VERIFIED_FACT=`` four times in real command
+    output and finished with ``fact_added = 0``: the solver parses markers out of
+    the model's REPLY text, and its live tool-output parsing sits behind
+    ``bus is not None``, which the arena never sets.
+
+    The graph is the RAW official one (``add_evidence`` / ``add_dead_end(reason=)``)
+    because that is what ``UpstreamRuntimeGraph.native_graph()`` hands the adapter
+    in production -- NOT the ``add_fact`` facade above it.
+    """
+
+    written: list[tuple[str, str, bool, str | None]] = []
+    dead_ends: list[tuple[str, str]] = []
+
+    class OfficialGraph:
+        def add_evidence(self, *, actor, source, fact, verified=False,
+                         confidence=1.0, intent_id=None):
+            written.append((actor, fact, verified, intent_id))
+            return len(written)
+
+        def add_dead_end(self, *, actor, reason):
+            dead_ends.append((actor, reason))
+            return len(dead_ends)
+
+    adapter = OfficialWorkerAdapter(
+        OfficialWorkerConfig(backend="local"), shared_graph=OfficialGraph()
+    )
+    job = SimpleNamespace(worker_id="worker-1", intent_id="intent-1")
+
+    adapter._on_step(
+        job,
+        SimpleNamespace(
+            kind="tool_result",
+            raw=(
+                "VERIFIED_FACT=Flask app; GET /console returns the Werkzeug debugger\n"
+                "DEADEND=POST /login rejects admin:admin with 403\n"
+            ),
+            text="",
+            tool="shell",
+            session="",
+            call_id="call-1",
+        ),
+    )
+    published = adapter._flush_tool_markers(job)
+
+    assert published == 2
+    assert written == [
+        (
+            "worker-1",
+            "Flask app; GET /console returns the Werkzeug debugger",
+            False,
+            "intent-1",
+        )
+    ], "a printed marker is a claim, so it must not be published as verified"
+    assert dead_ends == [("worker-1", "POST /login rejects admin:admin with 403")]
+    # the buffer is consumed, so a second flush cannot double-post the board
+    assert adapter._flush_tool_markers(job) == 0
+
+
+def test_shell_markers_also_work_through_the_compatibility_facade() -> None:
+    """Tests and plugins may hand the adapter the ``add_fact`` facade instead."""
+
+    facts: list[str] = []
+
+    class Facade:
+        def add_fact(self, *, actor, content, verified=False):
+            facts.append(content)
+            return len(facts)
+
+        def add_dead_end(self, *, actor, description):
+            facts.append(f"DEADEND:{description}")
+            return len(facts)
+
+    adapter = OfficialWorkerAdapter(
+        OfficialWorkerConfig(backend="local"), shared_graph=Facade()
+    )
+    job = SimpleNamespace(worker_id="worker-1", intent_id="intent-1")
+
+    adapter._on_step(
+        job,
+        SimpleNamespace(
+            kind="tool_result",
+            raw="VERIFIED_FACT=admin cookie is unsigned base64\nDEADEND=/backup returns 404\n",
+            text="",
+            tool="shell",
+            session="",
+            call_id="call-2",
+        ),
+    )
+
+    assert adapter._flush_tool_markers(job) == 2
+    assert facts == ["admin cookie is unsigned base64", "DEADEND:/backup returns 404"]
+
+
+def test_a_marker_that_is_a_regex_is_not_an_observation() -> None:
+    """Workers grep the transcript for their own markers (run-11550).
+
+    That puts ``bl_|VERIFIED_FACT=.*L4`` in the output; it is a search pattern,
+    not a finding, and the board must not gain a fact from it.
+    """
+
+    from app.solver.muteki.worker.official_worker import _tool_output_markers
+
+    facts, dead_ends = _tool_output_markers(
+        "VERIFIED_FACT=bl_|VERIFIED_FACT=.*L4\n"
+        "I will print VERIFIED_FACT=x later\n"
+        "VERIFIED_FACT=real one, endpoint /admin returns 200 for the guest cookie\n"
+    )
+
+    assert facts == ["real one, endpoint /admin returns 200 for the guest cookie"]
+    assert dead_ends == []
+
+
+def test_a_fact_reaches_the_board_while_the_worker_is_still_running() -> None:
+    """Buffering until ``execute`` returns made every finding worthless.
+
+    Measured 2026-10-29 on ``84e466d5``: all four collected facts carried the
+    same timestamp as ``worker_finished``, 1.5 minutes after the last one was
+    printed.  The whole point of the board is that minute 3's fact changes
+    minute 4's plan; a fact that lands after the Worker exits only decorates the
+    report.
+    """
+
+    facts: list[str] = []
+
+    class Graph:
+        def add_evidence(self, *, actor, source, fact, verified=False,
+                         confidence=1.0, intent_id=None):
+            facts.append(fact)
+
+    class Loop:
+        """Records what the step thread asked the loop to run."""
+
+        def __init__(self) -> None:
+            self.scheduled: list[tuple] = []
+
+        def is_closed(self) -> bool:
+            return False
+
+        def call_soon_threadsafe(self, callback, *args) -> None:
+            self.scheduled.append((callback, args))
+
+    adapter = OfficialWorkerAdapter(
+        OfficialWorkerConfig(backend="local"), shared_graph=Graph()
+    )
+    job = SimpleNamespace(worker_id="worker-2", intent_id="intent-9")
+    loop = Loop()
+    adapter._job_loops[adapter._job_key(job)] = loop
+
+    adapter._on_step(
+        job,
+        SimpleNamespace(
+            kind="tool_result",
+            raw="VERIFIED_FACT=debug console leaks SECRET_KEY\n",
+            text="",
+            tool="shell",
+            session="",
+            call_id="call-1",
+        ),
+    )
+
+    assert len(loop.scheduled) == 1, "capturing a fact must schedule an immediate flush"
+    callback, args = loop.scheduled[0]
+    assert callback == adapter._flush_tool_markers
+    callback(*args)
+    assert facts == ["debug console leaks SECRET_KEY"]
+
+    # Replaying the same line later must not restate the fact on the board.
+    adapter._on_step(
+        job,
+        SimpleNamespace(
+            kind="tool_result",
+            raw="VERIFIED_FACT=debug console leaks SECRET_KEY\n",
+            text="",
+            tool="shell",
+            session="",
+            call_id="call-2",
+        ),
+    )
+    assert loop.scheduled[-1][0] == adapter._flush_tool_markers
+    loop.scheduled[-1][0](*loop.scheduled[-1][1])
+    assert facts == ["debug console leaks SECRET_KEY"]
+
+
+def test_the_final_flush_releases_the_per_job_bookkeeping() -> None:
+    """A finished Worker must not leak its loop or its dedupe set.
+
+    Both tables are keyed per job and a Run reuses worker ids across rounds, so a
+    stale ``_job_loops`` entry would send the next round's markers to a closed
+    loop and a stale dedupe set would silently drop a fact that is genuinely new.
+    """
+
+    facts: list[str] = []
+
+    class Graph:
+        def add_evidence(self, *, actor, source, fact, verified=False,
+                         confidence=1.0, intent_id=None):
+            facts.append(fact)
+
+    adapter = OfficialWorkerAdapter(
+        OfficialWorkerConfig(backend="local"), shared_graph=Graph()
+    )
+    job = SimpleNamespace(worker_id="worker-1", intent_id="intent-1")
+    adapter._job_loops[adapter._job_key(job)] = SimpleNamespace(is_closed=lambda: True)
+    adapter._published_markers[adapter._job_key(job)] = {"old fact"}
+
+    adapter._capture_tool_markers(job, "VERIFIED_FACT=fresh fact\n")
+    assert adapter._flush_tool_markers(job, final=True) == 1
+    assert adapter._job_key(job) not in adapter._job_loops
+    assert adapter._job_key(job) not in adapter._published_markers
+    assert facts == ["fresh fact"]

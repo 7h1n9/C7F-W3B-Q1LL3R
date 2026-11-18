@@ -1,4 +1,4 @@
-import type { ApiEnvelope, Challenge, ChallengeConversation, ChallengeMessage, ChallengePrediction, FlagCandidate, ModelConfig, MutekiGraphState, MutekiBoardSemantic, RunDiagnostics, RunEvent, RunHealth, RunScore, RunUsage, RunUserInput, Skill, SolveRun, SolverState } from "../types/api";
+import type { ApiEnvelope, ArenaChallengePage, ArenaConnection, ArenaConnectionInput, ArenaEnqueueByIdRequest, ArenaEnqueueByIdResult, ArenaEnqueueRequest, ArenaEnqueueResult, ArenaGroundPage, ArenaMcpChallengePage, ArenaOrphanReclaim, ArenaOrphans, ArenaProbeResult, ArenaQueueBulkAction, ArenaQueueBulkResult, ArenaQueueItem, ArenaQueuePage, ArenaQueueScheduler, ArenaSolveTask, ArenaStats, ArenaStatus, ArenaSubmission, Challenge, ChallengeConversation, ChallengeMessage, FlagCandidate, KnowledgeExperimentDetail, KnowledgeExperimentSummary, KnowledgeListResponse, KnowledgePreviewResponse, KnowledgeStats, ModelConfig, ModelConfigUsage, MutekiBoardSemantic, MutekiGraphState, RunControlExperimentRequest, RunControlExperimentResponse, RunDiagnostics, RunEvent, RunHealth, RunUsage, RunUserInput, Skill, SolveRun, SolverState, SystemSettings } from "../types/api";
 
 const base = import.meta.env.VITE_API_BASE_URL ?? "/api/v1";
 const runEventTypes = [
@@ -26,7 +26,6 @@ const runEventTypes = [
   "muteki.coordinator_directive", "muteki.operator_directive", "muteki.operator_directive_status",
   "muteki.hitl_classified", "muteki.intent_state_changed", "muteki.graph_compacted",
   "cost.update", "muteki.cost.update",
-  "run.score.computed",
 ];
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   let response: Response;
@@ -62,6 +61,21 @@ export const api = {
   setModelSkills: (id: string, payload: Array<Record<string, unknown>>) => request<Array<Record<string, unknown>>>(`/model-configs/${id}/skills`, { method: "PUT", body: JSON.stringify(payload) }),
   getChallengeSkills: (id: string) => request<Array<Record<string, unknown>>>(`/challenges/${id}/skills`),
   setChallengeSkills: (id: string, payload: Array<Record<string, unknown>>) => request<Array<Record<string, unknown>>>(`/challenges/${id}/skills`, { method: "PUT", body: JSON.stringify(payload) }),
+  listKnowledgeItems: (params: { query?: string; kind?: string; trust_level?: string; target_stack?: string; limit?: number; offset?: number } = {}) => {
+    const search = new URLSearchParams();
+    Object.entries(params).forEach(([key, value]) => {
+      if (value !== undefined && value !== "") search.set(key, String(value));
+    });
+    const query = search.toString();
+    return request<KnowledgeListResponse>(`/knowledge/items${query ? `?${query}` : ""}`);
+  },
+  getKnowledgeStats: () => request<KnowledgeStats>("/knowledge/stats"),
+  previewKnowledge: (payload: { query: string; metadata: Record<string, unknown>; top_k: number }) => request<KnowledgePreviewResponse>("/knowledge/preview", { method: "POST", body: JSON.stringify(payload) }),
+  listKnowledgeExperiments: async () => {
+    const response = await request<{ experiments: KnowledgeExperimentSummary[]; root: string }>("/knowledge/experiments");
+    return response.experiments;
+  },
+  getKnowledgeExperiment: (id: string) => request<KnowledgeExperimentDetail>(`/knowledge/experiments/${encodeURIComponent(id)}`),
   listAttachments: (id: string) => request<Array<Record<string, unknown>>>(`/challenges/${id}/attachments`),
   uploadAttachment: async (id: string, file: File, isPrimary = false) => { const response = await fetch(`${base}/challenges/${id}/attachments?is_primary=${isPrimary}`, { method: "POST", body: (() => { const form = new FormData(); form.append("file", file); return form; })() }); if (!response.ok) { const error = await response.json().catch(() => ({})); throw new Error(error.message ?? `HTTP ${response.status}`); } return (await response.json() as ApiEnvelope<Record<string, unknown>>).data; },
   listConversations: (id: string) => request<ChallengeConversation[]>(`/challenges/${id}/conversations`),
@@ -74,6 +88,7 @@ export const api = {
   getReadiness: () => request<{ ready: boolean; level: string; checks: Array<{ name: string; ok: boolean; message: string }> }>("/readiness/range-test"),
   listRuns: () => request<SolveRun[]>("/runs"),
   getRun: (id: string) => request<SolveRun>(`/runs/${id}`),
+  createControlRun: (id: string, payload: RunControlExperimentRequest) => request<RunControlExperimentResponse>(`/runs/${id}/control`, { method: "POST", body: JSON.stringify(payload) }),
   getRunMessages: (id: string) => request<RunUserInput[]>(`/runs/${id}/messages`),
   getSolverState: (id: string) => request<SolverState>(`/runs/${id}/solver-state`),
   getMutekiState: (id: string) => request<MutekiGraphState>(`/runs/${id}/muteki-state`),
@@ -97,12 +112,21 @@ export const api = {
       blob: await response.blob(),
     };
   },
+  downloadRunReport: async (id: string) => {
+    const response = await fetch(`${base}/runs/${id}/report/download`);
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({}));
+      throw new Error(error.message || `Writeup 导出失败（HTTP ${response.status}）`);
+    }
+    return {
+      filename: response.headers.get("content-disposition")?.match(/filename="([^"]+)"/)?.[1] ?? `${id}-writeup.md`,
+      blob: await response.blob(),
+    };
+  },
   getRunDiagnostics: (id: string) => request<RunDiagnostics>(`/runs/${id}/diagnostics`),
   getRunHealth: (id: string) => request<RunHealth>(`/runs/${id}/health`),
   getRunUsage: (id: string) => request<RunUsage>(`/runs/${id}/usage`),
-  getRunScore: (id: string) => request<RunScore | null>(`/runs/${id}/score`),
-  getChallengePrediction: (id: string) => request<ChallengePrediction | null>(`/challenges/${id}/prediction`),
-  refreshChallengePrediction: (id: string) => request<ChallengePrediction>(`/challenges/${id}/predictions`, { method: "POST" }),
+
   listRunDiagnostics: (limit = 25) => request<Array<{ run_id: string } & RunDiagnostics>>(`/diagnostics/runs?limit=${limit}`),
   createRun: (challengeId: string, payload: Record<string, unknown>) => request<SolveRun>(`/challenges/${challengeId}/runs`, { method: "POST", body: JSON.stringify(payload) }),
   startRun: (id: string) => request<{ run_id: string; status: string }>(`/runs/${id}/start`, { method: "POST" }),
@@ -114,16 +138,17 @@ export const api = {
   createModelConfig: (payload: Record<string, unknown>) => request<unknown>("/model-configs", { method: "POST", body: JSON.stringify(payload) }),
   updateModelConfig: (id: string, payload: Record<string, unknown>) => request<unknown>(`/model-configs/${id}`, { method: "PUT", body: JSON.stringify(payload) }),
   deleteModelConfig: (id: string) => request<void>(`/model-configs/${id}`, { method: "DELETE" }),
+  getModelConfigUsage: (id: string) => request<ModelConfigUsage>(`/model-configs/${id}/usage`),
   testModelConfig: (id: string) => request<{ ok: boolean; message: string }>(`/model-configs/${id}/test`, { method: "POST" }),
-  getSystemSettings: () => request<{ runner_url: string; runner_allowed_cidrs: string; runner_token_configured: boolean; runner: { reachable: boolean; details: Record<string, unknown> | string } }>("/system-settings"),
-  updateSystemSettings: (payload: { runner_url: string }) => request<unknown>("/system-settings", { method: "PUT", body: JSON.stringify(payload) }),
+  getSystemSettings: () => request<SystemSettings>("/system-settings"),
+  updateSystemSettings: (payload: { runner_url?: string | null; default_model_config_id?: string | null }) => request<SystemSettings>("/system-settings", { method: "PUT", body: JSON.stringify(payload) }),
   getToolCalls: (id: string) => request<Array<Record<string, unknown>>>(`/runs/${id}/tool-calls`),
   getObservations: (id: string) => request<Array<Record<string, unknown>>>(`/runs/${id}/observations`),
   getArtifacts: (id: string) => request<Array<{ id: string; path: string; type: string; summary: string; size: number }>>(`/runs/${id}/artifacts`),
   getArtifact: (runId: string, artifactId: string) => request<{ content: string; path: string }>(`/runs/${runId}/artifacts/${artifactId}`),
   getFlags: (id: string) => request<FlagCandidate[]>(`/runs/${id}/flag-candidates`),
   reviewFlagCandidate: (runId: string, candidateId: string, reviewState: "OPEN" | "VALID" | "INVALID") => request<FlagCandidate>(`/runs/${runId}/flag-candidates/${candidateId}`, { method: "PATCH", body: JSON.stringify({ review_state: reviewState }) }),
-  getReport: (id: string) => request<{ content: string; path: string; report_json?: Record<string, unknown> }>(`/runs/${id}/report`),
+  getReport: (id: string) => request<{ content: string; path: string; report_json?: Record<string, unknown>; flag_pattern?: string }>(`/runs/${id}/report`),
   continueRun: (id: string, message: string) => request<{ run_id: string }>(`/runs/${id}/continue`, { method: "POST", body: JSON.stringify({ message }) }),
   sendRunMessage: (id: string, content: string) => request<{ accepted: boolean; revision: number; status: string; message: string }>(`/runs/${id}/messages`, { method: "POST", body: JSON.stringify({ content }) }),
   streamRunEvents: (id: string, onEvent: (event: RunEvent) => void) => {
@@ -141,4 +166,66 @@ export const api = {
     runEventTypes.forEach((type) => source.addEventListener(type, handler));
     return source;
   },
+  listArenaConnections: () => request<ArenaConnection[]>("/arena/connections"),
+  createArenaConnection: (payload: ArenaConnectionInput) => request<ArenaConnection>("/arena/connections", { method: "POST", body: JSON.stringify(payload) }),
+  updateArenaConnection: (id: string, payload: ArenaConnectionInput) => request<ArenaConnection>(`/arena/connections/${id}`, { method: "PUT", body: JSON.stringify(payload) }),
+  deleteArenaConnection: (id: string) => request<void>(`/arena/connections/${id}`, { method: "DELETE" }),
+  probeArenaConnection: (id: string) => request<ArenaProbeResult>(`/arena/connections/${id}/probe`, { method: "POST" }),
+  getArenaStatus: () => request<ArenaStatus>("/arena/status"),
+  getArenaStats: (connectionId?: string) => request<ArenaStats>(`/arena/stats${connectionId ? `?connection_id=${encodeURIComponent(connectionId)}` : ""}`),
+  listArenaSubmissions: (connectionId?: string) => request<ArenaSubmission[]>(`/arena/submissions${connectionId ? `?connection_id=${encodeURIComponent(connectionId)}` : ""}`),
+  // The arena exposes exactly one catalogue route; categories are discovered from
+  // the payload rather than enumerated, because the label is free-form.
+  listArenaChallenges: (connectionId: string, category?: string, limit?: number) => {
+    const params = new URLSearchParams({ connection_id: connectionId });
+    if (category) params.set("category", category);
+    if (limit) params.set("limit", String(limit));
+    return request<ArenaChallengePage>(`/arena/challenges?${params.toString()}`);
+  },
+  // Everything below goes through the MCP surface, which is the only place the
+  // ground list, challenge detail, environment lifecycle and submission exist.
+  // Returns the platform envelope as-is; callers read ``.items``. The backend
+  // forwards ``list_practice_grounds`` verbatim, so unwrapping here would hide
+  // the real shape rather than simplify it.
+  listArenaGrounds: (connectionId: string) => request<ArenaGroundPage>(`/arena/grounds?connection_id=${encodeURIComponent(connectionId)}`),
+  listArenaMcpChallenges: (connectionId: string, practiceGroundId: string, options: { category?: string; difficulty?: string; unsolvedOnly?: boolean; page?: number; limit?: number } = {}) => {
+    const params = new URLSearchParams({ connection_id: connectionId, practice_ground_id: practiceGroundId });
+    if (options.category) params.set("category", options.category);
+    if (options.difficulty) params.set("difficulty", options.difficulty);
+    if (options.unsolvedOnly) params.set("unsolved_only", "true");
+    if (options.page) params.set("page", String(options.page));
+    params.set("limit", String(options.limit ?? 100));
+    return request<ArenaMcpChallengePage>(`/arena/mcp-challenges?${params.toString()}`);
+  },
+  getArenaMcpChallenge: (connectionId: string, practiceGroundId: string, challengeId: string) => {
+    const params = new URLSearchParams({ connection_id: connectionId, practice_ground_id: practiceGroundId });
+    return request<Record<string, unknown>>(`/arena/mcp-challenges/${encodeURIComponent(challengeId)}?${params.toString()}`);
+  },
+  getArenaOrphans: (connectionId: string) => request<ArenaOrphans>(`/arena/orphans?connection_id=${encodeURIComponent(connectionId)}`),
+  // Actively destroy a leaked environment. The lease breadcrumb supplies the
+  // challenge name; the explicit parameters are the override for a lost record.
+  reclaimArenaOrphans: (connectionId: string, options: { practiceGroundId?: string; challengeId?: string } = {}) => {
+    const params = new URLSearchParams({ connection_id: connectionId });
+    if (options.practiceGroundId) params.set("practice_ground_id", options.practiceGroundId);
+    if (options.challengeId) params.set("challenge_id", options.challengeId);
+    return request<ArenaOrphanReclaim>(`/arena/orphans/reclaim?${params.toString()}`, { method: "POST" });
+  },
+  startArenaSolve: (practiceGroundId: string, challengeId: string) => request<ArenaSolveTask>("/arena/solve", { method: "POST", body: JSON.stringify({ practice_ground_id: practiceGroundId, challenge_id: challengeId }) }),
+  getArenaSolveTask: (taskId: string) => request<ArenaSolveTask>(`/arena/solve/${taskId}`),
+  // Batch queue. Enqueue composes the batch server-side from the catalogue so the
+  // client never has to page through hundreds of rate-limited reads.
+  getArenaQueue: () => request<ArenaQueuePage>("/arena/queue"),
+  enqueueArenaQueue: (payload: ArenaEnqueueRequest) => request<ArenaEnqueueResult>("/arena/queue/enqueue", { method: "POST", body: JSON.stringify(payload) }),
+  // By-id enqueue reads each challenge from the platform, so a named challenge
+  // past the first catalogue page is reachable.
+  enqueueArenaQueueByIds: (payload: ArenaEnqueueByIdRequest) => request<ArenaEnqueueByIdResult>("/arena/queue/enqueue-ids", { method: "POST", body: JSON.stringify(payload) }),
+  startArenaQueue: () => request<{ state: string }>("/arena/queue/start", { method: "POST" }),
+  stopArenaQueue: () => request<{ state: string }>("/arena/queue/stop", { method: "POST" }),
+  // Returns items stranded in RUNNING by a dead process to the backlog. Cheap and
+  // idempotent; the scheduler's own in-flight item is left alone.
+  recoverArenaQueue: () => request<{ repaired: number; scheduler: ArenaQueueScheduler }>("/arena/queue/recover", { method: "POST" }),
+  cancelArenaQueueItem: (itemId: string) => request<ArenaQueueItem>(`/arena/queue/${itemId}/cancel`, { method: "POST" }),
+  prioritizeArenaQueueItem: (itemId: string, position: "top" | "bottom") => request<ArenaQueueItem>(`/arena/queue/${itemId}/priority`, { method: "POST", body: JSON.stringify({ position }) }),
+  bulkArenaQueue: (payload: { item_ids: string[]; action: ArenaQueueBulkAction }) => request<ArenaQueueBulkResult>("/arena/queue/bulk", { method: "POST", body: JSON.stringify(payload) }),
+  clearArenaQueue: (status = "PENDING") => request<{ deleted: number; status: string }>(`/arena/queue/clear?status=${encodeURIComponent(status)}`, { method: "POST" }),
 };

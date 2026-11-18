@@ -1,0 +1,17 @@
+name: ctf473831530_2018_web_virink_web
+category: web
+keywords:
+- ctf473831530_2018_web_virink_web
+steps:
+- 'PERMANENT cross-pod readback via /sandbox/: access-path REMOTE_ADDR does NOT equal
+  sandbox dir''s REMOTE_ADDR (dir md5 of attacker-side IP 403 after creating marker
+  via same IP+?cmd=).'
+- 'Solver-to-pod egress nonexistent: pod at 10.42.x cannot reach 172.17.0.2 (no wget/curl
+  connect observed); ''wget+172.17.0.2'' creates file named 172.17.0.2 via busybox
+  wget fallback'
+- RACE_WORKER_TIMEOUT
+evidence_chain: []
+success_format: CTF2\{[^}]+\}
+source: b8ddfa83-7250-4a3a-b75d-0aedabac6ecb (run 11e52981-6909-4f5f-a767-58e00c52c75c)
+notes: NO_VERIFIED_FLAG
+kind: negative

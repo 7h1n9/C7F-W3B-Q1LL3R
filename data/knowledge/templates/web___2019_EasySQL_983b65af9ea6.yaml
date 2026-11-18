@@ -1,0 +1,16 @@
+name: '[极客大挑战 2019]EasySQL 983b65af9ea6'
+category: web
+keywords:
+- easysql
+- imported
+- from
+- buuctf
+- ctfd
+steps:
+- '[codex] FOUND_FLAG=<FLAG>'
+- Native Worker completed a bounded evidence-backed observation
+evidence_chain:
+- '[codex] FOUND_FLAG=<FLAG>'
+success_format: CTF2\{[^}]+\}
+source: 983b65af-9ea6-4982-a547-b404e6bd1d7c (solver fb386de7-ea4b-47b1-8950-e82518cff426)
+notes: ''

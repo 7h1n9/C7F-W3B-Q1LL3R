@@ -27,23 +27,35 @@ import signal
 import tempfile
 import threading
 import time
-import uuid
 from pathlib import Path
 from typing import Any, Optional
 
 from muteki.core.cost import CostController
 from muteki.core.event_bus import EventBus
 from muteki.core.events import (
-    Event, EventType, blackboard_delta_payload, hitl_request_payload,
-    insight_payload, shared_graph_delta_payload, solve_graph_delta_payload,
-    tool_result_payload, worker_status_payload, worker_lifecycle_payload,
+    Event,
+    EventType,
+    blackboard_delta_payload,
+    hitl_request_payload,
+    insight_payload,
+    shared_graph_delta_payload,
+    solve_graph_delta_payload,
+    tool_result_payload,
+    worker_lifecycle_payload,
+    worker_status_payload,
 )
 from muteki.models.solve_graph import Challenge, SolveGraph
 from muteki.solver.cli_driver import (
-    CliDriver, CliResult, KB_MCP_NAME, StreamStep, driver_for, run_cli,
+    KB_MCP_NAME,
+    CliDriver,
+    CliResult,
+    StreamStep,
+    driver_for,
+    run_cli,
     run_cli_streaming,
 )
-from muteki.solver.gate import flag_ok as _gate_flag_ok, is_placeholder_flag
+from muteki.solver.gate import flag_ok as _gate_flag_ok
+from muteki.solver.gate import is_placeholder_flag
 from muteki.solver.result import ArtifactStore
 from muteki.solver.result_codes import (
     RESULT_CANCELLED,
@@ -54,7 +66,7 @@ from muteki.solver.result_codes import (
     RESULT_STEERED,
     RESULT_TIMED_OUT,
 )
-from muteki.solver.types import SolverConfig, SolveOutcome
+from muteki.solver.types import SolveOutcome, SolverConfig
 from muteki.solver.workspace import (
     ensure_workspace,
     link_input_into_worker,
@@ -64,7 +76,6 @@ from muteki.solver.workspace import (
     relative_symlink,
     workspace_root_for_worker,
 )
-
 
 _WORKER_HEARTBEAT_SECONDS = 15.0
 
@@ -330,7 +341,9 @@ _EXPLORE_PROMPT = (
     "Read every response end-to-end. If this direction leads nowhere, that is a valid "
     "result — report it as a dead-end.\n\n"
     "## What to output\n"
-    "When done (or stuck), report your findings with these markers on their own lines.\n"
+    "When done (or stuck), report your findings with these markers on their own "
+    "lines, IN YOUR REPLY — a marker that only appears inside a shell `echo` is "
+    "read as an unverified candidate, not as proof.\n"
     "Print VERIFIED_FACT only for NEW findings not already on the team board — reuse "
     "facts/passwords/unlocks teammates already recorded; put long data in a file and "
     "reference the path:\n"
@@ -1935,6 +1948,37 @@ class CliSolver:
     # and self._workdir is None on most paths).
     BOARD_FILENAME = ".muteki_board.md"  # dotfile: won't collide with staged attachments
 
+    #: Substrings the Coordinator's goal carries when it placed a concrete first
+    #: move in the goal.  Two forms, two authorities:
+    #:
+    #: * ``FIRST ACTION`` -- a recipe that produced an accepted flag here (or was
+    #:   hand-audited): an order.
+    #: * ``Untested lead`` -- a recipe that matched this box but was never measured
+    #:   on it: a probe the Worker is told to verify, whose failure is a normal
+    #:   outcome.  It still leads the prompt, because "send this specific request"
+    #:   is strictly more actionable than "pick a technique class", and because a
+    #:   probe that lands after the board pointer gets skipped entirely.
+    FIRST_ACTION_MARKERS = ("FIRST ACTION", "Untested lead")
+
+    def _has_first_action(self) -> bool:
+        """Does this turn's goal carry a Coordinator-issued concrete first move?
+
+        Measured 2026-11-08 over the Runs that had a FIRST ACTION available:
+        only 5.6% actually ran it as command #0.  The prompt was the reason, not
+        the model: ``intent_goal`` (which carries the FIRST ACTION) was rendered
+        last in ``ctx``, landing at ~char 1226, while the board pointer's
+        "READ IT FIRST" sat at ~char 424.  An agent that obeys the first
+        imperative it reads therefore read the board, then the skill, then
+        AGENTS.md -- three orientation steps before touching the target.
+
+        So the caller now (a) hoists the goal to the TOP of ``ctx`` and (b) tells
+        the board renderer to stop claiming priority.  Two independent signals
+        for one ordering fact is deliberate: a future edit to either renderer
+        alone cannot silently restore the old order.
+        """
+        goal = str(getattr(self, "intent_goal", "") or "")
+        return any(marker in goal for marker in self.FIRST_ACTION_MARKERS)
+
     def _board_markdown(self) -> str:
         """The FULL board body for the workdir file (no truncation). Empty when
         there's no shared graph / nothing on the board yet."""
@@ -1974,22 +2018,36 @@ class CliSolver:
         except Exception:
             return ""
 
-    def _board_pointer(self, wrote_file: bool) -> str:
+    def _board_pointer(self, wrote_file: bool, *, has_first_action: bool = False) -> str:
         """Prompt block. When the file was written: a pointer + the inline digest.
         When it WASN'T (write failed / file tools denied): fall back to a bounded
-        inline summary and emit NO pointer (never point at a missing file)."""
+        inline summary and emit NO pointer (never point at a missing file).
+
+        ``has_first_action`` demotes the "READ IT FIRST" imperative.  The board is
+        the right first move when there is no assigned action -- it is the wrong
+        first move when the Coordinator already spent a recipe slot on a concrete
+        command, because a bounded round only has so many commands in it and the
+        first one is exactly the one the recipe exists to spend.
+        """
         digest = self._credential_digest()
         ruled_out = self._ruled_out_digest()  # P1-C: inline, not just in the file
         if wrote_file:
+            opening = (
+                "READ IT FIRST: build on confirmed facts, reuse recovered "
+                "credentials/passwords, and do NOT redo anything it marks a dead end "
+                "or already-attempted direction.\n"
+                if not has_first_action
+                else "Read it AFTER your assigned first command below: build on "
+                "confirmed facts, reuse recovered credentials/passwords, and do NOT "
+                "redo anything it marks a dead end or already-attempted direction.\n"
+            )
             block = (
                 "\n## Shared team board (teammates' findings)\n"
                 f"A file `./{self.BOARD_FILENAME}` in your working directory holds the "
                 "FULL team board — it is your team's shared notes, NOT part of the "
                 "challenge.\n"
-                "READ IT FIRST: build on confirmed facts, reuse recovered "
-                "credentials/passwords, and do NOT redo anything it marks a dead end "
-                "or already-attempted direction.\n"
-                "Before starting a new direction, also query the LIVE board with the "
+                + opening
+                + "Before starting a new direction, also query the LIVE board with the "
                 "script path in `$MUTEKI_BLACKBOARD_SCRIPT` (this is fresher than the "
                 "snapshot):\n"
                 "  python3 \"$MUTEKI_BLACKBOARD_SCRIPT\" read-review\n"
@@ -2032,7 +2090,10 @@ class CliSolver:
         _write_board_file). When no file could be written this still degrades to the
         inline fallback via _board_pointer(wrote_file=False) — but the common path is
         wrote_file=True, set per-turn by the loop through self._board_file_written."""
-        return self._board_pointer(bool(getattr(self, "_board_file_written", False)))
+        return self._board_pointer(
+            bool(getattr(self, "_board_file_written", False)),
+            has_first_action=self._has_first_action(),
+        )
 
     def _intent_neighborhood_context(self) -> str:
         sg = getattr(self, "shared_graph", None)
@@ -2195,10 +2256,29 @@ class CliSolver:
         tgt = self._target()
         if tgt:
             ctx_lines.append(f"Target: {tgt}")
+        # Courses correction / assigned direction goes FIRST when it carries a
+        # Coordinator FIRST ACTION — ahead of the attachment hint, the board
+        # pointer and the KB block, all of which carry their own "FIRST" imperative.
+        #
+        # Measured 2026-11-08: of the Runs that had a FIRST ACTION available, only
+        # 5.6% ran it as command #0.  Position, not wording, was the cause --
+        # ``intent_goal`` used to be appended near the END of ``ctx`` (~char 1226),
+        # behind the board pointer's "READ IT FIRST" (~char 424) and the attachment
+        # "inspect them FIRST" hint (~char 293).  An agent that follows the first
+        # imperative it reads spent command #0 (and often #1, #2) on orientation.
+        # The goal text itself already says "before any recon, board read or
+        # AGENTS.md read"; that instruction cannot win against three later-positioned
+        # "FIRST" lines, so the ordering is fixed here.
+        has_first_action = self._has_first_action()
+        if has_first_action:
+            ctx_lines.append(
+                "\n## Do this first — before anything else\n"
+                f"{self.intent_goal[:600]}")
         if getattr(self, "_staged_files", None):
             ctx_lines.append(
-                "Attached files (already in your working directory — inspect them "
-                "FIRST): " + ", ".join(self._staged_files))
+                ("Attached files (already in your working directory — inspect them "
+                 + ("" if has_first_action else "FIRST")
+                 + "): ") + ", ".join(self._staged_files))
         if c.description:
             ctx_lines.append(f"Brief: {c.description.strip()[:600]}")
         board = self._board_context()
@@ -2222,7 +2302,10 @@ class CliSolver:
         # re-bootstrap: a course-correction direction from Reason. Steer the rush
         # without narrowing it to a single Explore intent. getattr-guarded so a
         # solver built via __new__ in tests stays safe.
-        if getattr(self, "intent_goal", ""):
+        # Skipped when it already led the prompt above: emitting the same 600-char
+        # goal twice both burns the budget and re-opens the "which one is real"
+        # ambiguity this reordering exists to remove.
+        if getattr(self, "intent_goal", "") and not has_first_action:
             ctx_lines.append(
                 "\n## Course correction (the run drifted — focus here):\n"
                 f"{self.intent_goal[:600]}")
@@ -2660,6 +2743,15 @@ class CliSolver:
                 "FIRST): " + ", ".join(self._staged_files))
         if c.description:
             ctx_lines.append(f"Brief: {c.description.strip()[:600]}")
+        # Same position fix as _build_prompt: when the assigned direction carries a
+        # Coordinator FIRST ACTION, it leads.  The template still repeats it under
+        # "## Your assigned direction" further down (that section is what the model
+        # is told to report against), but the imperative has to be readable before
+        # the board pointer's "read it" line or the first command is spent orienting.
+        if self._has_first_action():
+            ctx_lines.append(
+                "\n## Do this first — before anything else\n"
+                f"{self.intent_goal[:600]}")
         board = self._board_context()
         if board:
             ctx_lines.append(board)
@@ -3018,8 +3110,16 @@ class CliSolver:
         # Gate flags against the FULL provenance corpus (raw command outputs ∪
         # transcript) so a flag that landed only in real command output — past char
         # 600, or in a nested-ssh remote stdout — is still accepted here (run-75379).
-        await self._stream_markers(
-            all_text, flag_provenance=self._provenance_corpus(all_text))
+            # Gate flags against RAW COMMAND OUTPUT ONLY.  Passing ``all_text`` here
+            # (as a caller-supplied extra) puts the worker's own prose back into the
+            # corpus, which restores the very self-reference this check exists to
+            # break: the marker line ``FOUND_FLAG=...`` is *in* the transcript, so
+            # "the flag appears in the corpus" holds trivially.  A flag that only
+            # ever existed in the reply is a claim, not evidence, and must not be
+            # promoted -- that is how a live arena run reported COMPLETED_SOLVED
+            # with a flag the platform rejected.
+            await self._stream_markers(
+                all_text, flag_provenance=self._provenance_corpus())
         # the end-of-run backstop may have accepted a flag from the streamed-only
         # transcript — promote it to `accepted` so the solved branch fires.
         if self._stream_accepted and accepted is None:
@@ -3187,7 +3287,19 @@ class CliSolver:
         # provenance: persist full transcript, bind artifact to each fact
         aid = self.artifacts.put(all_text, suffix=".txt")
         # accept EVERY gate-passing flag (explore is narrow but multi-flag-safe).
-        gate_ok = [f for f in self._extract_flags(all_text) if self._flag_ok(f, all_text)]
+        #
+        # Gated against the RAW TOOL OUTPUT, not ``all_text``.  ``all_text`` is the
+        # whole transcript, which includes the worker's own prose -- so a worker
+        # that simply *wrote* ``FOUND_FLAG=CTF2{...}`` with no command behind it
+        # satisfied "the flag appears in the text" trivially.  That is exactly how
+        # a hallucinated flag was accepted in a live arena run: one model call, no
+        # tool use at all, and a flag that the platform then rejected.
+        # Passing ``all_text`` AS the corpus (i.e. as a caller-supplied extra)
+        # defeats the check: the corpus then contains the worker's own prose, so
+        # the marker line carrying the flag becomes part of what the flag is
+        # validated against.  Raw command output only.
+        provenance = self._provenance_corpus()
+        gate_ok = [f for f in self._extract_flags(all_text) if self._flag_ok(f, provenance)]
         accepted = gate_ok[0] if gate_ok else None
 
         # write structured facts/dead-ends to the board — deduped against anything
@@ -3438,8 +3550,10 @@ class CliSolver:
         # real gate (same provenance rule). On success, re-conclude + accept.
         if action == "mark_false":
             await self._stream_markers(all_text)
+            # Same provenance rule as explore: raw command output only, never
+            # the worker's own reply text. See _run_explore.
             gate_ok = [f for f in self._extract_flags(all_text)
-                       if self._flag_ok(f, all_text)]
+                       if self._flag_ok(f, self._provenance_corpus())]
             accepted = gate_ok[0] if gate_ok else None
             # a flag accepted only via the live stream still counts (consistency
             # with bootstrap/explore — run-11189).

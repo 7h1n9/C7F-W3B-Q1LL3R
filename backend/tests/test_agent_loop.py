@@ -175,7 +175,14 @@ async def test_openai_compatible_tool_to_artifact_flag_e2e(monkeypatch: pytest.M
     async with sessions() as session:
         challenge = Challenge(name="e2e", description="test", target_url="http://challenge.local", allowed_hosts=["challenge.local"], flag_pattern=r"flag\{[^}]+\}")
         session.add(challenge); await session.flush()
-        run = SolveRun(challenge_id=challenge.id, engine_type="openai_compatible", solver_mode="single_agent", workspace_path=str(workspace), max_agent_steps=3)
+        run = SolveRun(
+            challenge_id=challenge.id,
+            engine_type="openai_compatible",
+            solver_mode="single_agent",
+            workspace_path=str(workspace),
+            max_agent_steps=3,
+            role_snapshot_json={"tools": ["http_request"]},
+        )
         session.add(run); await session.commit()
         session.add(
             SolverState(
@@ -216,11 +223,16 @@ async def test_openai_compatible_tool_to_artifact_flag_e2e(monkeypatch: pytest.M
     monkeypatch.setattr("app.engines.openai_compatible.httpx.AsyncClient", Client)
     monkeypatch.setattr("app.orchestration.orchestrator.SessionLocal", sessions)
     async def sync_workspace(*_: object) -> None: pass
+    async def runner_health(*_: object) -> dict: return {"build": {"build_id": "test"}}
+    async def runner_capabilities(*_: object) -> dict:
+        return {"tools": [{"name": "http_request", "implemented": True}]}
     async def create_job(*_: object) -> str: return "runner-job"
     async def wait_job(*_: object) -> dict: return {"job_id": "runner-job", "status": "COMPLETED", "artifact_path": "responses/http.json", "artifact_sha256": hashlib.sha256(b'{"body":"flag{e2e}"}').hexdigest(), "summary": "HTTP 200", "structured_result": {"status_code": 200, "body": "flag{e2e}"}}
     async def download_artifact(_run: str, _path: str, destination: Path, _sha: str | None = None) -> tuple[int, str]:
         raw = b'{"body":"flag{e2e}"}'; destination.parent.mkdir(parents=True, exist_ok=True); destination.write_bytes(raw); return len(raw), hashlib.sha256(raw).hexdigest()
     monkeypatch.setattr("app.orchestration.orchestrator.runner_client.sync_workspace", sync_workspace)
+    monkeypatch.setattr("app.orchestration.orchestrator.runner_client.health", runner_health)
+    monkeypatch.setattr("app.orchestration.orchestrator.runner_client.capabilities", runner_capabilities)
     monkeypatch.setattr("app.tools.gateway.runner_client.create_job", create_job)
     monkeypatch.setattr("app.tools.gateway.runner_client.wait_job", wait_job)
     monkeypatch.setattr("app.tools.gateway.runner_client.download_artifact", download_artifact)

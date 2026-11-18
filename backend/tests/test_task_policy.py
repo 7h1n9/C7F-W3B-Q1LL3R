@@ -1,8 +1,8 @@
-from app.security.task_policy import get_allowed_tools, validate_tools
 from app.models.challenge import Challenge
 from app.models.multi_agent import AgentTask
 from app.orchestration.role_agent_runtime import RoleAgentRuntime
 from app.schemas.multi_agent import AgentRole
+from app.security.task_policy import get_allowed_tools, validate_tools
 
 
 def test_baseline_allows_http_request() -> None:

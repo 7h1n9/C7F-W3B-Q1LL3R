@@ -1,0 +1,9 @@
++-------------------------+--------------------------------+-------------+-------------+-----------------+
+| TABLE_NAME              | CONSTRAINT_NAME                | DELETE_RULE | UPDATE_RULE | COLUMN_NAME     |
++-------------------------+--------------------------------+-------------+-------------+-----------------+
+| agent_turns             | agent_turns_ibfk_2             | NO ACTION   | NO ACTION   | model_config_id |
+| challenge_conversations | challenge_conversations_ibfk_2 | NO ACTION   | NO ACTION   | model_config_id |
+| model_skill_bindings    | model_skill_bindings_ibfk_1    | NO ACTION   | NO ACTION   | model_config_id |
+| run_attempts            | run_attempts_ibfk_2            | NO ACTION   | NO ACTION   | model_config_id |
+| solve_runs              | solve_runs_ibfk_2              | NO ACTION   | NO ACTION   | model_config_id |
++-------------------------+--------------------------------+-------------+-------------+-----------------+

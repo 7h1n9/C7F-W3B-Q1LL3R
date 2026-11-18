@@ -9,6 +9,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import get_settings
 from app.models.challenge import Challenge
 from app.models.run import AttemptToolManifest, RunAttempt, SolveRun
 from app.services.events import event_service
@@ -46,26 +47,44 @@ async def refresh_runtime_tool_manifest(
     challenge_tools = set(allowed_tools_for(challenge.challenge_type, challenge.metadata_json or {}))
     definitions = load_tool_definitions()
     backend = {name for name, item in definitions.items() if item.enabled}
-    try:
-        runner_health = await runner_client.health()
-    except Exception:
-        runner_health = {}
+    # The legacy Kali Runner gate.
+    #
+    # When it is part of the deployment, the manifest is intersected with the
+    # capabilities that Runner advertises -- that intersection is the whole point
+    # of the manifest, and it stays exactly as it was.
+    #
+    # When it is not (the container-native default), there is no Runner to ask and
+    # asking anyway is actively harmful: an unreachable service yields an empty
+    # capability set, ``effective`` becomes empty, every network tool is reported
+    # as missing, and the Run is paused with ``TOOL_CATALOG_DRIFT`` -- a failure
+    # whose message points at the tool catalog while the cause is a service the
+    # deployment does not use.  So the intersection is skipped and the backend
+    # registry is authoritative.
+    legacy_runner = get_settings().legacy_kali_runner
+    runner_health: dict = {}
     capability_payload: dict = {}
-    try:
-        capability = await runner_client.capabilities()
-        capability_payload = capability if isinstance(capability, dict) else {}
-        rows = capability.get("tools") if isinstance(capability, dict) else []
-        runner = {
-            str(item.get("name"))
-            for item in rows
-            if isinstance(item, dict)
-            and item.get("implemented", item.get("available", False))
-            and item.get("installed", True)
-            and item.get("enabled", True)
-            and item.get("self_test_ok", True)
-        }
-    except Exception:
-        runner = set()
+    if legacy_runner:
+        try:
+            runner_health = await runner_client.health()
+        except Exception:
+            runner_health = {}
+        try:
+            capability = await runner_client.capabilities()
+            capability_payload = capability if isinstance(capability, dict) else {}
+            rows = capability.get("tools") if isinstance(capability, dict) else []
+            runner = {
+                str(item.get("name"))
+                for item in rows
+                if isinstance(item, dict)
+                and item.get("implemented", item.get("available", False))
+                and item.get("installed", True)
+                and item.get("enabled", True)
+                and item.get("self_test_ok", True)
+            }
+        except Exception:
+            runner = set()
+    else:
+        runner = set(backend)
     # MCP is deliberately not part of the multi_agent_v1 controller loop.
     # Keep the argument for compatibility with the manual diagnostic path,
     # but never let an advertised catalog gate an Attempt.
@@ -100,10 +119,19 @@ async def refresh_runtime_tool_manifest(
     runner_tool_rows = {str(item.get("name")): item for item in (capability_payload.get("tools") or []) if isinstance(item, dict)}
     network_enforcement = capability_payload.get("network_enforcement") if isinstance(capability_payload.get("network_enforcement"), dict) else {}
     script_row = runner_tool_rows.get("script_run") or {}
+    # Allowlist enforcement is proven by the Runner's self-report, so it can only
+    # be asserted when there is a Runner.  With the Runner retired the backend's
+    # own Tool Gateway is the enforcement point, and treating "no Runner report"
+    # as "unproven" would pause every networked Run (`SCRIPT_TARGET_NETWORK_UNAVAILABLE`)
+    # for a service that is not in the path.
     network_contract_ok = (
-        "target_allowlist" in set(script_row.get("supported_network_modes") or [])
-        and bool(script_row.get("target_allowlist_enforced"))
-        and bool(network_enforcement.get("target_allowlist_enforced"))
+        True
+        if not legacy_runner
+        else (
+            "target_allowlist" in set(script_row.get("supported_network_modes") or [])
+            and bool(script_row.get("target_allowlist_enforced"))
+            and bool(network_enforcement.get("target_allowlist_enforced"))
+        )
     )
     manifest_data = {
         "role_snapshot_tools": sorted(role),
@@ -117,7 +145,7 @@ async def refresh_runtime_tool_manifest(
         "missing_expected_tools": missing,
         "schema_hashes": schema_hashes,
         "network_enforcement_json": network_enforcement,
-        "tool_capabilities_json": {"script_run": {"supported_network_modes": script_row.get("supported_network_modes") or [], "target_allowlist_enforced": bool(script_row.get("target_allowlist_enforced")), "valid": network_contract_ok}},
+        "tool_capabilities_json": {"script_run": {"supported_network_modes": script_row.get("supported_network_modes") or [], "target_allowlist_enforced": bool(network_contract_ok), "valid": network_contract_ok}},
     }
     attempt.runtime_build_manifest_json = {
         "backend": backend_build_manifest(),

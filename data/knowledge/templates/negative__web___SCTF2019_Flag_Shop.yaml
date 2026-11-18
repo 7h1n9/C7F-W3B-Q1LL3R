@@ -1,0 +1,18 @@
+name: '[SCTF2019]Flag Shop'
+category: web
+keywords:
+- sctf2019
+- shop
+- ev0a
+steps:
+- 'Standard Sinatra/static/source paths beyond /filebak expose no additional public
+  content: /__sinatra__/404.png, /static/shop.png, /static/favicon.png, /views/shop.erb,
+  /app.rb, /server.rb, /Gemfile*, /config.ru, /.env all 404'
+- Standard Sinatra static/source candidates all return 404; /filebak is the sole source
+  leak found
+- ROUND_BUDGET_EXHAUSTED_BEFORE_REASON
+evidence_chain: []
+success_format: CTF2\{[^}]+\}
+source: 8bb59831-d25e-4573-99bc-16b13c227345 (run 4aa60a2b-6c32-4238-97fc-1f33bcb593a2)
+notes: NO_VERIFIED_FLAG
+kind: negative

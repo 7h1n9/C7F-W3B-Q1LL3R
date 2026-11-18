@@ -33,6 +33,24 @@ def test_codex_cli_api_model_config_uses_official_responses_endpoint() -> None:
     assert config.wire_api == "responses"
 
 
+def test_codex_cli_api_model_config_normalises_a_legacy_chat_wire_api() -> None:
+    """A stored `chat_completions` value must be rewritten, not preserved.
+
+    Codex cannot load that variant at all, so accepting it would produce a
+    Worker that dies during config parsing instead of failing loudly here.
+    """
+    config = ModelConfigWrite(
+        name="Codex API (legacy)",
+        provider_type="codex_cli",
+        base_url="https://api.openai.com/v1",
+        model_name="deepseek-v4.1-flash",
+        api_key="sk-test",
+        wire_api="chat_completions",
+        roles=["worker"],
+    )
+    assert config.wire_api == "responses"
+
+
 def test_codex_cli_api_model_requires_api_key() -> None:
     with pytest.raises(ValidationError, match="api_key"):
         ModelConfigWrite(

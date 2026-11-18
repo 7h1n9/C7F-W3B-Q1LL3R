@@ -55,6 +55,12 @@ class ReproductionCommandRenderer:
             return shlex.join(["python", str(args.get("path") or "scripts/solve.py"), *[str(v) for v in args.get("args", [])]])
         if tool_name == "sandbox_exec":
             return shlex.join([str(args.get("executable") or "<executable>"), *[str(v) for v in args.get("args", [])]])
+        if tool_name == "workspace_poc":
+            # Re-run the PoC script the Worker wrote.  ``{workspace}`` is replaced
+            # with the container-side workspace path by the caller, which is the
+            # only place that knows the host→container mapping.
+            interpreter = str(args.get("interpreter") or "python3")
+            return f"cd {{workspace}} && {interpreter} {args.get('path') or 'muteki/exploit.py'}"
         if tool_name == "content_discovery":
             return shlex.join(["ffuf", "-u", str(args.get("url") or "{{target_url}}/FUZZ"), "-w", str(args.get("wordlist") or "wordlist.txt")])
         return "# No human renderer for this bounded tool"

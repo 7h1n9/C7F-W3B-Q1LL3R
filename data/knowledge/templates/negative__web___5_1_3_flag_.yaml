@@ -1,0 +1,18 @@
+name: '[5.1.3 摩斯密码][无flag]摩斯密码'
+category: web
+keywords:
+- ctf
+- shimo
+- sheets
+- jgmlqoid7pkw
+- modoc
+- book
+- dasc
+steps:
+- WORKER_BUDGET_EXHAUSTED
+- BARREN_LIMIT 199 fruitless Worker rounds
+evidence_chain: []
+success_format: flag\{[^}]+\}
+source: e16004e6-d553-481b-aaa2-3f50fafebc42 (run d29a8587-1936-4a35-b17c-edae753ceb33)
+notes: BARREN_LIMIT:199
+kind: negative

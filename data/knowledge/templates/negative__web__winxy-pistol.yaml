@@ -1,0 +1,22 @@
+name: winxy-pistol
+category: web
+keywords:
+- winxy
+- pistol
+- choose
+- own
+- adventure
+- dicectf
+- quals
+- defund
+- dicegang
+- challenges
+- github
+- tree
+steps:
+- NO_HEALTHY_WORKER_PROFILE
+evidence_chain: []
+success_format: CTF2\{[^}]+\}
+source: 0e44f483-5fe6-4fca-adb4-5aba8a931195 (run a61efea9-f77b-48c6-b337-61b24b1ef1cf)
+notes: NO_HEALTHY_WORKER_PROFILE
+kind: negative

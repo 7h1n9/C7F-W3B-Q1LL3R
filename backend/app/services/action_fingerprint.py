@@ -2,7 +2,6 @@ import hashlib
 import json
 from typing import Any
 
-
 STRATEGY_METADATA_KEYS = {
     "vulnerability_type",
     "strategy_family",
@@ -108,6 +107,21 @@ def build_strategy_fingerprint(
 def fingerprint_action(tool_name: str, arguments: dict) -> str:
     payload = f"{tool_name}:{canonical_json(arguments)}"
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def argument_shape(tool_name: str, arguments: dict | None) -> str:
+    """The shape of a call: its tool plus its argument key set, values excluded.
+
+    Two calls share a shape when they are the same tool invoked with the same
+    fields.  Values are deliberately dropped: re-posting the same endpoint with
+    a tweaked payload is a different *execution* but the same *shape*, which is
+    what "the Worker retried the same idea" means.  Kept byte-compatible with
+    the shape string ``challenge_lessons`` has always produced
+    (``tool{key1,key2}`` after stripping the ``ctfctl.`` prefix).
+    """
+
+    keys = ",".join(sorted(str(key) for key in (arguments or {})))
+    return f"{str(tool_name or '').removeprefix('ctfctl.')}{{{keys}}}"
 
 
 def fingerprint_compiled_action(tool_name: str, compiled_arguments_digest: str, success_condition: str, stage: str = "") -> str:

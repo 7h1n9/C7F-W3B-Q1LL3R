@@ -1,0 +1,14 @@
+name: '[BUUCTF 2018]Online Tool'
+category: web
+keywords:
+- buuctf
+- online
+- tool
+steps:
+- RACE_WORKER_TIMEOUT
+- ROUND_BUDGET_EXHAUSTED_BEFORE_REASON
+evidence_chain: []
+success_format: CTF2\{[^}]+\}
+source: e3613e67-8344-4d61-ac04-ec2f58bdf358 (run af47e4d8-8b85-4661-b7f5-94537cdf666e)
+notes: NO_VERIFIED_FLAG
+kind: negative

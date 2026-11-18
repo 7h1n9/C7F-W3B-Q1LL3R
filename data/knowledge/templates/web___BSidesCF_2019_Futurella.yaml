@@ -1,0 +1,20 @@
+name: '[BSidesCF 2019]Futurella'
+category: web
+keywords:
+- bsidescf
+- futurella
+- imported
+- from
+- buuctf
+- ctfd
+steps:
+- '[codex] GET / returns the flag directly in the challenge paragraph.'
+- '[codex] The response also allows `flag{...}`-style normalization if your submission
+  system requires it.'
+evidence_chain:
+- '[codex] GET / returns the flag directly in the challenge paragraph.'
+- '[codex] The response also allows `flag{...}`-style normalization if your submission
+  system requires it.'
+success_format: CTF2\{[^}]+\}
+source: f5826a93-e3b4-45a2-9d80-305ae204e661 (solver cfd679b1-f904-469a-bad3-3a74b21b333f)
+notes: ''

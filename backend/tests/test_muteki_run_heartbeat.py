@@ -4,7 +4,6 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
-from sqlalchemy.pool import StaticPool
 
 from app.models import Base
 from app.models.challenge import Challenge
@@ -15,8 +14,15 @@ run_supervisor_module = importlib.import_module("app.services.run_supervisor")
 
 
 @pytest.mark.asyncio
-async def test_muteki_attempt_heartbeat_renews_outer_lease(monkeypatch) -> None:
-    engine = create_async_engine("sqlite+aiosqlite:///:memory:", poolclass=StaticPool)
+async def test_muteki_attempt_heartbeat_renews_outer_lease(monkeypatch, tmp_path) -> None:
+    # A file-backed database, not ``sqlite:///:memory:``.  The test cancels the
+    # heartbeat from another task, so the cancellation can land inside the
+    # heartbeat's own transaction; that makes SQLAlchemy invalidate the pooled
+    # connection.  A ``StaticPool`` over an in-memory database then rebuilds an
+    # *empty* database on the next checkout, and the assertion below fails with
+    # "no such table: solve_runs" -- a test artefact, not a heartbeat defect.
+    database = tmp_path / "heartbeat.db"
+    engine = create_async_engine(f"sqlite+aiosqlite:///{database.as_posix()}")
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.create_all)
     factory = async_sessionmaker(engine, expire_on_commit=False)
@@ -73,9 +79,23 @@ async def test_muteki_attempt_heartbeat_renews_outer_lease(monkeypatch) -> None:
             interval_seconds=0.01,
         )
     )
-    await asyncio.sleep(0.15)
+    # Wait for the effect, not for a guessed duration.  ``interval_seconds`` is
+    # clamped to 0.1s inside the heartbeat and one tick costs a session, three
+    # reads and a commit on a real connection, so a fixed 0.15s sleep raced the
+    # tick on a cold database.  The heartbeat is a background renewer: the test
+    # must observe at least one renewal before it cancels, or it asserts on a
+    # tick that never had a chance to run.
+    renewed = False
+    for _ in range(100):
+        await asyncio.sleep(0.05)
+        async with factory() as probe:
+            observed = await probe.get(RunAttempt, attempt_id)
+            if observed is not None and observed.heartbeat_at.replace(tzinfo=UTC) > now:
+                renewed = True
+                break
     heartbeat.cancel()
     await asyncio.gather(heartbeat, return_exceptions=True)
+    assert renewed, "the heartbeat never renewed the attempt within 5s"
 
     async with factory() as session:
         stored_run = await session.get(SolveRun, run_id)

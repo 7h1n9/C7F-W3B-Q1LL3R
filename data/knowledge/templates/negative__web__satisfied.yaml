@@ -1,0 +1,22 @@
+name: satisfied
+category: web
+keywords:
+- satisfied
+- don
+- even
+- know
+- what
+- asking
+- confess
+- dicectf
+- quals
+- wwm
+- dicegang
+- challenges
+steps:
+- NO_HEALTHY_WORKER_PROFILE
+evidence_chain: []
+success_format: CTF2\{[^}]+\}
+source: ff994135-bedc-41b5-a8c6-fc76a561f55f (run 387f6663-246a-4fa0-b689-7ba767c46448)
+notes: NO_HEALTHY_WORKER_PROFILE
+kind: negative

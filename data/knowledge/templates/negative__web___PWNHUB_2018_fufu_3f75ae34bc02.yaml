@@ -1,0 +1,18 @@
+name: '[PWNHUB 公开赛 2018]傻 fufu 的工作日 3f75ae34bc02'
+category: web
+keywords:
+- pwnhub
+- fufu
+steps:
+- 'Recon lane: no flag in public static surface — phpinfo.php (89806B), favicon.ico,
+  index.php, index.php.bak contain no CTF2{/flag{; assets/ tree 404; .git/.svn/.env/composer.json/.user.ini
+  404. Hidden .htaccess readable only as 403 (FilesMatch) and not bypassed by path
+  tricks.'
+- '[codex] flag not present in public static endpoints (phpinfo, favicon, index.php,
+  index.php.bak) — recon surface exhausted'
+- RACE_WORKER_TIMEOUT
+evidence_chain: []
+success_format: CTF2\{[^}]+\}
+source: 3f75ae34-bc02-41ff-ba30-72072158e338 (run af3cd99a-a9f9-43ff-ae6c-3e708f2afc8e)
+notes: NO_VERIFIED_FLAG
+kind: negative

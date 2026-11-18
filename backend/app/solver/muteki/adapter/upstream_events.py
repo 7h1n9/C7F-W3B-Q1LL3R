@@ -46,6 +46,9 @@ _EVENT_TYPE_MAP = {
     "hitl_classified": EventType.HITL_CLASSIFIED,
     "intent_state_changed": EventType.INTENT_STATE_CHANGED,
     "graph_compacted": EventType.GRAPH_COMPACTED,
+    "worker_started": EventType.WORKER_STARTED,
+    "worker_step": EventType.WORKER_STEP,
+    "worker_finished": EventType.WORKER_FINISHED,
 }
 
 _SENSITIVE_KEYS = frozenset(

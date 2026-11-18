@@ -4,13 +4,19 @@ from .cli import CliWorkerEngine
 
 
 class ClaudeEngine(CliWorkerEngine):
-    binary = "claude"
+    """Claude Code headless Worker.
 
-    def engine_type(self) -> str:
-        return "claude"
+    The vendored ``ClaudeCodeDriver`` owns the argv: the official non-interactive
+    worker permission flag (``--dangerously-skip-permissions``), the JSON/JSONL
+    output format, and -- when a caller turns those surfaces off -- Web-tool
+    denial (``--disallowed-tools WebSearch WebFetch``) plus MCP isolation
+    (``--mcp-config '{"mcpServers":{}}' --strict-mcp-config``).  Parsing the
+    result envelope is what makes the session id, turn count and cache-token
+    buckets available to the Blackboard; the previous hand-written argv produced
+    only raw stdout.
+    """
 
-    def _command(self, prompt: str) -> list[str]:
-        return [self.executable, "--print", "--dangerously-skip-permissions", prompt]
+    engine = "claude"
 
 
 __all__ = ["ClaudeEngine"]

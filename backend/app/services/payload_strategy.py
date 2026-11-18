@@ -5,7 +5,6 @@ from __future__ import annotations
 import hashlib
 import json
 
-
 PAYLOAD_FAMILIES = (
     "and_boolean", "or_boolean", "comment_variation", "whitespace_variation",
     "encoding_variation", "substring", "ascii", "hex", "like", "scalar_subquery",

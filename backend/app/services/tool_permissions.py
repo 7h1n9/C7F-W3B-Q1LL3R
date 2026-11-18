@@ -1,6 +1,7 @@
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import get_settings
 from app.models.challenge import Challenge
 from app.models.run import SolveRun
 from app.models.skill import Skill
@@ -50,24 +51,29 @@ async def effective_tools_for(session: AsyncSession, run: SolveRun, challenge: C
         allowed.add("sqlite_metadata_discovery")
     if getattr(run, "solver_mode", "multi_agent_v1") == "solver_v2" and "script_run" in role_tools:
         allowed.add("script_run")
-    try:
-        from app.services.runner_client import runner_client
+    # The legacy Runner gate, skipped when the Runner is not part of the
+    # deployment.  This branch used to run unconditionally and intersect the
+    # allowed set with whatever the Runner advertised -- so with no Runner, an
+    # unreachable service silently produced an empty tool set for every Run.
+    if get_settings().legacy_kali_runner:
+        try:
+            from app.services.runner_client import runner_client
 
-        capability = await runner_client.capabilities()
-        rows = capability.get("tools") if isinstance(capability, dict) else None
-        if isinstance(rows, list):
-            allowed &= {
-                str(item.get("name"))
-                for item in rows
-                if isinstance(item, dict)
-                and item.get("implemented", item.get("available", False))
-                and item.get("installed", True)
-                and item.get("enabled", True)
-                and item.get("self_test_ok", True)
-            }
-    except Exception:
-        # Keep local test/fallback engines usable when the optional Runner is down.
-        pass
+            capability = await runner_client.capabilities()
+            rows = capability.get("tools") if isinstance(capability, dict) else None
+            if isinstance(rows, list):
+                allowed &= {
+                    str(item.get("name"))
+                    for item in rows
+                    if isinstance(item, dict)
+                    and item.get("implemented", item.get("available", False))
+                    and item.get("installed", True)
+                    and item.get("enabled", True)
+                    and item.get("self_test_ok", True)
+                }
+        except Exception:
+            # Keep local test/fallback engines usable when the optional Runner is down.
+            pass
     return allowed - await forbidden_tools_for(session, run.id)
 
 

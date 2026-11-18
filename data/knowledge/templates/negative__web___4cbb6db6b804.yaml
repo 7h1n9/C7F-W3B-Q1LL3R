@@ -1,0 +1,17 @@
+name: 粗心的小李 4cbb6db6b804
+category: web
+keywords:
+- ctfer
+- book
+- nu1l
+steps:
+- '[claude] No platform-rebanded CTF2 flag exists on the box: only one tree/commit
+  (index TREE ext == commit tree), no other refs/packed-refs/tags, no flag/flag.txt/index.php
+  (all 404), assets dir returns 403 at'
+- RACE_WORKER_TIMEOUT
+- ROUND_BUDGET_EXHAUSTED_BEFORE_REASON
+evidence_chain: []
+success_format: CTF2\{[^}]+\}
+source: 4cbb6db6-b804-4481-b573-5b2bbc55e789 (run 7ea2fe64-2213-4fa3-8494-27d749a8e60e)
+notes: NO_VERIFIED_FLAG
+kind: negative

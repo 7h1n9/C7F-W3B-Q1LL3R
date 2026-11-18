@@ -1,0 +1,15 @@
+name: '[CISCN2019 华东南赛区]Web4 8b3b90c6459b'
+category: web
+keywords:
+- ciscn2019
+- web4
+- click
+- launch
+- instance
+steps:
+- NO_HEALTHY_WORKER_PROFILE
+evidence_chain: []
+success_format: CTF2\{[^}]+\}
+source: 8b3b90c6-459b-444e-a8db-cda7a53bd190 (run 5c6a2a93-fbf7-457d-9ac5-33377155002b)
+notes: NO_HEALTHY_WORKER_PROFILE
+kind: negative

@@ -1,11 +1,14 @@
 from fastapi import APIRouter
 
 from app.api.v1 import (
+    arena,
     challenges,
     conversations,
     ctfctl,
     events,
     health,
+    knowledge,
+    knowledge_experiments,
     learned_skills,
     models,
     multi_agent,
@@ -18,6 +21,7 @@ from app.api.v1 import (
 
 router = APIRouter(prefix="/api/v1")
 router.include_router(health.router)
+router.include_router(arena.router)
 router.include_router(challenges.router)
 router.include_router(ctfctl.router)
 router.include_router(skills.router)
@@ -30,3 +34,5 @@ router.include_router(system_settings.router)
 router.include_router(readiness.router)
 router.include_router(learned_skills.router)
 router.include_router(multi_agent.router)
+router.include_router(knowledge.router)
+router.include_router(knowledge_experiments.router)

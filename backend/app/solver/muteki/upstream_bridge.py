@@ -14,6 +14,16 @@ from typing import Any
 
 UPSTREAM_MUTEKI_VERSION = "0.2.5"
 
+#: Challenge type -> upstream solve-graph category.
+#:
+#: This is the *write* side of template distillation: ``distill_from_events``
+#: stores ``template.category`` from this value, and the template file name is
+#: built from it (``web__<name>.yaml``).  The recall path has to translate the
+#: challenge the same way or the category term -- the strongest single signal in
+#: the scorer -- silently never matches.  It used to pass ``challenge_type``
+#: through verbatim, so recall compared ``WEB_TARGET`` against a stored ``web``
+#: and every template lost those points.  Exposed (not just module-private) so
+#: both directions can share one definition instead of drifting again.
 _CATEGORY_BY_CHALLENGE_TYPE = {
     "WEB_TARGET": "web",
     "PWN": "pwn",
@@ -22,6 +32,27 @@ _CATEGORY_BY_CHALLENGE_TYPE = {
     "FORENSICS": "forensics",
     "MISC": "misc",
 }
+
+
+def category_for_challenge_type(challenge_type: str | None) -> str:
+    """Upstream category for a challenge type, defaulting to ``web``.
+
+    The default mirrors the distiller's own: an unmapped type is stored under
+    ``web``, so recall must resolve it to ``web`` too or it would be looking for
+    a category that no template can have.
+    """
+
+    return _CATEGORY_BY_CHALLENGE_TYPE.get(str(challenge_type or "").upper(), "web")
+
+
+def upstream_categories() -> frozenset[str]:
+    """Every category a template can actually be filed under.
+
+    The recall path checks a challenge's carried ``category`` against this set,
+    so a raw challenge type (``WEB_TARGET``) is never mistaken for a category.
+    """
+
+    return frozenset(_CATEGORY_BY_CHALLENGE_TYPE.values())
 
 
 def upstream_available() -> bool:
@@ -45,7 +76,7 @@ def to_upstream_challenge(challenge: Any) -> Any:
     from muteki.models.solve_graph import Challenge as UpstreamChallenge
 
     challenge_type = str(getattr(challenge, "challenge_type", "WEB_TARGET") or "WEB_TARGET")
-    category = _CATEGORY_BY_CHALLENGE_TYPE.get(challenge_type.upper(), "web")
+    category = category_for_challenge_type(challenge_type)
     attachments = _attachment_names(getattr(challenge, "attachments", None))
 
     return UpstreamChallenge(
@@ -88,3 +119,20 @@ def open_upstream_shared_graph(*, db_path: str, challenge: Any) -> Any:
     from muteki.swarm.shared_graph import SQLiteSharedGraph
 
     return SQLiteSharedGraph.open(db_path=db_path, challenge=to_upstream_challenge(challenge))
+
+
+def open_upstream_shared_graph_readonly(*, db_path: str, challenge: Any) -> Any:
+    """Open an existing upstream graph strictly read-only.
+
+    Post-run distillation is an observer of a Run that has already finalized, so
+    it must never migrate, checkpoint, or otherwise mutate that Run's graph.  Any
+    ``sqlite3.OperationalError`` (missing file, missing/stale schema, unreadable
+    WAL sidecar) is the caller's signal to skip distillation — never to fall back
+    to a read-write open.
+    """
+
+    from muteki.swarm.shared_graph import SQLiteSharedGraph
+
+    return SQLiteSharedGraph.open_readonly(
+        db_path=db_path, challenge=to_upstream_challenge(challenge)
+    )

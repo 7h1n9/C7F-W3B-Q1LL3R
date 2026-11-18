@@ -8,6 +8,7 @@ from sqlalchemy import select
 
 from app.core.database import SessionLocal
 from app.engines.openai_compatible import OpenAICompatibleEngine
+from app.engines.wire import normalize_wire_api
 from app.models.challenge import Challenge
 from app.models.model_config import ModelConfig
 from app.models.run import SolveRun
@@ -96,6 +97,7 @@ async def generate_run_title(run_id: str) -> str:
                     decrypt_api_key(config.encrypted_api_key),
                     str(config.model_name or TITLE_MODEL),
                     timeout=min(10.0, max(1.0, float(config.request_timeout_seconds or 10))),
+                    wire_api=normalize_wire_api(getattr(config, "wire_api", None)),
                     max_output_tokens=64,
                     temperature=0.3,
                     max_retries=0,

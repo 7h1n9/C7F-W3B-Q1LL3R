@@ -1,0 +1,14 @@
+name: 培正集团 ee68e7c2e090
+category: web
+keywords:
+- dmz
+- pzctf
+- shell
+- hint
+steps:
+- RACE_WORKER_TIMEOUT
+evidence_chain: []
+success_format: pzctf\{[^}]+\}
+source: ee68e7c2-e090-40d2-bd1e-ff02c7983c2e (run 94af75e5-8e0e-4fd2-b162-6fa16849af28)
+notes: NO_VERIFIED_FLAG
+kind: negative

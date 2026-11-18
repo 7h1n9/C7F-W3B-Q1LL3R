@@ -1,0 +1,57 @@
+name: xianzhi_xss
+category: web
+keywords:
+- xianzhi_xss
+- github
+- glzjin
+- ctf_web_docker
+- tree
+- master
+steps:
+- robots.txt discloses /static/secretkey.txt -> 'you-will-never-guess' (session/secret
+  key for xianzhi_xss)
+- '[claude] 目标在 Apache/2.4.18 (Ubuntu) 前放置了 openresty 代理；根目录列出了 20 个关卡目录 (xss1–xss10,
+  xss13–xss21；不存在 xss11/xss12 — 已确认返回 404)。没有 /submit、/bot、/admin、/flag、/check 类型的端点
+  — 没有 self-check API；flag 很可能位于容器文件系统的 /flag'
+- '[claude] robots.txt 泄露了 /static/secretkey.txt → 内容为 `you-will-never-guess`（这是出题人原始挑战的
+  key；实时部署仍然提供该文件）。'
+- '[claude] xss19_party 反射 `?link=` 到 `<img name="avatar" src="{link}" ...>` 内部，仅对双引号进行了
+  HTML 实体编码（单引号和 `>` 未过滤）— 在引号上下文中存在反射型 XSS。在没有参数或存在任何 GET 参数时返回 500 — 只有 `link` 有效（源码证实：`$_GET["link"]`
+  未设置 → PHP 7 中的空拼接警告；'
+- '[claude] xss20_theend 将 `?hookid=` 反射到 `<script>hookid=''...'';</script>` 中，仅使用单引号定界，无转义
+  — 但过滤器会剥离圆括号 (`alert(1)`→`alert1`)；`<script>` 标签经过了 HTML 实体编码，但闭合标签 `''` 有效。绕过需要无括号执行
+  JS（例如通过反引号模板、location 重定向或 String.fro'
+- '[claude] xss21_othersJquery 在 `$(location.hash)` 中使用了 jQuery 3.2.1（已知的哈希选择器 XSS
+  原语），并具有 `document.write` jQuery CDN 回退机制。'
+- '[claude] xss6_forcedownload 和 xss7_textplain 是 SSRF 原语：在禁止 0/1/l 开头 IP 和 `@` 的情况下，`fopen($_GET["url"])`
+  会请求任意 `http://` URL，`..` 会被剥离，响应会被返回。xss6 还会将 `filename` 反射到 Content-Disposition
+  头部中（存在头部注入潜力）。xss8_tag 获'
+- '[claude] xss2_getallheaders 回显所有请求头（通过 header-name 反射存在 XSS），并泄露了内部主机名 `295afa885553c342c59b62d7.http-ctf2.dasctf.com`
+  以及内部 X-Forwarded-Target UUID `295afa88-e2f4-49bc-84c8-646adcf3640b`。'
+- '[claude] xss1_uploadfiles 允许上传带有 getimagesize 验证的 jpg/png/jpeg/gif 文件到 uploads/
+  目录 — 文件名来自 basename($_FILES name)，因此可以通过带有幻数（magic bytes）的 `.jpg` 后缀文件进行 XSS。'
+- '[claude] xss3_json 将 `?value=` 反射到 Content-Type 为 application/json 的 JSON 正文中（XSS
+  需要 IE 内容嗅探）；xss10_mvm 在双引号 ng-init 内的 AngularJS 1.6.5 沙箱（长度 < 37）；xss5_redirect
+  在 `<a href=''$url''>` 中反射 url，并带有 Location 头部注入（仅'
+- '[claude] 完整的挑战源码可从 github.com/glzjin/CTF_Web_docker/tree/master/xianzhi_xss 获取（通过
+  raw.githubusercontent.com 的 API 可访问）；每个关卡的 index.php 已保存在本次会话的输出中 — 例如，xss19 源码证实了
+  link sink；flag 已挂载到容器内的 /flag。'
+- '[claude] 已确定的可能 flag 路径（供其他通道参考）：利用其中一个 sink 进行 XSS → 触发管理员/爬虫读取 /flag — 但由于此部署中不存在提交/机器人端点，flag
+  可能需要通过 SSRF (xss6/7) 读取本地文件或通过 upload 原语获取。注意 `fopen` 配合 `http://` 包装器无法读取 file://
+  — 但 xss6/7 上的过滤器仅要求前缀 `http`，'
+evidence_chain:
+- robots.txt discloses /static/secretkey.txt -> 'you-will-never-guess' (session/secret
+  key for xianzhi_xss)
+- Target serves 21 xianzhi XSS labs under /xssN_*/; root Apache index; no session
+  cookies issued on any probed path; no /login /admin /api endpoints (404).
+- xss3_json/ returns application/json user object for user id=2 (endpoint echoes JSON,
+  no auth).
+- xss17_passiveElement reflects GET param 'content' raw into <div data-content='...'>.
+  xss14_hidden reflects param 'token' HTML-encoded into hidden input value.
+- '[claude] 目标上不存在身份验证/会话/API 表面：所有 19 个实验路径上均无 Set-Cookie，没有登录/注销/注册/api/会话端点（404），server-status
+  403，TRACE 405；伪造的 cookies (PHPSESSID/admin=1) 没有产生任何影响。'
+- '[claude] xss3_json 无论 ?id 值（0,1,3,10,admin）或 ?callback 如何，都返回相同的静态用户 id=2 JSON；无基于
+  id 的访问，无身份验证。'
+success_format: CTF2\{[^}]+\}
+source: 77dea6ac-7b09-4f54-857e-3e6893694c28 (solver 49af30bf-4605-4528-8588-53a2a9da1a98)
+notes: ''

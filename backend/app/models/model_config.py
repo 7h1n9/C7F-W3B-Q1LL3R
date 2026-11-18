@@ -11,6 +11,10 @@ class ModelConfig(UUIDTimestampMixin, Base):
     name: Mapped[str] = mapped_column(String(200), nullable=False, unique=True)
     provider_type: Mapped[str] = mapped_column(String(40), nullable=False)
     base_url: Mapped[str | None] = mapped_column(String(2048))
+    # OpenAI-wire dialect: "chat_completions" (default) or "responses".  NULL on
+    # rows written before the column existed, which normalises to Chat
+    # Completions -- the behaviour those rows already had.
+    wire_api: Mapped[str | None] = mapped_column(String(30))
     model_name: Mapped[str | None] = mapped_column(String(255))
     encrypted_api_key: Mapped[str | None] = mapped_column(String(2048))
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)

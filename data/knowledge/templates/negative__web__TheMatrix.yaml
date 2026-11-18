@@ -1,0 +1,11 @@
+name: TheMatrix
+category: web
+keywords:
+- thematrix
+steps:
+- RACE_WORKER_TIMEOUT
+evidence_chain: []
+success_format: CTF2\{[^}]+\}
+source: 49b0fd5b-426d-40c5-a3d1-b72c904ae57a (run 95d2594e-9dd2-43e1-bd23-c5b0a1b1b7d5)
+notes: NO_VERIFIED_FLAG
+kind: negative

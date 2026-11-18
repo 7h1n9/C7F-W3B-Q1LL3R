@@ -1,0 +1,16 @@
+name: BUU CODE REVIEW 1
+category: web
+keywords:
+- buu
+- code
+- review
+- github
+- glzjin
+- buusec_2019_code_review_1
+steps:
+- NO_HEALTHY_WORKER_PROFILE
+evidence_chain: []
+success_format: flag\{[^}]+\}
+source: 2e303e13-63d9-496c-b814-99f2b8e69c31 (run 8a522971-68d9-4ccf-bb5c-ae724ad9eb8c)
+notes: NO_HEALTHY_WORKER_PROFILE
+kind: negative

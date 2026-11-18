@@ -57,7 +57,10 @@ def make_loop(state: BlackboardState, worker: MockWorker | None = None) -> tuple
         state_machine=TaskStateMachine(),
         planner=DeterministicPlanner(),
         policy=ActionPolicyValidator(),
-        worker_manager=WorkerManager(workers={"mock": active_worker}),
+        # The DeterministicPlanner declares no backend, and WorkerManager resolves a
+        # missing backend to "runner" -- register the mock there, not under an
+        # invented name it would never route to.
+        worker_manager=WorkerManager(workers={"runner": active_worker}),
         ),
         active_worker,
     )

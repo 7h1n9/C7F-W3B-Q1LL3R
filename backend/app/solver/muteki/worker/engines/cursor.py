@@ -4,13 +4,15 @@ from .cli import CliWorkerEngine
 
 
 class CursorEngine(CliWorkerEngine):
-    binary = "cursor-agent"
+    """Cursor headless Worker (``cursor-agent``).
 
-    def engine_type(self) -> str:
-        return "cursor"
+    The vendored ``CursorDriver`` owns the argv (``-p --force --trust``, pinned
+    model, ``--output-format stream-json``) and the NDJSON parsing, so the chat
+    id, token buckets and policy-refusal classification are available to the
+    Blackboard instead of being thrown away with the raw stdout.
+    """
 
-    def _command(self, prompt: str) -> list[str]:
-        return [self.executable, "-p", "--force", "--trust", prompt]
+    engine = "cursor"
 
 
 __all__ = ["CursorEngine"]

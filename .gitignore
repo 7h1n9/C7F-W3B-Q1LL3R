@@ -19,3 +19,35 @@ data/logs/
 data/sessions/
 backend/data/sessions/
 *.log
+
+# The Claude proxy writes its random port and shared secret here. It is a
+# credential: committing it would publish the token that gates the upstream
+# model keys.
+.claude-proxy.json
+.claude-proxy.json.tmp
+# The Codex proxy's state file, same reason -- it also carries a shared secret.
+.codex-proxy.json
+.codex-proxy.json.tmp
+
+# Scratch dir for ad-hoc curl dumps, DB exports and one-off probe scripts.
+# Everything in here is regenerable; keep it out of the repo so it does not
+# grow to hundreds of megabytes again.
+.probe/
+
+# Third-party source checkouts (awesome-poc, vulhub, CTF-Dojo, codex-cli).
+# Only the extracted payload corpora under data/knowledge are committed.
+data/sources/
+
+# Local MySQL data directories kept around as acceptance-test fixtures.
+# These are raw InnoDB binary files (~350 MB combined), are referenced by no
+# code path, and can be recreated by starting the container.  Committing them
+# made the tracked tree 595 MB and pushed GitHub over its advisory limits.
+data/mysql-acceptance/
+data/mysql-acceptance2/
+
+# Database dumps and exported training corpora.
+# ``ctf_agent_before_orphan_cleanup_*.sql`` alone is 152 MB, past GitHub's
+# 100 MB hard limit; ``transitions-*.jsonl`` is a 65 MB re-exportable dump.
+# Both are regeneration artefacts, not sources, so they stay on disk only.
+data/backups/*.sql
+data/training/transitions-*.jsonl

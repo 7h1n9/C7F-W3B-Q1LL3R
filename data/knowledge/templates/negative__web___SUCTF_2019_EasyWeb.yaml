@@ -1,0 +1,19 @@
+name: '[SUCTF 2019]EasyWeb'
+category: web
+keywords:
+- suctf
+- easyweb
+- github
+- team
+- tree
+- master
+- web
+steps:
+- '[claude] Reaching the flag was NOT completed: no `.php`-executable file can be
+  placed in the upload dir (extension `ph` blocked, `<?` blocked, nginx/openresty
+  doesn''t honor `.htaccess`), and `.user.ini` is not'
+evidence_chain: []
+success_format: CTF2\{[^}]+\}
+source: c8ee6ad7-142e-48cd-aac1-7f84790caa96 (run a92b61c0-db29-468f-915d-b84e2e7bd407)
+notes: NO_VERIFIED_FLAG
+kind: negative

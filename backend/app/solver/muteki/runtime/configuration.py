@@ -12,16 +12,16 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Iterable, Mapping
 
-SUPPORTED_WORKER_ENGINE_TYPES = frozenset({"codex_cli", "openai_compatible"})
+from app.schemas.model_config import (
+    WORKER_ENGINE_ID_PREFIX,
+    WORKER_ENGINE_TYPES,
+    normalize_worker_engine_type,
+)
+
+# Re-exported for existing callers/tests; the vocabulary itself lives with the
+# provider taxonomy in app.schemas.model_config so there is exactly one copy.
+SUPPORTED_WORKER_ENGINE_TYPES = WORKER_ENGINE_TYPES
 MUTEKI_RUNTIME_HINT_KEY = "muteki_runtime"
-_ENGINE_ALIASES = {
-    "codex": "codex_cli",
-    "codex-sdk": "codex_cli",
-    "codex_sdk": "codex_cli",
-    "codex-cli": "codex_cli",
-    "codex-api": "codex_cli",
-    "openai-compatible": "openai_compatible",
-}
 
 
 @dataclass(frozen=True, slots=True)
@@ -32,24 +32,21 @@ class WorkerEngineSelection:
     model_config_id: str | None = None
 
     def __post_init__(self) -> None:
-        engine_type = _ENGINE_ALIASES.get(self.engine_type.strip().casefold(), self.engine_type.strip().casefold())
-        if engine_type not in SUPPORTED_WORKER_ENGINE_TYPES:
+        resolved = normalize_worker_engine_type(self.engine_type)
+        if not resolved:
             raise ValueError(f"unsupported worker engine type: {self.engine_type}")
-        if engine_type == "openai_compatible" and not self.model_config_id:
-            raise ValueError("openai_compatible worker requires model_config_id")
-        if engine_type == "codex_cli" and not self.model_config_id:
-            raise ValueError("codex_cli worker requires model_config_id")
-        object.__setattr__(self, "engine_type", engine_type)
-        if self.model_config_id:
-            object.__setattr__(self, "model_config_id", str(self.model_config_id))
+        if not self.model_config_id:
+            # Every engine draws its binary/model/credentials from a model
+            # config, so none of them can run unbound.
+            raise ValueError(f"{resolved} worker requires model_config_id")
+        object.__setattr__(self, "engine_type", resolved)
+        object.__setattr__(self, "model_config_id", str(self.model_config_id))
 
     @property
     def engine_id(self) -> str:
         """Return the stable Worker identity used by Coordinator scheduling."""
 
-        if self.engine_type == "openai_compatible":
-            return f"openai-compatible:{self.model_config_id}"
-        return f"codex-cli:{self.model_config_id}"
+        return f"{WORKER_ENGINE_ID_PREFIX[self.engine_type]}:{self.model_config_id}"
 
     def to_dict(self) -> dict[str, str]:
         value = {"engine_type": self.engine_type, "engine_id": self.engine_id}
@@ -70,18 +67,17 @@ def normalize_worker_engines(
     for item in selections or ():
         if not isinstance(item, Mapping):
             continue
-        engine_type = str(item.get("engine_type") or "").strip().casefold()
-        if not engine_type:
+        if not str(item.get("engine_type") or "").strip():
+            continue
+        resolved = normalize_worker_engine_type(item.get("engine_type"))
+        if not resolved or resolved == "mock":
+            # "mock" was removed; drop those legacy selections.
             continue
         model_config_id = str(item["model_config_id"]) if item.get("model_config_id") else None
-        resolved = _ENGINE_ALIASES.get(engine_type, engine_type)
-        if resolved == "mock":
-            # mock engine was removed; drop these legacy selections.
-            continue
-        if resolved == "codex_cli" and not model_config_id:
-            # Legacy codex_sdk/codex-cli without a model config cannot run.
-            continue
         try:
+            # An engine without a model config cannot run -- the constructor
+            # rejects it, so a legacy codex_sdk row without one is skipped here
+            # rather than degrading into a different engine.
             normalized.append(WorkerEngineSelection(resolved, model_config_id))
         except ValueError:
             continue
@@ -89,11 +85,8 @@ def normalize_worker_engines(
         return tuple(_dedupe(normalized))
     if not fallback_engine_type:
         return ()
-    fallback = str(fallback_engine_type).strip().casefold()
-    resolved = _ENGINE_ALIASES.get(fallback, fallback)
-    if resolved == "mock" or resolved not in SUPPORTED_WORKER_ENGINE_TYPES:
-        return ()
-    if resolved == "codex_cli" and not fallback_model_config_id:
+    resolved = normalize_worker_engine_type(fallback_engine_type)
+    if not resolved or resolved == "mock":
         return ()
     try:
         return (

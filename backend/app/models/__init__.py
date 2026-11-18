@@ -1,3 +1,4 @@
+from app.models.arena import ArenaConnection, ArenaSolveQueueItem, ArenaSubmission
 from app.models.base import Base
 from app.models.challenge import Challenge, ChallengeAttachment
 from app.models.conversation import (
@@ -13,11 +14,11 @@ from app.models.learned_skill import (
 )
 from app.models.model_config import ModelConfig
 from app.models.multi_agent import (
-    ApprovedAction,
     AgentRolePolicy,
     AgentTask,
     AgentTaskResult,
     AnalysisReview,
+    ApprovedAction,
     EvidenceLedger,
     FailureSignature,
     MemorySnapshot,
@@ -37,8 +38,8 @@ from app.models.run import (
     LogicalToolCall,
     Observation,
     RunAttempt,
-    RunContinuation,
     RunCompactionCheckpoint,
+    RunContinuation,
     RunEvent,
     RunExecutionLease,
     RunUserInput,
@@ -51,7 +52,6 @@ from app.models.run import (
     ToolRequestFingerprint,
     WebResearchRecord,
 )
-from app.models.scoring import ChallengePrediction, RunScore
 from app.models.skill import ChallengeSkillBinding, ModelSkillBinding, RunSkillSnapshot, Skill
 from app.models.solver_state import SolverState
 
@@ -59,6 +59,9 @@ __all__ = [
     "Base",
     "Challenge",
     "ChallengeAttachment",
+    "ArenaConnection",
+    "ArenaSolveQueueItem",
+    "ArenaSubmission",
     "SolveRun",
     "RunEvent",
     "ToolCall",
@@ -68,8 +71,6 @@ __all__ = [
     "ToolInvocationTicket",
     "ToolRequestFingerprint",
     "WebResearchRecord",
-    "ChallengePrediction",
-    "RunScore",
     "RunAttempt",
     "RunContinuation",
     "RunCompactionCheckpoint",

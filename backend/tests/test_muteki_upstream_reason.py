@@ -1,9 +1,9 @@
 import asyncio
 import json
 
+from app.solver.muteki.adapter.upstream_reason import parse_upstream_reason_reply
 from app.solver.muteki.graph import MutekiGraph
 from app.solver.muteki.reason import MutekiReason
-from app.solver.muteki.adapter.upstream_reason import parse_upstream_reason_reply
 
 
 def test_official_reason_json_is_consumed_by_current_reason_gate(tmp_path) -> None:

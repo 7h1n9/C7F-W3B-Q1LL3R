@@ -1,0 +1,15 @@
+name: '[RCTF 2019]Nextphp'
+category: web
+keywords:
+- rctf
+- nextphp
+- php
+- best
+- language
+steps:
+- NO_HEALTHY_WORKER_PROFILE
+evidence_chain: []
+success_format: CTF2\{[^}]+\}
+source: a7fa4b9f-615b-49b0-b29f-da00eeae1328 (run be7420d5-bba3-4ee5-ac14-ef8576534c2e)
+notes: NO_HEALTHY_WORKER_PROFILE
+kind: negative

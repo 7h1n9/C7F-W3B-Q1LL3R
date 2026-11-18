@@ -1,0 +1,16 @@
+name: '[STARCTF2019]996game'
+category: web
+keywords:
+- starctf2019
+- game
+steps:
+- 'id-string injection into loadPlayer: any string >=13 chars that is not 24-hex throws
+  in ''new ObjectId()'' BEFORE the query, so no callback error and no eval; 24-hex/12-char
+  raw that pass go to a silent/found result; NUL truncates id silently. No colon-bearing
+  driver error reachable via init-world id.'
+- RACE_WORKER_TIMEOUT
+evidence_chain: []
+success_format: CTF2\{[^}]+\}
+source: 2c7220d0-b541-4041-911c-bdf29f755a4a (run 77932030-ccd1-42c2-b95f-19f9a53e37a6)
+notes: NO_VERIFIED_FLAG
+kind: negative

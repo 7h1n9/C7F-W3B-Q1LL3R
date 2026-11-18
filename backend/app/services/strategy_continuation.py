@@ -13,7 +13,6 @@ from typing import Any, Iterable, Mapping
 
 from app.services.solver_state import solver_state_service
 
-
 DEFAULT_STRATEGIES = (
     "BOOLEAN_AND_COMMENT_HASH",
     "BOOLEAN_AND_COMMENT_INLINE",

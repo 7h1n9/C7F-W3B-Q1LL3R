@@ -1,0 +1,42 @@
+{
+  "id": "theory-file-upload-001",
+  "type": "theory",
+  "category": "file_ops",
+  "subcategory": "file_upload",
+  "name": "文件上传漏洞",
+  "aliases": [
+    "文件上传",
+    "webshell",
+    "上传绕过"
+  ],
+  "severity": "high",
+  "description": "> 创建: 未知 | 更新: 2026-05-21 | 适用: PHP通用 | ⚠️ 部分图片托管于外部CDN - 文件上传是Web应用的必备功能之一,比如上传头像显示个性化,上传附件共享文件,上传脚本更新网站等.如果服务器配置不当或者没有进行足够的过滤,Web用户就可以上传任意文件,包括恶意脚本文件,exe程序等,这就造成了文件上传漏洞 - 文件上传漏洞的成因,一方面服务器配置不当会导致任意文件上传;另一方面,Web应用开放了文件上传功能,并且对上传的文件没有进行足够的限制;再者就是,程序开发部署时候,没有考虑到系统特性和验证和过滤不严格而导致限制被绕过,上传任意文件",
+  "key_concepts": [
+    "# PUT方法上传文件",
+    "# 黑白名单策略",
+    "# .htaccess攻击",
+    "# 前端限制与绕过",
+    "文件上传漏洞利用的条件",
+    "asp",
+    "jsp",
+    "php",
+    "# 服务器端检测MIME类型",
+    "# 服务器端检测文件内容"
+  ],
+  "related_pocs": [
+    "pocs/high_value/afrog\\afrog-pocs\\vulnerability\\hikvision-ivms-8700-fileupload.yaml"
+  ],
+  "related_payloads": [
+    "payloads/file_upload/extracted.json"
+  ],
+  "tags": [
+    "文件上传",
+    "webshell",
+    "上传绕过",
+    "file_ops",
+    "ctf",
+    "web"
+  ],
+  "source": "Des-CTF-Knowledge/文件上传漏洞.md",
+  "last_updated": "2026-10-22"
+}

@@ -1,4 +1,5 @@
 import asyncio
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -6,7 +7,6 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
-from datetime import UTC, datetime, timedelta
 
 from app.models.base import Base
 from app.models.challenge import Challenge
@@ -15,13 +15,13 @@ from app.models.run import RunAttempt, RunEvent, RunExecutionLease, RunUserInput
 from app.models.solver_state import SolverState
 from app.schemas.multi_agent import FailureClassification
 from app.services.failure_classification import normalize_failure_classification
+from app.services.run_diagnostics import run_diagnostics_service
+from app.services.run_finalizer import run_finalizer
+from app.services.run_supervisor import RunSupervisor, run_supervisor
 from app.services.stage_decider import stage_decider
+from app.services.supervisor_progress import supervisor_progress_evaluator
 from app.services.tool_failure_policy import blocked_failure_for_action, tool_failure_fingerprint
 from app.services.user_input_consumer import consume_user_inputs
-from app.services.run_supervisor import RunSupervisor, run_supervisor
-from app.services.supervisor_progress import supervisor_progress_evaluator
-from app.services.run_finalizer import run_finalizer
-from app.services.run_diagnostics import run_diagnostics_service
 
 
 def test_failure_classification_normalizes_pydantic_object() -> None:
@@ -254,3 +254,242 @@ async def test_system_self_check_passes_after_terminal_cleanup(tmp_path: Path) -
         assert all(item["status"] == "PASS" for item in result["checks"])
         assert result["reasons"] == []
     await engine.dispose()
+
+
+def test_a_crashed_lifecycle_does_not_leave_the_run_on_running(tmp_path, monkeypatch) -> None:
+    """A Run whose lifecycle coroutine dies must not stay RUNNING.
+
+    Measured 2026-10-19 on an arena Run: ``MissingGreenlet`` escaped
+    ``_run_muteki`` and ended ``run_background``.  The Run row stayed RUNNING,
+    and because ``_active_run_tasks`` had already been unregistered in the
+    ``finally`` block, nothing could reach it any more -- not even the cancel
+    endpoint.  The lifecycle coroutine therefore has to close the Run itself.
+    """
+
+    engine = create_async_engine(
+        f"sqlite+aiosqlite:///{tmp_path / 'crash.db'}", poolclass=StaticPool
+    )
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+
+    async def scenario() -> None:
+        async with engine.begin() as connection:
+            await connection.run_sync(Base.metadata.create_all)
+        async with sessions() as session:
+            challenge = Challenge(
+                name="crash", target_url="http://target.test", allowed_hosts=["target.test"]
+            )
+            session.add(challenge)
+            await session.flush()
+            run = SolveRun(
+                challenge_id=challenge.id, workspace_path=str(tmp_path), status="RUNNING"
+            )
+            session.add(run)
+            await session.commit()
+            run_id = run.id
+
+        # ``run_background`` imports SessionLocal inside the method, so the
+        # module attribute is what has to point at this test's engine.
+        monkeypatch.setattr("app.core.database.SessionLocal", sessions)
+
+        supervisor = RunSupervisor()
+
+        async def explode(*_args, **_kwargs):
+            raise RuntimeError("session died under the runtime")
+
+        monkeypatch.setattr(supervisor, "continue_until_terminal", explode)
+
+        outcome = await supervisor.run_background(run_id)
+
+        assert outcome.status == "FAILED_ENGINE"
+        assert outcome.error_code == "SUPERVISOR_CRASHED"
+        async with sessions() as session:
+            reloaded = await session.get(SolveRun, run_id)
+            assert str(reloaded.status) == "FAILED_ENGINE"
+            assert reloaded.last_error_code == "SUPERVISOR_CRASHED"
+            assert "session died under the runtime" in (reloaded.last_error_message or "")
+
+    asyncio.run(scenario())
+    asyncio.run(engine.dispose())
+
+
+def test_a_crash_while_waiting_for_the_user_keeps_the_run_answerable(tmp_path, monkeypatch) -> None:
+    """WAITING_USER must survive a crash of the continuation task.
+
+    It is the one non-terminal status where a human still owns the Run and can
+    answer the pending question.  Scoring it FAILED_ENGINE would destroy the
+    operator's only way back in, so the crash is recorded and the entry point
+    is left open.
+    """
+
+    engine = create_async_engine(
+        f"sqlite+aiosqlite:///{tmp_path / 'waiting.db'}", poolclass=StaticPool
+    )
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+
+    async def scenario() -> None:
+        async with engine.begin() as connection:
+            await connection.run_sync(Base.metadata.create_all)
+        async with sessions() as session:
+            challenge = Challenge(
+                name="waiting", target_url="http://target.test", allowed_hosts=["target.test"]
+            )
+            session.add(challenge)
+            await session.flush()
+            run = SolveRun(
+                challenge_id=challenge.id,
+                workspace_path=str(tmp_path),
+                status="WAITING_USER",
+            )
+            session.add(run)
+            await session.commit()
+            run_id = run.id
+
+        monkeypatch.setattr("app.core.database.SessionLocal", sessions)
+
+        supervisor = RunSupervisor()
+
+        async def explode(*_args, **_kwargs):
+            raise RuntimeError("continuation died")
+
+        monkeypatch.setattr(supervisor, "continue_after_user_input", explode)
+
+        outcome = await supervisor.run_after_user_input_background(run_id)
+
+        assert outcome.status == "WAITING_USER"
+        async with sessions() as session:
+            reloaded = await session.get(SolveRun, run_id)
+            assert str(reloaded.status) == "WAITING_USER"
+
+    asyncio.run(scenario())
+    asyncio.run(engine.dispose())
+
+
+def test_the_user_input_continuation_also_closes_the_run_it_crashed_on(
+    tmp_path, monkeypatch
+) -> None:
+    """The user-input path owns the Run for exactly as long as it lives.
+
+    It is the second entry point with the same shape as ``run_background``:
+    a task that unregisters itself in ``finally``.  An escape from either one
+    leaves a row no endpoint can reach, so both need the same closing.
+    """
+
+    engine = create_async_engine(
+        f"sqlite+aiosqlite:///{tmp_path / 'waiting2.db'}", poolclass=StaticPool
+    )
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+
+    async def scenario() -> None:
+        async with engine.begin() as connection:
+            await connection.run_sync(Base.metadata.create_all)
+        async with sessions() as session:
+            challenge = Challenge(
+                name="waiting2", target_url="http://target.test", allowed_hosts=["target.test"]
+            )
+            session.add(challenge)
+            await session.flush()
+            run = SolveRun(
+                challenge_id=challenge.id, workspace_path=str(tmp_path), status="RUNNING"
+            )
+            session.add(run)
+            await session.commit()
+            run_id = run.id
+
+        monkeypatch.setattr("app.core.database.SessionLocal", sessions)
+
+        supervisor = RunSupervisor()
+
+        async def explode(*_args, **_kwargs):
+            raise RuntimeError("continuation died")
+
+        monkeypatch.setattr(supervisor, "continue_after_user_input", explode)
+
+        outcome = await supervisor.run_after_user_input_background(run_id)
+
+        assert outcome.status == "FAILED_ENGINE"
+        assert outcome.error_code == "SUPERVISOR_CRASHED"
+        async with sessions() as session:
+            reloaded = await session.get(SolveRun, run_id)
+            assert str(reloaded.status) == "FAILED_ENGINE"
+            assert reloaded.last_error_code == "SUPERVISOR_CRASHED"
+
+    asyncio.run(scenario())
+    asyncio.run(engine.dispose())
+
+
+def test_the_end_of_a_muteki_session_reaps_a_sandbox_that_outlived_finalize(monkeypatch) -> None:
+    """A Run returning to the supervisor must not leave a container behind.
+
+    Measured 2026-10-19: Run ``59de9927`` reached COMPLETED_SOLVED at 16:42:22
+    while its container had been started at 16:42:21 -- after the Coordinator's
+    Finalize teardown -- and sat idle with only ``runtime_agent`` inside.  No
+    owner was left to reap it, so it survived until the next service restart.
+
+    The listing is consulted first so an ordinary Run pays one ``docker ps -a``
+    instead of a teardown call, and an *unknown* listing must fall through to
+    asking: "could not list" is not "nothing is there".
+    """
+
+    calls: list[str] = []
+    import muteki.solver.container_exec as container_exec
+    from app.services import run_supervisor as module
+
+    monkeypatch.setattr(
+        container_exec, "teardown_container", lambda *_a, **_k: calls.append("teardown")
+    )
+    # This case is about the immediate pass; the late window is covered below.
+    monkeypatch.setattr(module, "_LATE_REAP_DELAYS", ())
+
+    async def scenario() -> None:
+        monkeypatch.setattr(module, "_runs_owning_a_container", lambda _ids: ["run-1"])
+        await module._reap_muteki_container("run-1")
+        assert calls == ["teardown"], "a container that exists must be torn down"
+
+        calls.clear()
+        monkeypatch.setattr(module, "_runs_owning_a_container", lambda _ids: [])
+        await module._reap_muteki_container("run-2")
+        assert calls == [], "no container means no docker teardown call"
+
+        calls.clear()
+        monkeypatch.setattr(module, "_runs_owning_a_container", lambda _ids: None)
+        await module._reap_muteki_container("run-3")
+        assert calls == ["teardown"], "an unknown listing must not be read as empty"
+
+    asyncio.run(scenario())
+
+
+def test_a_sandbox_provisioned_after_the_run_finished_is_still_reaped(monkeypatch) -> None:
+    """The teardown at Run end is not late enough on its own.
+
+    Measured 2026-10-20 on the UNSOLVED path: Run ``eaf1de66`` reached
+    COMPLETED_UNSOLVED at 00:00:45 and its Sandbox was started at 00:00:48.7 --
+    three seconds after the only teardown that will ever know its name.  It then
+    idled until someone noticed.  Provisioning can also start from the A-lane
+    ``python_run`` channel, which never passes the official Worker's ``_stopped``
+    guard, so the late arrival cannot be prevented at the source either.
+    """
+
+    calls: list[str] = []
+    import muteki.solver.container_exec as container_exec
+    from app.services import run_supervisor as module
+
+    monkeypatch.setattr(
+        container_exec, "teardown_container", lambda *_a, **_k: calls.append("teardown")
+    )
+    monkeypatch.setattr(module, "_LATE_REAP_DELAYS", (0.0, 0.0))
+
+    listings = iter([[], ["run-9"]])
+
+    async def scenario() -> None:
+        monkeypatch.setattr(module, "_runs_owning_a_container", lambda _ids: next(listings))
+        await module._reap_muteki_container("run-9")
+        # Gone at Run end -- the immediate pass correctly does nothing.
+        assert calls == []
+        # ...and appears while the late window is still open.
+        pending = list(module._late_reap_tasks)
+        assert pending, "the late window must be scheduled"
+        for task in pending:
+            await task
+        assert calls == ["teardown"]
+
+    asyncio.run(scenario())

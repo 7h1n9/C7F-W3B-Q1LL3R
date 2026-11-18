@@ -1,0 +1,13 @@
+name: '[SCTF2018]BabySyc'
+category: web
+keywords:
+- sctf2018
+- babysyc
+steps:
+- '[codex] FOUND_FLAG=<FLAG>'
+- Native Worker completed a bounded evidence-backed observation
+evidence_chain:
+- '[codex] FOUND_FLAG=<FLAG>'
+success_format: CTF2\{[^}]+\}
+source: 0b34aa27-7ee7-4e9e-9bf8-1154f1b1890d (solver a3275fd9-517f-41fc-ad77-beead42f26e6)
+notes: ''

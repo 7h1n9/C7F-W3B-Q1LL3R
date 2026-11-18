@@ -8,7 +8,6 @@ from __future__ import annotations
 
 from typing import Any
 
-
 VALID_BASE_ENGINES = ("claude", "codex", "cursor")
 TRANSPORT_TO_ENGINE = {
     "claude": "claude",

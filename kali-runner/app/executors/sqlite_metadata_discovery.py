@@ -10,7 +10,7 @@ from typing import Any
 
 from fastapi import HTTPException
 
-from app.executors.boolean_config_extract import _set_field, _spec, _oracle
+from app.executors.boolean_config_extract import _set_field, _spec
 from app.executors.http_executor import execute_http
 from app.executors.target_allowlist import target_allowed
 from app.models import JobRequest

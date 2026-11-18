@@ -1,0 +1,20 @@
+name: '[NewStarCTF 公开赛赛道]UnserializeOne 42b864c7f2fc'
+category: web
+keywords:
+- newstarctf
+- unserializeone
+- php
+steps:
+- 'UnserializeOne: POST pop = serialized Start->Sec->Easy->eeee->Start->Sec graph
+  triggers Sec::__invoke which echo file_get_contents(''/flag''); payload at shared/serializeone_payload.txt;
+  flag <FLAG>'
+- '[codex] FOUND_FLAG=<FLAG>'
+- Native Worker completed a bounded evidence-backed observation
+evidence_chain:
+- 'UnserializeOne: POST pop = serialized Start->Sec->Easy->eeee->Start->Sec graph
+  triggers Sec::__invoke which echo file_get_contents(''/flag''); payload at shared/serializeone_payload.txt;
+  flag <FLAG>'
+- '[codex] FOUND_FLAG=<FLAG>'
+success_format: CTF2\{[^}]+\}
+source: 42b864c7-f2fc-42b1-9e0b-8ffbf409e58d (solver 5bed7006-cdf4-441c-8dfc-9a3e12817f73)
+notes: ''

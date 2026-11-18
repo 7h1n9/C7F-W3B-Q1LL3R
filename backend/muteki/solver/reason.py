@@ -23,8 +23,6 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
-from muteki.models.solve_graph import SolveGraph
-
 
 @dataclass
 class Intent:
@@ -93,16 +91,16 @@ Output JSON:
   "goal_met": false,
   "complete_why": "<only if verdict=complete: why the goal is already proven>",
   "drift": "<only if verdict=course_correct: what's going wrong + the correct direction>",
-	  "intents": [
-	    {"id": "I1", "from": [3, 7], "goal": "<one concrete, independent next direction>",
-	     "worker_class": "code", "route_hash": "web:login:sqli", "branch_id": "",
-	     "lane_key": "", "risk_class": "",
-	     "depends_on": [], "rationale": "<why>", "dup_of": null,
-	     "reopen_because": ""}
-	  ],
-	  "pinned_facts": [3, 7],
-	  "audit": ["<fact text you do NOT trust and why>"]
-	}
+  "intents": [
+    {"id": "I1", "from": [3, 7], "goal": "<one concrete, independent next direction>",
+     "worker_class": "code", "route_hash": "web:login:sqli", "branch_id": "",
+     "lane_key": "", "risk_class": "",
+     "depends_on": [], "rationale": "<why>", "dup_of": null,
+     "reopen_because": ""}
+  ],
+  "pinned_facts": [3, 7],
+  "audit": ["<fact text you do NOT trust and why>"]
+}
 
 Rules:
 - Each intent MUST include a "from" array of fact sequence numbers (the [#N] tags
@@ -182,16 +180,16 @@ Output JSON:
   "goal_met": false,
   "complete_why": "<only if verdict=complete: why the engagement goal is proven>",
   "drift": "<only if verdict=course_correct: what's going wrong + the correct direction>",
-	  "intents": [
-	    {"id": "I1", "from": [3, 7], "goal": "<one concrete, independent next direction>",
-	     "worker_class": "code", "route_hash": "web:login:sqli", "branch_id": "",
-	     "lane_key": "", "risk_class": "",
-	     "depends_on": [], "rationale": "<why>", "dup_of": null,
-	     "reopen_because": ""}
-	  ],
-	  "pinned_facts": [3, 7],
-	  "audit": ["<finding text you do NOT trust and why>"]
-	}
+  "intents": [
+    {"id": "I1", "from": [3, 7], "goal": "<one concrete, independent next direction>",
+     "worker_class": "code", "route_hash": "web:login:sqli", "branch_id": "",
+     "lane_key": "", "risk_class": "",
+     "depends_on": [], "rationale": "<why>", "dup_of": null,
+     "reopen_because": ""}
+  ],
+  "pinned_facts": [3, 7],
+  "audit": ["<finding text you do NOT trust and why>"]
+}
 
 Rules:
 - Each intent MUST include a "from" array of fact sequence numbers (the [#N] tags

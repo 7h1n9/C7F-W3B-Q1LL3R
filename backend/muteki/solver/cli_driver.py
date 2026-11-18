@@ -20,23 +20,24 @@ This module is pure (builds argv + parses output); the solver runs the subproces
 from __future__ import annotations
 
 import abc
+import contextlib as _contextlib
 import json
 import os
 import re
 import shutil
 import signal
 import subprocess
+import tempfile
 import threading
 import time
 import uuid
-from datetime import datetime, timezone
 from dataclasses import dataclass, field
+from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-from muteki.core.cost import PRICES, CODEX_CACHED_INPUT_PER_M, _DEFAULT_PRICE
+from muteki.core.cost import _DEFAULT_PRICE, CODEX_CACHED_INPUT_PER_M, PRICES
 from muteki.solver.worker_profiles import base_engine_for_profile, profile_uses_endpoint
-
 
 # ── engine binary resolution ─────────────────────────────────────────────────
 # A worker shells `subprocess.run(["claude", ...])`, which resolves the FIRST
@@ -66,9 +67,17 @@ _ENV_OVERRIDE = {
 # scan for the engine "cursor" must actually look for `cursor-agent`.
 _BIN_NAME = {"cursor": "cursor-agent"}
 
-# Official / first-party install locations we trust, highest first. `~` expanded
-# at resolve time. The local native installer and Homebrew cask are the two
-# blessed macOS paths; /usr/local/bin covers a plain npm global on Linux.
+# Official / first-party install locations we trust, highest first. `~` and
+# `%VAR%` are expanded at resolve time. The local native installer and Homebrew
+# cask are the two blessed macOS paths; /usr/local/bin covers a plain npm global
+# on Linux.
+#
+# Cursor's Windows-native installer (`irm 'https://cursor.com/install?win32=true'`)
+# is deliberately listed: it drops a `cursor-agent.cmd`/`.ps1` shim into
+# %LOCALAPPDATA%\cursor-agent and appends that directory to the *user* PATH. A
+# process already running when the install happened never sees the new PATH, and
+# a .cmd shim is not an .exe, so a bare PATH scan misses it. Naming the location
+# here makes resolution independent of when the installer ran.
 _KNOWN_GOOD = {
     "claude": [
         "~/.local/bin/claude",
@@ -84,6 +93,8 @@ _KNOWN_GOOD = {
         "~/.local/bin/cursor-agent",
         "/opt/homebrew/bin/cursor-agent",
         "/usr/local/bin/cursor-agent",
+        # Windows native installer (see note above).
+        "%LOCALAPPDATA%/cursor-agent/cursor-agent.cmd",
     ],
 }
 
@@ -129,7 +140,9 @@ def resolve_engine_bin(name: str) -> str:
 
     # 2. known-good install locations
     for cand in _KNOWN_GOOD.get(name, []):
-        p = os.path.expanduser(cand)
+        # expandvars first: Windows entries are written as %LOCALAPPDATA%/...,
+        # and expanduser alone leaves %VAR% untouched.
+        p = os.path.expanduser(os.path.expandvars(cand))
         if Path(p).exists() and not _looks_bad(p) and _runs_ok(p):
             return p
 
@@ -157,7 +170,7 @@ def resolve_engine_bin_source(name: str) -> str:
     if env and os.environ.get(env):
         return "env"
     for cand in _KNOWN_GOOD.get(name, []):
-        p = os.path.expanduser(cand)
+        p = os.path.expanduser(os.path.expandvars(cand))
         if Path(p).exists() and not _looks_bad(p) and _runs_ok(p):
             return "known-good"
     bin_basename = _BIN_NAME.get(name, name)
@@ -198,8 +211,28 @@ class CliResult:
     # cost — still gets priced from its tokens). cursor reports neither.
     input_tokens: Optional[int] = None
     output_tokens: Optional[int] = None
+    # Cache buckets are reported separately by both vendors (claude:
+    # cache_read_input_tokens / cache_creation_input_tokens, cursor:
+    # cacheReadTokens / cacheWriteTokens).  Kept apart from input_tokens so a
+    # billed-input view can exclude cache hits, which price differently.
+    cache_read_tokens: Optional[int] = None
+    cache_write_tokens: Optional[int] = None
+    reasoning_tokens: Optional[int] = None
+    # True when the token counts were inferred (streamed estimate / chars-per-token
+    # floor) rather than reported by the vendor.  The cost ledger must not present
+    # an inferred number as a metered one.
+    usage_estimated: bool = False
+    cost_estimated: bool = False
+    # Stable identity for one usage record, so a caller that observes the same
+    # turn twice (final parse + stream tail) can de-duplicate instead of
+    # double-counting the spend.
+    usage_id: str = field(default_factory=lambda: uuid.uuid4().hex)
     num_turns: Optional[int] = None
     elapsed_s: float = 0.0
+    # Real subprocess exit status. Parsers normalize vendor output and cannot infer
+    # process success from response text alone, so execution layers attach this
+    # after the child exits. None means the runner could not observe an exit code.
+    returncode: Optional[int] = None
     timed_out: bool = False
     # OOM-killed: the worker's process was SIGKILL'd by the kernel out-of-memory
     # killer (a sibling run's container ballooned and starved the Docker VM — no
@@ -210,13 +243,23 @@ class CliResult:
     # at 60s with an empty transcript is an OOM victim, NOT a 2400s timeout, and
     # mislabeling it as "timeout" sent diagnosis down the wrong path.
     oom_killed: bool = False
+    # Stream capture exceeded the configured stdout/stderr budget, or the workdir
+    # grew past its disk budget.  Distinct from timeout so diagnostics can name
+    # which ceiling was hit.
+    output_limit: bool = False
+    disk_limit: bool = False
     cancelled: bool = False         # killed by a cancel_event (winner found / abort)
     steered: bool = False           # ended early by a steer_event — END THIS PASS but
     #   KEEP the session id (operator hint/redirect). The worker does NOT resume on
     #   steered (no resume loop under single-shot); the guidance flows to the next
     #   spawned worker. Used only to avoid downgrading _session_established on the cut
     #   pass. Distinct from `cancelled` (= die).
+    finished: bool = False          # commit-step ended this Worker normally
     raw_stderr: str = ""
+    # Vendor/protocol failure detail.  Diagnostics stay diagnostics and are never
+    # copied into ``text`` as a fabricated assistant response — the provenance
+    # gate must not be able to read an error string as an agent reply.
+    error: str = ""
     runtime_status: dict = field(default_factory=dict)
 
 
@@ -244,11 +287,243 @@ class StreamStep:
     # summarized CliResult.text). Empty for non-tool_result steps; callers fall back
     # to `text` when `raw` is unset.
     raw: str = ""         # untruncated tool output (kind == "tool_result")
+    # FULL, UNTRUNCATED command text (kind == "tool"). Same split as ``raw`` above,
+    # for the same reason: ``text`` is the deck preview, this is what gets recorded.
+    #
+    # ``text`` used to be the ONLY copy, clipped to 300 chars at the parser, and
+    # every trace event inherited that clip. Measured 2026-11-05: of 22,819
+    # recorded commands the longest was 332 chars and 8,790 were exactly 300 — so
+    # not a single multi-line exploit (OGNL expression, gremlin statement, pickle
+    # script, heredoc body) survived intact. That silently capped the whole
+    # payload-mining effort at ~258 usable chars, and no downstream fix could
+    # recover what was cut here.
+    command: str = ""     # untruncated command (kind == "tool")
+    call_id: str = ""     # pairs tool with tool_result when the engine exposes one
+    # Cursor can replace large shell output with an outputLocation pointer. Keep it
+    # metadata-only here: the pure driver must not read an engine-supplied path, and
+    # path text must never masquerade as command output. CliSolver validates and reads
+    # it relative to the active worker cwd, where local/container topology is known.
+    spill_path: str = ""
+    spill_size_bytes: int = -1
+    spill_line_count: int = -1
+    # True for Runtime-provided thinking/reasoning blocks. Conversation maps these
+    # onto its dedicated reasoning stream; they remain excluded from the answer
+    # accumulator because message_end snapshots repeat only the answer text.
+    thinking: bool = False
+
+
+class SecurePromptUnsupported(RuntimeError):
+    """The selected CLI cannot accept a secret prompt without argv/disk exposure."""
+
+
+class LaunchPurpose(str, Enum):
+    """Why a CLI process is being launched."""
+
+    WORKER = "worker"
+    CONVERSATION = "conversation"
+    MANAGEMENT = "management"
+
+
+@dataclass(frozen=True)
+class LaunchContext:
+    """Launch-time policy input shared by every CLI driver.
+
+    ``permission_mode`` is an opaque identifier owned by the selected Agent.
+    An empty value means that interactive launches inherit the Agent default.
+    """
+
+    purpose: LaunchPurpose = LaunchPurpose.WORKER
+    permission_mode: str = ""
+    sandbox_mode: str = ""
+
+    @property
+    def interactive(self) -> bool:
+        return self.purpose in {
+            LaunchPurpose.CONVERSATION,
+            LaunchPurpose.MANAGEMENT,
+        }
+
+
+WORKER_LAUNCH = LaunchContext()
+
+
+def _structured_cli_error(stdout: str) -> str:
+    """Extract an explicit vendor error from JSON/JSONL output.
+
+    Several CLIs exit zero after reporting a model/provider error in-band.  Only
+    error-shaped envelopes are inspected; ordinary assistant ``message`` fields
+    are deliberately ignored — otherwise a normal reply that happens to mention
+    an error would be reclassified as a failed turn.
+    """
+    documents: list[Any] = []
+    try:
+        documents.append(json.loads(stdout))
+    except (json.JSONDecodeError, TypeError):
+        for line in stdout.splitlines():
+            line = line.strip()
+            if not line.startswith("{"):
+                continue
+            try:
+                documents.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+
+    def detail(value: Any) -> str:
+        if isinstance(value, str):
+            return value.strip()
+        if isinstance(value, dict):
+            for key in ("message", "detail", "errorMessage", "reason", "code"):
+                text = detail(value.get(key))
+                if text:
+                    return text
+            return json.dumps(value, ensure_ascii=False)[:1000]
+        if isinstance(value, list):
+            return "; ".join(filter(None, (detail(item) for item in value)))[:1000]
+        return str(value).strip() if value is not None else ""
+
+    for item in documents:
+        if not isinstance(item, dict):
+            continue
+        if item.get("errorMessage"):
+            return detail(item["errorMessage"])
+        stop_reason = str(item.get("stopReason") or item.get("stop_reason") or "").lower()
+        event_type = str(item.get("type") or "").lower()
+        status = str(item.get("status") or "").lower()
+        turn = item.get("turn") if isinstance(item.get("turn"), dict) else {}
+        turn_status = str(turn.get("status") or "").lower()
+        failed = (
+            bool(item.get("is_error"))
+            or stop_reason in {"error", "failed", "refusal"}
+            or status in {"error", "failed"}
+            or turn_status in {"error", "failed", "interrupted"}
+            or event_type in {"error", "turn.failed", "turn/error", "fatal"}
+            or event_type.endswith(".error")
+        )
+        if not failed:
+            continue
+        for value in (
+            item.get("error"), turn.get("error"), item.get("result"),
+            item.get("message"), item.get("reason"), stop_reason,
+        ):
+            text = detail(value)
+            if text:
+                return text
+        return f"CLI reported {event_type or status or turn_status or 'failure'}"
+    return ""
+
+
+def _cli_stderr_failure_detail(stderr: str) -> str:
+    """Pick a useful stderr tail, dropping launcher update chatter.
+
+    Host wrappers such as clawgod print ``[clawgod] vX available … run 'claude
+    update'`` on every invocation.  That banner is not the turn failure and must
+    not replace a structured model/provider error from stdout.
+    """
+    kept: list[str] = []
+    for line in (stderr or "").splitlines():
+        text = line.strip()
+        if not text:
+            continue
+        lower = text.lower()
+        if "available (installed:" in lower and "update" in lower:
+            continue
+        if lower.startswith("[clawgod]") and "update" in lower:
+            continue
+        if "run 'claude update'" in lower or 'run "claude update"' in lower:
+            continue
+        kept.append(text)
+    return "\n".join(kept[-12:])[-1800:]
+
+
+def finalize_cli_result(
+    result: CliResult,
+    *,
+    driver_name: str,
+    stdout: str,
+    stderr: str,
+    returncode: Optional[int],
+) -> CliResult:
+    """Attach the process/protocol outcome without manufacturing reply text."""
+
+    result.returncode = returncode
+    if not result.error:
+        result.error = _structured_cli_error(stdout)
+    terminal = (
+        result.cancelled
+        or result.steered
+        or result.timed_out
+        or result.oom_killed
+        or result.output_limit
+        or result.disk_limit
+    )
+    if returncode not in (None, 0) and not terminal:
+        # Prefer the in-band / structured error.  Only fall back to stderr when
+        # stdout did not explain the failure (and after dropping update noise).
+        if not result.error:
+            tail = _cli_stderr_failure_detail(stderr)
+            result.error = tail or f"{driver_name} exited with code {returncode}"
+    if not (result.text or "").strip() and not result.error and not terminal:
+        result.error = f"{driver_name} turn ended without assistant text"
+    return result
+
+
+_SECURE_HELP_CACHE: "dict[tuple[str, int, tuple[str, ...], tuple[str, ...]], tuple[bool, str]]" = {}
+_SECURE_HELP_LOCK = threading.Lock()
+
+
+def _secure_help_preflight(
+    binary: str, help_args: list[str], required: tuple[str, ...],
+) -> "tuple[bool, str]":
+    """Verify the installed CLI advertises every flag/pipe semantic we rely on.
+
+    This sends no model prompt and uses no credentials. The cache key includes the
+    resolved binary mtime, so replacing/upgrading a CLI automatically revalidates it.
+    """
+    resolved = os.path.realpath(binary)
+    try:
+        mtime_ns = int(os.stat(resolved).st_mtime_ns)
+    except OSError:
+        mtime_ns = 0
+    key = (resolved, mtime_ns, tuple(help_args), required)
+    with _SECURE_HELP_LOCK:
+        cached = _SECURE_HELP_CACHE.get(key)
+    if cached is not None:
+        return cached
+    try:
+        proc = subprocess.run(
+            [binary, *help_args], capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=20,
+            stdin=subprocess.DEVNULL)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        result = False, f"secure prompt capability probe failed: {exc}"
+    else:
+        help_text = f"{proc.stdout or ''}\n{proc.stderr or ''}".lower()
+        missing = [token for token in required if token.lower() not in help_text]
+        if proc.returncode != 0:
+            result = False, f"secure prompt capability probe exited {proc.returncode}"
+        elif missing:
+            result = False, "secure prompt flags unavailable: " + ", ".join(missing)
+        else:
+            result = True, ""
+    with _SECURE_HELP_LOCK:
+        _SECURE_HELP_CACHE[key] = result
+    return result
 
 
 class CliDriver(abc.ABC):
     """A thin per-CLI shelled-executor adapter."""
     name: str
+    # Scheduler-visible capability: exact secret context may only select drivers
+    # that guarantee stdin transport AND non-persistent CLI state.
+    secure_prompt_transport = False
+    # A non-secret prompt may be piped without disabling the CLI's persisted
+    # session. Drivers must opt in only when their print mode supports this.
+    persistent_stdin_prompt = False
+    # Scheduler-visible capability: ``web_access=False`` is meaningful only when
+    # this transport can make the worker's native web tools unavailable.  Keep
+    # this separate from endpoint choice: a Claude CLI pointed at an Anthropic-
+    # compatible model endpoint still owns exactly the same local tool surface.
+    offline_web_isolation = False
 
     # resolved once, then cached — the actual binary this driver invokes. We pin
     # to a runnable OFFICIAL install instead of bare `self.name` so a broken
@@ -269,6 +544,64 @@ class CliDriver(abc.ABC):
         """A pre-seeded session id, or None if the engine assigns one itself."""
         return None
 
+    def version_argv(self) -> list[str]:
+        """只读设备版本探测命令；特殊桥接 Driver 可以覆写。"""
+        return [self.bin, "--version"]
+
+    def build_execute_stdin(
+        self,
+        prompt: str,
+        session: Optional[str],
+        *,
+        web_access: bool = True,
+        kb_access: bool = True,
+        stream: bool = False,
+        launch: "LaunchContext" = WORKER_LAUNCH,
+    ) -> list[str]:
+        """Build a fresh, non-persistent invocation whose prompt is read from stdin.
+
+        This is deliberately a separate capability from ``build_execute``.  Exact
+        operator secrets must never be smuggled through a positional argument (where
+        sibling processes can read them from the process table), and the engine must
+        offer a documented way to avoid persisting the resulting conversation.  A
+        driver that cannot satisfy both requirements fails closed.
+        """
+        del prompt, session, web_access, kb_access, stream, launch
+        raise SecurePromptUnsupported(
+            f"{self.name} does not support non-persistent stdin prompt delivery")
+
+    def secure_prompt_preflight(self) -> "tuple[bool, str]":
+        """Capability-neutral local check for the exact-secret CLI contract."""
+        return False, f"{self.name} has no secure stdin prompt capability"
+
+    def env_extra(self) -> "dict[str, str]":
+        """Engine-specific default env for every worker run (merged UNDER any
+        credential overlay, so explicit account/env values always win). Default:
+        nothing."""
+        return {}
+
+    def native_permission_modes(self) -> tuple[str, ...]:
+        """Return the permission mode identifiers accepted by this CLI itself."""
+        return ()
+
+    def native_sandbox_modes(self) -> tuple[str, ...]:
+        """Return the sandbox identifiers accepted by this CLI itself."""
+        return ()
+
+    def validate_launch_context(self, launch: "LaunchContext") -> str:
+        """Validate and return the opaque native permission identifier."""
+        mode = str(launch.permission_mode or "").strip()
+        if launch.interactive and mode not in ("", *self.native_permission_modes()):
+            raise ValueError(
+                f"{self.name} unsupported native permission mode: {mode}")
+        return mode
+
+    def validate_sandbox_mode(self, launch: "LaunchContext") -> str:
+        mode = str(launch.sandbox_mode or "").strip()
+        if launch.interactive and mode not in ("", *self.native_sandbox_modes()):
+            raise ValueError(f"{self.name} unsupported native sandbox mode: {mode}")
+        return mode
+
     # The optional KB MCP (if configured via MUTEKI_KB_MCP_NAME) is registered at
     # user scope and inherited by every worker; to run a worker WITHOUT it we deny
     # its mcp tools by server prefix. Empty name → no prefix → nothing to deny.
@@ -283,6 +616,7 @@ class CliDriver(abc.ABC):
         web_access: bool = True,
         kb_access: bool = True,
         stream: bool = False,
+        launch: "LaunchContext" = WORKER_LAUNCH,
     ) -> list[str]:
         """argv for a fresh focused run.
 
@@ -325,6 +659,7 @@ class CliDriver(abc.ABC):
         web_access: bool = True,
         kb_access: bool = True,
         stream: bool = False,
+        launch: "LaunchContext" = WORKER_LAUNCH,
     ) -> list[str]:
         """argv to resume `session` with a follow-up (conclude/refine) turn."""
 
@@ -339,8 +674,10 @@ class CliDriver(abc.ABC):
     # so the self-check is symmetric: claude no longer the only one that really
     # talks to its backend while codex/cursor merely checked a version string.
     HELLO_PROMPT = "Reply with exactly: OK"
-    _HELLO_TIMEOUT = 60      # one cold turn can take ~18s; leave generous headroom
-    _HELLO_RETRIES = 1       # retry once on a transient miss before calling it dead
+    # DeepSeek-via-Anthropic cold turns (esp. thinking models) routinely exceed a
+    # 30s budget; a single-shot 60s probe false-fails the roster under load.
+    _HELLO_TIMEOUT = 120     # one cold turn can take ~18s; leave generous headroom
+    _HELLO_RETRIES = 2       # retry on a transient miss before calling it dead
 
     def _hello_argv(self) -> list[str]:
         """argv for a minimal one-turn 'say hello' probe. Engines that can't run a
@@ -433,9 +770,21 @@ _FLAG_LINE = re.compile(r"FOUND_FLAG=\s*(\S+)")
 
 
 class ClaudeCodeDriver(CliDriver):
-    """`claude -p` — pre-seeds a uuid session; resumes with `-r`. Bare host,
+    """`claude -p` — pre-seeds a uuid session; resumes with `-r`. Host CLI,
     --dangerously-skip-permissions (full shell), JSON output for clean parsing."""
     name = "claude"
+    secure_prompt_transport = True
+    offline_web_isolation = True
+
+    def native_permission_modes(self) -> tuple[str, ...]:
+        return ("acceptEdits", "auto", "bypassPermissions", "manual",
+                "dontAsk", "plan")
+
+    def _permission_flags(self, launch: LaunchContext) -> list[str]:
+        mode = self.validate_launch_context(launch)
+        if not launch.interactive:
+            return ["--dangerously-skip-permissions"]
+        return ["--permission-mode", mode] if mode else []
 
     def new_session(self) -> Optional[str]:
         return str(uuid.uuid4())
@@ -443,6 +792,7 @@ class ClaudeCodeDriver(CliDriver):
     # claude exposes WebSearch + WebFetch by default; deny them for a clean
     # (offline) eval so the agent can't fetch a challenge writeup.
     _WEB_TOOLS = ["WebSearch", "WebFetch"]
+    _EMPTY_MCP_CONFIG = '{"mcpServers":{}}'
 
     def _denied(self, *, web_access: bool, kb_access: bool) -> list[str]:
         """The --disallowed-tools list for this run (empty → flag omitted)."""
@@ -455,6 +805,18 @@ class ClaudeCodeDriver(CliDriver):
             deny.append(self.KB_TOOL_PREFIX)
         return ["--disallowed-tools", *deny] if deny else []
 
+    def _mcp_isolation(self, *, kb_access: bool) -> list[str]:
+        # A user can have several MCP servers, while MUTEKI_KB_MCP_NAME names at
+        # most one of them. Offline evaluation must exclude every external MCP
+        # without changing user configuration or hiding user Skills. Claude's
+        # strict config switch does exactly that for this child process.
+        if kb_access:
+            return []
+        return [
+            "--mcp-config", self._EMPTY_MCP_CONFIG,
+            "--strict-mcp-config",
+        ]
+
     def _fmt(self, stream: bool) -> list[str]:
         # stream-json emits one event per step (needs --verbose); json is a single
         # final doc. Both parse the same way via parse() on accumulated stdout.
@@ -464,62 +826,135 @@ class ClaudeCodeDriver(CliDriver):
     def build_execute(
         self, prompt: str, session: Optional[str], *,
         web_access: bool = True, kb_access: bool = True, stream: bool = False,
+        launch: LaunchContext = WORKER_LAUNCH,
     ) -> list[str]:
         argv = [self.bin, "-p", *self._fmt(stream),
-                "--dangerously-skip-permissions"]
+                *self._permission_flags(launch)]
         if session:
             argv += ["--session-id", session]
+        argv += self._mcp_isolation(kb_access=kb_access)
         argv += self._denied(web_access=web_access, kb_access=kb_access)
         argv += ["--", prompt]
         return argv
 
+    def build_execute_stdin(
+        self, prompt: str, session: Optional[str], *,
+        web_access: bool = True, kb_access: bool = True, stream: bool = False,
+        launch: LaunchContext = WORKER_LAUNCH,
+    ) -> list[str]:
+        # Claude print mode reads text input from stdin when no positional prompt is
+        # supplied.  --no-session-persistence is the vendor-supported disk fence;
+        # ProfileDriver adds --bare for injected credentials and endpoints. The
+        # base driver represents host system login and must retain Keychain access.
+        # Keep a trailing `--` sentinel so profile model injection has an unambiguous
+        # insertion point, but never put the prompt itself in argv.
+        del prompt, session
+        return [
+            self.bin, "-p", *self._fmt(stream),
+            *self._permission_flags(launch),
+            "--no-session-persistence",
+            *self._mcp_isolation(kb_access=kb_access),
+            *self._denied(web_access=web_access, kb_access=kb_access),
+            "--",
+        ]
+
+    def secure_prompt_preflight(self) -> "tuple[bool, str]":
+        return _secure_help_preflight(
+            self.bin, ["--help"],
+            ("--no-session-persistence", "--print"))
+
     def build_resume(
         self, prompt: str, session: str, *,
         web_access: bool = True, kb_access: bool = True, stream: bool = False,
+        launch: LaunchContext = WORKER_LAUNCH,
     ) -> list[str]:
         return [self.bin, "-r", session, "-p", *self._fmt(stream),
-                "--dangerously-skip-permissions",
+                *self._permission_flags(launch),
+                *self._mcp_isolation(kb_access=kb_access),
                 *self._denied(web_access=web_access, kb_access=kb_access),
                 "--", prompt]
 
     @staticmethod
-    def _usage_tokens(usage: dict) -> tuple[Optional[int], Optional[int]]:
-        """claude's result `usage` block → (input, output) tokens for the deck's
-        token column. Input counts the fresh + both cache buckets (read/creation);
-        output is the completion. None when the block is absent."""
+    def _usage_breakdown(usage: dict) -> tuple[Optional[int], Optional[int], Optional[int], Optional[int]]:
+        """claude's `usage` block → (input, output, cache_read, cache_write).
+
+        ``input`` counts the fresh prompt plus BOTH cache buckets, matching the
+        billed-input view the deck's token column already uses.  The cache buckets
+        are also returned separately so a caller that prices cache hits differently
+        is not forced to back them out of the total.  All four are None when the
+        block is absent.
+        """
         if not isinstance(usage, dict) or not usage:
-            return None, None
-        inp = (int(usage.get("input_tokens") or 0)
-               + int(usage.get("cache_read_input_tokens") or 0)
-               + int(usage.get("cache_creation_input_tokens") or 0))
+            return None, None, None, None
+        cache_read = int(usage.get("cache_read_input_tokens") or 0)
+        cache_write = int(usage.get("cache_creation_input_tokens") or 0)
+        inp = int(usage.get("input_tokens") or 0) + cache_read + cache_write
         outp = int(usage.get("output_tokens") or 0)
-        return (inp or None), (outp or None)
+        return (inp or None), (outp or None), (cache_read or None), (cache_write or None)
+
+    @staticmethod
+    def _usage_tokens(usage: dict) -> tuple[Optional[int], Optional[int]]:
+        """``(input, output)`` view of :meth:`_usage_breakdown`."""
+        inp, outp, _cache_read, _cache_write = ClaudeCodeDriver._usage_breakdown(usage)
+        return inp, outp
 
     def parse(self, stdout: str, stderr: str) -> CliResult:
+        result = self._parse_result(stdout, stderr)
+        # Cache buckets are only meaningful from the LAST usage-bearing event; the
+        # result envelope often omits them even when the stream carried them.
+        latest: dict = {}
+        for line in stdout.splitlines():
+            try:
+                event = json.loads(line)
+            except (ValueError, TypeError):
+                continue
+            if isinstance(event, dict) and isinstance(event.get("usage"), dict):
+                latest = event["usage"]
+        if latest:
+            result.cache_read_tokens = latest.get("cache_read_input_tokens")
+            result.cache_write_tokens = latest.get("cache_creation_input_tokens")
+        return result
+
+    def _parse_result(self, stdout: str, stderr: str) -> CliResult:
         # Plain --output-format json: one JSON document.
         try:
             d = json.loads(stdout)
-            inp, outp = self._usage_tokens(d.get("usage") or {})
+            inp, outp, cache_read, cache_write = self._usage_breakdown(d.get("usage") or {})
+            text = str(d.get("result", ""))
+            error = ""
+            if d.get("is_error"):
+                # Vendor error text lives in ``result``; do not project it as an
+                # assistant reply.
+                error = text.strip() or _structured_cli_error(stdout)
+                text = ""
             return CliResult(
-                text=str(d.get("result", "")),
+                text=text,
                 session=d.get("session_id"),
                 cost_usd=d.get("total_cost_usd"),
                 input_tokens=inp,
                 output_tokens=outp,
+                cache_read_tokens=cache_read,
+                cache_write_tokens=cache_write,
                 num_turns=d.get("num_turns"),
                 raw_stderr=stderr[-2000:],
+                error=error or _structured_cli_error(stdout),
             )
         except json.JSONDecodeError:
             pass
         # stream-json: many JSONL lines — the final {"type":"result",...} is the
         # outcome. Scan for it (and fall back to raw text if absent).
         result_text, session, cost, turns, inp, outp = "", None, None, None, None, None
+        result_is_error = False
+        estimated = False
+        message_usage: dict = {}
         # fallback usage from the LAST intermediate assistant message — a worker
         # KILLED mid-run (race loser / steer) never emits the final `result`, but
         # each assistant event carries a cumulative `usage` block, so the latest
         # one is the best estimate of what it burned. Without this, killed claude
         # workers report 0 tokens and their spend silently vanishes from the ledger.
         stream_in = stream_out = None
+        assistant_chars = 0
+        tool_use_count = 0
         for line in stdout.splitlines():
             line = line.strip()
             if not line or not line.startswith("{"):
@@ -530,25 +965,56 @@ class ClaudeCodeDriver(CliDriver):
                 continue
             if ev.get("type") == "result":
                 result_text = str(ev.get("result", ""))
+                result_is_error = bool(ev.get("is_error"))
                 cost = ev.get("total_cost_usd")
                 turns = ev.get("num_turns")
                 inp, outp = self._usage_tokens(ev.get("usage") or {})
             if ev.get("type") == "assistant":
-                u = (ev.get("message") or {}).get("usage")
-                si, so = self._usage_tokens(u or {})
-                if si is not None:
-                    stream_in = si
-                if so is not None:
-                    stream_out = so
+                msg = ev.get("message") or {}
+                si, so = self._usage_tokens(msg.get("usage") or {})
+                # Keyed by message id: a repeated snapshot of the same message must
+                # not be summed twice into the estimate.
+                key = str(msg.get("id") or json.dumps(msg, sort_keys=True))
+                message_usage[key] = (si, so)
+                stream_in = sum(pair[0] or 0 for pair in message_usage.values()) if any(pair[0] is not None for pair in message_usage.values()) else None
+                stream_out = sum(pair[1] or 0 for pair in message_usage.values()) if any(pair[1] is not None for pair in message_usage.values()) else None
+                for block in msg.get("content") or []:
+                    if not isinstance(block, dict):
+                        continue
+                    bt = str(block.get("type") or "")
+                    if bt == "text":
+                        assistant_chars += len(str(block.get("text") or ""))
+                    elif bt == "tool_use":
+                        tool_use_count += 1
+                        assistant_chars += len(json.dumps(block.get("input") or {}))
             if ev.get("session_id"):
                 session = ev["session_id"]
         if inp is None and outp is None:  # no final result → use the streamed estimate
             inp, outp = stream_in, stream_out
-        if result_text or session:
-            return CliResult(text=result_text, session=session, cost_usd=cost,
-                             input_tokens=inp, output_tokens=outp,
-                             num_turns=turns, raw_stderr=stderr[-2000:])
-        return CliResult(text=stdout[-8000:], raw_stderr=stderr[-2000:])
+        # Final result sometimes reports output_tokens=0 while stream usage (or
+        # visible assistant/tool content) proves the model produced tokens. Prefer
+        # the non-zero stream estimate so VOID cells don't fake "no output".
+        if (outp is None or int(outp or 0) == 0) and stream_out:
+            outp = stream_out
+        if (inp is None or int(inp or 0) == 0) and stream_in:
+            inp = stream_in
+        if (outp is None or int(outp or 0) == 0) and (assistant_chars or tool_use_count):
+            # Last-resort estimate when the vendor omitted usage on a killed turn.
+            estimated = True
+            outp = max(1, (assistant_chars // 4) + (tool_use_count * 32))
+        if (inp is None or int(inp or 0) == 0) and outp:
+            # Input is unknown; keep a conservative floor so cost.record can fire.
+            estimated = True
+            inp = int(outp)
+        error = _structured_cli_error(stdout)
+        if result_is_error:
+            error = (result_text.strip() or error)
+            result_text = ""
+        return CliResult(text=result_text, session=session, cost_usd=cost,
+                         usage_estimated=estimated,
+                         input_tokens=inp, output_tokens=outp,
+                         num_turns=turns, raw_stderr=stderr[-2000:],
+                         error=error)
 
     def parse_stream_line(self, line: str) -> Optional[StreamStep]:
         # single-step view (first step of the line); see parse_stream_steps for the
@@ -576,10 +1042,17 @@ class ClaudeCodeDriver(CliDriver):
                 bt = b.get("type")
                 if bt == "text" and b.get("text", "").strip():
                     steps.append(StreamStep("reasoning", text=b["text"].strip()))
+                elif bt == "thinking":
+                    thinking = str(b.get("thinking") or b.get("text") or "").strip()
+                    if thinking:
+                        steps.append(StreamStep(
+                            "reasoning", text=thinking, thinking=True))
                 elif bt == "tool_use":
                     inp = b.get("input", {}) or {}
-                    arg = inp.get("command") or inp.get("query") or inp.get("file_path") or ""
-                    steps.append(StreamStep("tool", tool=str(b.get("name", "")), text=str(arg)[:300]))
+                    arg = str(inp.get("command") or inp.get("query") or inp.get("file_path") or "")
+                    steps.append(StreamStep(
+                        "tool", tool=str(b.get("name", "")), text=arg[:300],
+                        command=arg, call_id=str(b.get("id") or "")))
         elif t == "user":
             for b in (ev.get("message", {}) or {}).get("content", []) or []:
                 if isinstance(b, dict) and b.get("type") == "tool_result":
@@ -587,18 +1060,28 @@ class ClaudeCodeDriver(CliDriver):
                     txt = c if isinstance(c, str) else json.dumps(c)
                     full = txt or ""
                     # text=truncated for the deck; raw=full for the provenance gate.
-                    steps.append(StreamStep("tool_result", text=full[:600], raw=full))
+                    steps.append(StreamStep(
+                        "tool_result", text=full[:600], raw=full,
+                        call_id=str(b.get("tool_use_id") or "")))
         return steps
 
     def _hello_argv(self) -> list[str]:
         # one-turn JSON dry-run; _hello_ok asserts the result envelope came back.
-        return [self.bin, "-p", "--output-format", "json", "--max-turns", "1",
-                "--", self.HELLO_PROMPT]
+        # Keep the minimal turn non-persistent. ProfileDriver adds --bare only for
+        # injected credentials/endpoints; host system login needs Keychain reads.
+        return [
+            self.bin, "-p", "--output-format", "json", "--max-turns", "1",
+            "--dangerously-skip-permissions", "--no-session-persistence",
+            *self._mcp_isolation(kb_access=False),
+            "--tools", "",
+            "--", self.HELLO_PROMPT,
+        ]
 
     def _hello_ok(self, r: "subprocess.CompletedProcess") -> bool:
-        # exit 0 AND a result envelope — proves the turn round-tripped, not just
-        # that the process started (a quota/auth refusal still exits with no result).
-        return r.returncode == 0 and '"result"' in (r.stdout or "")
+        if r.returncode != 0:
+            return False
+        parsed = self.parse(r.stdout or "", r.stderr or "")
+        return bool(parsed.text.strip()) and not parsed.error
 
 
 class CodexDriver(CliDriver):
@@ -621,11 +1104,15 @@ class CodexDriver(CliDriver):
     def build_execute(
         self, prompt: str, session: Optional[str], *,
         web_access: bool = True, kb_access: bool = True, stream: bool = False,
+        launch: LaunchContext = WORKER_LAUNCH,
     ) -> list[str]:
         # kb_access is a no-op for codex: the optional KB MCP is registered in
         # claude's user config, not codex's ~/.codex — codex doesn't inherit it.
         # `--json` already emits live per-step JSONL, so streaming needs no extra
         # flag — stream is accepted for interface parity.
+        # codex exposes no native permission-mode vocabulary; `exec` is already
+        # non-interactive, so `launch` carries no argv here.
+        del launch
         return [self.bin, *self._globals(web_access=web_access),
                 "exec", "--json", "--ignore-rules",
                 "--dangerously-bypass-approvals-and-sandbox",
@@ -634,7 +1121,9 @@ class CodexDriver(CliDriver):
     def build_resume(
         self, prompt: str, session: str, *,
         web_access: bool = True, kb_access: bool = True, stream: bool = False,
+        launch: LaunchContext = WORKER_LAUNCH,
     ) -> list[str]:
+        del launch
         return [self.bin, *self._globals(web_access=web_access),
                 "exec", "resume", session, "--json",
                 "--ignore-rules",
@@ -656,7 +1145,10 @@ class CodexDriver(CliDriver):
         it = item.get("type")
         # a shell command the agent is about to / did run
         if t == "item.started" and it == "command_execution":
-            return StreamStep("tool", tool="shell", text=str(item.get("command", ""))[:300])
+            cmd = str(item.get("command", ""))
+            # ``text`` stays a preview (this is what the live deck renders);
+            # ``command`` carries the whole thing so the trace can be replayed.
+            return StreamStep("tool", tool="shell", text=cmd[:300], command=cmd)
         if t == "item.completed":
             if it == "command_execution":
                 # aggregated_output carries the command's FULL stdout/stderr — including
@@ -775,6 +1267,29 @@ class CodexDriver(CliDriver):
         return False
 
 
+_POLICY_REFUSAL_RE = re.compile(
+    r"^\s*(?:sorry[,，:\s-]*)?(?:i\s+)?(?:"
+    r"can(?:not|['\N{RIGHT SINGLE QUOTATION MARK}]t)|"
+    r"won['\N{RIGHT SINGLE QUOTATION MARK}]t|will\s+not|do\s+not)\s+"
+    r"(?:help|assist|comply|support)\b",
+    re.IGNORECASE,
+)
+
+
+def _policy_refusal_error(text: str, *, used_tools: bool) -> str:
+    """Classify a zero-action Cursor refusal as an execution failure.
+
+    Cursor can exit zero with a normal-looking result envelope after declining
+    the assigned Worker role. Treating that as ``explored`` closes the intent
+    and lets the same profile consume later work. Keep the matcher deliberately
+    narrow and require that no tool call started, so an ordinary conclusion that
+    happens to mention a refusal is not reclassified.
+    """
+    if used_tools or not _POLICY_REFUSAL_RE.search(text or ""):
+        return ""
+    return "policy_refusal: cursor declined the assigned worker task"
+
+
 class CursorDriver(CliDriver):
     """`cursor-agent -p` — Cursor's headless terminal agent. The engine assigns the
     session (captured from the stream's `system.init`/`result` `session_id`);
@@ -782,16 +1297,33 @@ class CursorDriver(CliDriver):
     shell via `--force` + `--trust`. JSONL via `--output-format stream-json`.
 
     Caveats (handled at the swarm/driver layer, not here):
-      - Cursor has NO `--disallowed-tools` equivalent, so `web_access=False` can't be
-        cleanly enforced — the swarm DROPS cursor from the engine list for offline
-        bench evals (protects the AGENTS.md offline rule). `web_access` is a no-op.
+      - Cursor has NO `--disallowed-tools` equivalent, so `web_access=False` fails
+        closed instead of being silently ignored — a caller that needs a clean
+        offline eval must pick a transport that can actually enforce it.
       - Cursor does NOT inherit the user-scope KB MCP (that lives in
-        claude's config), so `kb_access` is a no-op too — claude stays the KB
+        claude's config), so `kb_access` is a no-op — claude stays the KB
         consumer.
     """
     name = "cursor"
+    offline_web_isolation = False
     # optional pinned model (e.g. "sonnet-4.5-thinking"); unset → cursor's default.
     _MODEL_ENV = "MUTEKI_CURSOR_MODEL"
+    # optional pinned API endpoint.  Cursor accepts `--endpoint <url>`, which is
+    # how a self-hosted/relay gateway is selected instead of cursor's own cloud;
+    # unset → the CLI's default endpoint.  Env-carried so the value travels with
+    # the job (a model config is not the driver's global state).
+    _ENDPOINT_ENV = "CURSOR_ENDPOINT"
+
+    def native_permission_modes(self) -> tuple[str, ...]:
+        return ("plan", "ask", "auto-review", "force")
+
+    def _permission_flags(self, launch: LaunchContext) -> list[str]:
+        mode = self.validate_launch_context(launch)
+        if not launch.interactive:
+            return ["--force"]
+        if mode in ("plan", "ask"):
+            return ["--mode", mode]
+        return [f"--{mode}"] if mode else []
 
     def new_session(self) -> Optional[str]:
         # cursor assigns the chat id itself; we scrape it from the stream so a
@@ -801,6 +1333,10 @@ class CursorDriver(CliDriver):
     def _model(self) -> list[str]:
         m = os.environ.get(self._MODEL_ENV)
         return ["--model", m] if m else []
+
+    def _endpoint(self) -> list[str]:
+        endpoint = os.environ.get(self._ENDPOINT_ENV, "").strip()
+        return ["--endpoint", endpoint] if endpoint else []
 
     def _fmt(self, stream: bool) -> list[str]:
         # stream-json emits one NDJSON event per step; json is a single final doc.
@@ -812,74 +1348,139 @@ class CursorDriver(CliDriver):
     def build_execute(
         self, prompt: str, session: Optional[str], *,
         web_access: bool = True, kb_access: bool = True, stream: bool = False,
+        launch: LaunchContext = WORKER_LAUNCH,
     ) -> list[str]:
         # -p (print/headless) + --force (run all commands) + --trust (skip the
         # workspace-trust prompt in headless mode). Prompt is the trailing POSITIONAL
         # arg (cursor has no `--` separator). cwd is the subprocess cwd, so no
         # explicit --workspace is needed (matches the claude/codex drivers).
-        return [self.bin, "-p", *self._fmt(stream), "--force", "--trust",
-                *self._model(), prompt]
+        del session, kb_access
+        if not web_access:
+            raise RuntimeError(
+                "Cursor CLI 没有可核验的原生离线 Web 工具开关；"
+                "离线评测不允许改走 ACP"
+            )
+        return [self.bin, "-p", *self._fmt(stream),
+                *self._permission_flags(launch), "--trust",
+                *self._endpoint(), *self._model(), prompt]
+
+    def build_execute_stdin(
+        self, prompt: str, session: Optional[str], *,
+        web_access: bool = True, kb_access: bool = True, stream: bool = False,
+        launch: LaunchContext = WORKER_LAUNCH,
+    ) -> list[str]:
+        # Cursor's headless mode does read stdin when the positional prompt is
+        # empty, but it has no --no-session-persistence/--ephemeral equivalent:
+        # runChat always creates a chat store under the Cursor state root.  Exact
+        # operator secrets therefore fail closed instead of being written there.
+        del prompt, session, web_access, kb_access, stream, launch
+        raise SecurePromptUnsupported(
+            "cursor accepts headless prompts from stdin but cannot disable chat "
+            "session persistence; exact secret context is unsupported")
 
     def build_resume(
         self, prompt: str, session: str, *,
         web_access: bool = True, kb_access: bool = True, stream: bool = False,
+        launch: LaunchContext = WORKER_LAUNCH,
     ) -> list[str]:
-        return [self.bin, "-p", *self._fmt(stream), "--force", "--trust",
-                "--resume", session, *self._model(), prompt]
+        del kb_access
+        if not web_access:
+            raise RuntimeError(
+                "Cursor CLI 没有可核验的原生离线 Web 工具开关；"
+                "离线评测不允许改走 ACP"
+            )
+        return [self.bin, "-p", *self._fmt(stream),
+                *self._permission_flags(launch), "--trust",
+                "--resume", session, *self._endpoint(), *self._model(), prompt]
+
+    @staticmethod
+    def _usage_breakdown(usage: dict) -> tuple[Optional[int], Optional[int], Optional[int], Optional[int]]:
+        """cursor's `usage` block → (input, output, cache_read, cache_write).
+
+        cursor uses camelCase + separate cache buckets:
+        {inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens}. Input
+        counts the fresh + both cache buckets. Cost stays None — cursor is
+        subscription-backed and reports no dollar figure.
+        """
+        if not isinstance(usage, dict) or not usage:
+            return None, None, None, None
+        cache_read = int(usage.get("cacheReadTokens") or 0)
+        cache_write = int(usage.get("cacheWriteTokens") or 0)
+        inp = int(usage.get("inputTokens") or 0) + cache_read + cache_write
+        outp = int(usage.get("outputTokens") or 0)
+        return (inp or None), (outp or None), (cache_read or None), (cache_write or None)
 
     @staticmethod
     def _usage_tokens(usage: dict) -> tuple[Optional[int], Optional[int]]:
-        """cursor's result `usage` block → (input, output) tokens for the deck's
-        token column. cursor uses camelCase + separate cache buckets:
-        {inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens}. Input
-        counts the fresh + both cache buckets. None when the block is absent.
-        Cost stays $0 — cursor is subscription-backed and reports no dollar figure."""
-        if not isinstance(usage, dict) or not usage:
-            return None, None
-        inp = (int(usage.get("inputTokens") or 0)
-               + int(usage.get("cacheReadTokens") or 0)
-               + int(usage.get("cacheWriteTokens") or 0))
-        outp = int(usage.get("outputTokens") or 0)
-        return (inp or None), (outp or None)
+        """``(input, output)`` view of :meth:`_usage_breakdown`."""
+        inp, outp, _cache_read, _cache_write = CursorDriver._usage_breakdown(usage)
+        return inp, outp
 
     @staticmethod
     def _tool_summary(tc: dict) -> tuple[str, str]:
-        """(tool_name, arg_preview) from cursor's tool_call object. Shapes:
-        {"readToolCall": {"args": {...}}} | {"function": {"name","arguments"}}."""
+        """(tool_name, FULL command/argument) from cursor's tool_call object. Shapes:
+        {"readToolCall": {"args": {...}}} | {"function": {"name","arguments"}}.
+
+        Returns the *untruncated* argument on purpose — the caller clips it for the
+        deck itself.  Clipping here is what used to destroy the command before it
+        could be recorded.
+        """
         if not isinstance(tc, dict) or not tc:
             return ("", "")
         key = next(iter(tc))
         body = tc.get(key) or {}
         if key == "function" and isinstance(body, dict):
-            return (str(body.get("name", "function")),
-                    str(body.get("arguments", ""))[:300])
+            return (str(body.get("name", "function")), str(body.get("arguments", "")))
         name = key[:-8] if key.endswith("ToolCall") else key  # readToolCall → read
         arg = ""
         if isinstance(body, dict) and isinstance(body.get("args"), dict):
             a = body["args"]
-            arg = str(a.get("path") or a.get("command") or a.get("query") or "")[:300]
+            arg = str(a.get("path") or a.get("command") or a.get("query") or "")
         return (name, arg)
 
     def parse(self, stdout: str, stderr: str) -> CliResult:
+        result = CursorDriver._parse_result(self, stdout, stderr)
+        # Cache buckets may only appear on an intermediate event; the terminal
+        # result envelope often omits them.
+        latest: dict = {}
+        for line in stdout.splitlines():
+            try:
+                event = json.loads(line)
+            except (ValueError, TypeError):
+                continue
+            if isinstance(event, dict) and isinstance(event.get("usage"), dict):
+                latest = event["usage"]
+        if latest:
+            result.cache_read_tokens = latest.get("cacheReadTokens")
+            result.cache_write_tokens = latest.get("cacheWriteTokens")
+        return result
+
+    def _parse_result(self, stdout: str, stderr: str) -> CliResult:
         # --output-format json: one JSON object {type:result, result, session_id, ...}
         try:
             d = json.loads(stdout)
             if isinstance(d, dict) and (d.get("type") == "result" or "result" in d):
-                inp, outp = self._usage_tokens(d.get("usage") or {})
+                inp, outp, cache_read, cache_write = self._usage_breakdown(d.get("usage") or {})
+                result_text = str(d.get("result", ""))
                 return CliResult(
-                    text=str(d.get("result", "")),
+                    text=result_text,
                     session=d.get("session_id"),
                     cost_usd=None,         # subscription-backed; no per-run cost
                     input_tokens=inp,
                     output_tokens=outp,
+                    cache_read_tokens=cache_read,
+                    cache_write_tokens=cache_write,
                     num_turns=None,
                     raw_stderr=stderr[-2000:],
+                    error=_policy_refusal_error(
+                        result_text, used_tools=False),
                 )
         except json.JSONDecodeError:
             pass
         # stream-json: NDJSON. The terminal {"type":"result",...} carries the full
         # text + usage; any line may carry session_id (system.init or result).
         result_text, session, inp, outp = "", None, None, None
+        used_tools = False
         for line in stdout.splitlines():
             line = line.strip()
             if not line or not line.startswith("{"):
@@ -891,13 +1492,18 @@ class CursorDriver(CliDriver):
             if ev.get("type") == "result":
                 result_text = str(ev.get("result", ""))
                 inp, outp = self._usage_tokens(ev.get("usage") or {})
+            if (ev.get("type") == "tool_call"
+                    and ev.get("subtype") == "started"):
+                used_tools = True
             if ev.get("session_id"):
                 session = ev["session_id"]
-        if result_text or session:
-            return CliResult(text=result_text, session=session, cost_usd=None,
-                             input_tokens=inp, output_tokens=outp,
-                             num_turns=None, raw_stderr=stderr[-2000:])
-        return CliResult(text=stdout[-8000:], raw_stderr=stderr[-2000:])
+        error = _structured_cli_error(stdout)
+        if not error:
+            error = _policy_refusal_error(result_text, used_tools=used_tools)
+        return CliResult(text=result_text, session=session, cost_usd=None,
+                         input_tokens=inp, output_tokens=outp,
+                         num_turns=None, raw_stderr=stderr[-2000:],
+                         error=error)
 
     def parse_stream_line(self, line: str) -> Optional[StreamStep]:
         # single-step view (first step of the line); see parse_stream_steps for the
@@ -924,35 +1530,79 @@ class CursorDriver(CliDriver):
             for b in (ev.get("message", {}) or {}).get("content", []) or []:
                 if b.get("type") == "text" and (b.get("text") or "").strip():
                     steps.append(StreamStep("reasoning", text=b["text"].strip()))
+                elif b.get("type") == "thinking":
+                    thinking = str(b.get("thinking") or b.get("text") or "").strip()
+                    if thinking:
+                        steps.append(StreamStep(
+                            "reasoning", text=thinking, thinking=True))
             return steps
         if t == "tool_call":
             sub = ev.get("subtype")
             tc = ev.get("tool_call") or {}
+            call_id = str(ev.get("call_id") or tc.get("id") or "")
             if sub == "started":
                 tool, arg = self._tool_summary(tc)
-                return [StreamStep("tool", tool=tool, text=arg)]
+                return [StreamStep("tool", tool=tool, text=arg[:300], command=arg,
+                                   call_id=call_id)]
             if sub == "completed":
-                # surface the tool's output (best-effort: success.content)
+                # Cursor tool families expose different success payloads. File tools
+                # use content/path; shellToolCall uses interleavedOutput or stdout/stderr.
                 body = tc.get(next(iter(tc))) if isinstance(tc, dict) and tc else {}
                 res = (body or {}).get("result") if isinstance(body, dict) else None
                 content = ""
+                spill_path = ""
+                spill_size_bytes = -1
+                spill_line_count = -1
                 if isinstance(res, dict):
-                    succ = res.get("success")
-                    if isinstance(succ, dict):
-                        content = str(succ.get("content") or succ.get("path") or "")
-                # text=truncated for the deck; raw=full for the provenance gate.
-                return [StreamStep("tool_result", text=content[:600], raw=content)]
+                    outcome = res.get("success")
+                    if not isinstance(outcome, dict):
+                        outcome = res.get("failure")
+                    if (not isinstance(outcome, dict)
+                            and res.get("case") in {"success", "failure"}
+                            and isinstance(res.get("value"), dict)):
+                        outcome = res["value"]
+                    if isinstance(outcome, dict):
+                        content = str(outcome.get("content") or "")
+                        if not content:
+                            content = str(outcome.get("interleavedOutput") or "")
+                        if not content:
+                            content = "\n".join(
+                                str(outcome.get(key) or "")
+                                for key in ("stdout", "stderr")
+                                if outcome.get(key))
+                        if not content:
+                            content = str(outcome.get("path") or "")
+                        location = outcome.get("outputLocation")
+                        if isinstance(location, dict):
+                            spill_path = str(location.get("filePath") or "")
+                            try:
+                                spill_size_bytes = int(location.get("sizeBytes", -1))
+                            except (TypeError, ValueError):
+                                spill_size_bytes = -1
+                            try:
+                                spill_line_count = int(location.get("lineCount", -1))
+                            except (TypeError, ValueError):
+                                spill_line_count = -1
+                # text=truncated for the deck; raw=full for the provenance gate. A
+                # spill path remains metadata-only until CliSolver validates it.
+                return [StreamStep(
+                    "tool_result", text=content[:600], raw=content,
+                    call_id=call_id, spill_path=spill_path,
+                    spill_size_bytes=spill_size_bytes,
+                    spill_line_count=spill_line_count)]
         return []
 
     def _hello_argv(self) -> list[str]:
-        # one headless turn, single-JSON envelope. --force/--trust skip the
-        # workspace-trust prompt so the probe doesn't hang waiting for input.
-        return [self.bin, "-p", "--output-format", "json", "--force", "--trust",
-                *self._model(), self.HELLO_PROMPT]
+        # Reuse the real worker argv so the probe exercises the same flags a live
+        # turn does (--trust included, so it cannot hang on the trust prompt).
+        return self.build_execute(
+            self.HELLO_PROMPT, None, web_access=True, kb_access=False)
 
     def _hello_ok(self, r: "subprocess.CompletedProcess") -> bool:
-        # exit 0 AND a result field — cursor's json envelope is {type:result,result,...}.
-        return r.returncode == 0 and '"result"' in (r.stdout or "")
+        if r.returncode != 0:
+            return False
+        parsed = self.parse(r.stdout or "", r.stderr or "")
+        return bool(parsed.text.strip()) and not parsed.error
 
 
 DRIVERS: dict[str, CliDriver] = {
@@ -1040,16 +1690,35 @@ class ProfileDriver(CliDriver):
     def build_execute(
         self, prompt: str, session: Optional[str], *,
         web_access: bool = True, kb_access: bool = True, stream: bool = False,
+        launch: LaunchContext = WORKER_LAUNCH,
     ) -> list[str]:
         return self._with_profile(self.base.build_execute(
-            prompt, session, web_access=web_access, kb_access=kb_access, stream=stream))
+            prompt, session, web_access=web_access, kb_access=kb_access,
+            stream=stream, launch=launch))
+
+    def build_execute_stdin(
+        self, prompt: str, session: Optional[str], *,
+        web_access: bool = True, kb_access: bool = True, stream: bool = False,
+        launch: LaunchContext = WORKER_LAUNCH,
+    ) -> list[str]:
+        # The base owns the non-persistence flag semantics; the profile wrapper
+        # still has to add the model/reasoning configuration so the piped turn
+        # targets the same model a positional turn would.
+        return self._with_profile(self.base.build_execute_stdin(
+            prompt, session, web_access=web_access, kb_access=kb_access,
+            stream=stream, launch=launch))
 
     def build_resume(
         self, prompt: str, session: str, *,
         web_access: bool = True, kb_access: bool = True, stream: bool = False,
+        launch: LaunchContext = WORKER_LAUNCH,
     ) -> list[str]:
         return self._with_profile(self.base.build_resume(
-            prompt, session, web_access=web_access, kb_access=kb_access, stream=stream))
+            prompt, session, web_access=web_access, kb_access=kb_access,
+            stream=stream, launch=launch))
+
+    def secure_prompt_preflight(self) -> "tuple[bool, str]":
+        return self.base.secure_prompt_preflight()
 
     def parse(self, stdout: str, stderr: str) -> CliResult:
         return self.base.parse(stdout, stderr)
@@ -1090,7 +1759,12 @@ class EndpointDriver(CliDriver):
         base_url = str(self.profile.get("base_url") or "").strip()
         if self.name != "codex" or not base_url:
             return []
-        wire_api = str(self.profile.get("wire_api") or "responses").strip() or "responses"
+        # Codex only accepts the Responses wire protocol.  `"chat"` was removed
+        # upstream and `"chat_completions"` never deserialised at all, so a
+        # legacy value stored in capabilities_json must never reach this flag --
+        # codex would abort with "Error loading config.toml: unknown variant"
+        # before sending a single request.
+        wire_api = "responses"
         model = str(self.profile.get("model") or "").strip()
         # `name` is REQUIRED by codex: a [model_providers.X] block with no `name`
         # fails config load with "provider name must not be empty", so a custom
@@ -1109,29 +1783,128 @@ class EndpointDriver(CliDriver):
             flags += ["-c", f"model={model}"]
         return flags
 
+    def _with_model(self, argv: list[str]) -> list[str]:
+        """Pin the configured model for engines launched with ``--model``.
+
+        Codex carries its model inside the injected ``-c model=...`` provider
+        config, so adding ``--model`` there would be wrong. Claude and Cursor are
+        launched with ``--model``; without it they fall back to their own default
+        model name, which an operator's relay usually does not serve -- the turn
+        then fails with a confusing "selected model may not exist" instead of a
+        clear endpoint error.
+        """
+
+        if self.name != "codex":
+            argv = _insert_model_arg(argv, str(self.profile.get("model") or "").strip())
+        if self.name == "claude":
+            argv = self._with_claude_settings(argv)
+        return argv
+
+    def _with_claude_settings(self, argv: list[str]) -> list[str]:
+        """Point the Claude CLI at the configured endpoint via a settings file.
+
+        **Environment variables are not enough, and this is the trap.** The CLI
+        reads ``~/.claude/settings.json`` and its ``env`` block wins over the
+        process environment, so exporting ``ANTHROPIC_BASE_URL`` has no effect
+        once such a file exists -- which is exactly the state a previous
+        cc-switch-style tool leaves behind. The observed symptom is a 404
+        "selected model may not exist" for a request that never left the machine.
+
+        ``--settings <file>`` is the supported way in, and it must also pin the
+        model: the CLI validates the name against its own built-in list before
+        sending anything, so an operator's upstream model name (``deepseek-...``)
+        would be rejected locally no matter how correct the endpoint is. Mapping
+        the CLI's official name onto the real upstream one is the proxy's job, so
+        here it is enough to declare the official name and let the proxy translate.
+
+        **Only for a host-side CLI.** The file is written on this machine, and a
+        containerised Worker cannot read a host temp path -- the argv is executed
+        inside the container while the file stays outside it, so the probe would
+        fail with the settings file simply missing. Inside a container there is
+        also nothing to work around: the image has no ``~/.claude/settings.json``,
+        which is the only reason the env vars fail on the host. So the env vars
+        alone are correct there, and this returns the argv untouched.
+        """
+
+        if bool(self.profile.get("containerised")):
+            return argv
+
+        base_url = str(self.profile.get("base_url") or "").strip()
+        if not base_url:
+            return argv
+
+        env: dict[str, str] = {"ANTHROPIC_BASE_URL": base_url}
+        token = self._api_key()
+        if token:
+            # The local proxy demands a token because it binds all interfaces.
+            env["ANTHROPIC_AUTH_TOKEN"] = token
+            env["ANTHROPIC_API_KEY"] = token
+
+        # Declare each tier with its official name so the CLI's own validation
+        # passes; the proxy substitutes the real upstream model.
+        model = str(self.profile.get("model") or "").strip()
+        if model:
+            env["ANTHROPIC_DEFAULT_SONNET_MODEL"] = model
+            env["ANTHROPIC_DEFAULT_OPUS_MODEL"] = model
+            env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] = model
+
+        try:
+            handle = tempfile.NamedTemporaryFile(
+                "w", suffix=".json", prefix="muteki-claude-", delete=False, encoding="utf-8"
+            )
+            json.dump({"env": env}, handle)
+            handle.close()
+        except OSError:
+            # A settings file we cannot write is not worth failing the turn over:
+            # fall through with the environment, which still works when no user
+            # settings file exists.
+            return argv
+        # Must land before the ``--`` prompt sentinel; anything after it is
+        # treated as prompt text and the flag would be silently ignored.
+        if "--" in argv:
+            index = argv.index("--")
+            return [*argv[:index], "--settings", handle.name, *argv[index:]]
+        return [*argv, "--settings", handle.name]
+
     def _inject_before_exec(self, argv: list[str]) -> list[str]:
         flags = self._codex_config_flags()
         if not flags:
-            return argv
+            return self._with_model(argv)
         try:
             idx = argv.index("exec")
         except ValueError:
-            return [argv[0], *flags, *argv[1:]]
-        return [*argv[:idx], *flags, *argv[idx:]]
+            return self._with_model([argv[0], *flags, *argv[1:]])
+        return self._with_model([*argv[:idx], *flags, *argv[idx:]])
 
     def build_execute(
         self, prompt: str, session: Optional[str], *,
         web_access: bool = True, kb_access: bool = True, stream: bool = False,
+        launch: LaunchContext = WORKER_LAUNCH,
     ) -> list[str]:
         return self._inject_before_exec(self.base.build_execute(
-            prompt, session, web_access=web_access, kb_access=kb_access, stream=stream))
+            prompt, session, web_access=web_access, kb_access=kb_access,
+            stream=stream, launch=launch))
+
+    def build_execute_stdin(
+        self, prompt: str, session: Optional[str], *,
+        web_access: bool = True, kb_access: bool = True, stream: bool = False,
+        launch: LaunchContext = WORKER_LAUNCH,
+    ) -> list[str]:
+        return self._inject_before_exec(self.base.build_execute_stdin(
+            prompt, session, web_access=web_access, kb_access=kb_access,
+            stream=stream, launch=launch))
 
     def build_resume(
         self, prompt: str, session: str, *,
         web_access: bool = True, kb_access: bool = True, stream: bool = False,
+        launch: LaunchContext = WORKER_LAUNCH,
     ) -> list[str]:
         return self._inject_before_exec(self.base.build_resume(
-            prompt, session, web_access=web_access, kb_access=kb_access, stream=stream))
+            prompt, session, web_access=web_access, kb_access=kb_access,
+            stream=stream, launch=launch))
+
+    def secure_prompt_preflight(self) -> "tuple[bool, str]":
+        return self.base.secure_prompt_preflight()
 
     def parse(self, stdout: str, stderr: str) -> CliResult:
         return self.base.parse(stdout, stderr)
@@ -1145,6 +1918,13 @@ class EndpointDriver(CliDriver):
     def _endpoint_probe_url(self) -> str:
         base_url = str(self.profile.get("base_url") or "").rstrip("/")
         if self.name == "claude":
+            # Accept both "^<base>$" and "^<base>/v1/messages$" spellings: the
+            # latter is what an Anthropic-compatible relay publishes, and blindly
+            # appending produced a doubled path (HTTP 404 "Unknown path").
+            if base_url.endswith("/v1/messages"):
+                return base_url
+            if base_url.endswith("/v1"):
+                return f"{base_url}/messages"
             return f"{base_url}/v1/messages"
         if self.name == "codex":
             return f"{base_url}/responses"
@@ -1266,9 +2046,6 @@ def driver_for(profile_or_name: str | dict[str, Any]) -> CliDriver:
 # with last-good reuse, exactly like quota. Decorative + never blocks the bar.
 _HEALTH_TTL = 55.0
 _health_cache: dict = {"ts": 0.0, "data": None}
-
-
-import contextlib as _contextlib
 
 
 @_contextlib.contextmanager
@@ -1724,6 +2501,101 @@ def _kill_proc_tree(proc: "subprocess.Popen", *, pgid: "Optional[int]" = None) -
         pass
 
 
+# ── worker conversation retention (report-writer input) ──────────────────────
+# A Worker's CLI stream (assistant reasoning, tool calls, raw tool output) is the
+# only complete record of HOW an Intent was solved; the Blackboard keeps just the
+# verified conclusion and the engine's own session files live in the container's
+# ephemeral HOME, so they die with `docker rm -f`. Nothing durable held it.
+#
+# Every execution path (bare host subprocess, legacy docker exec, and the
+# in-container Runtime Control Plane) funnels its accumulated stdout/stderr
+# through ``driver.parse`` on THIS host, so attaching a sink to the driver
+# instance captures all three without engine-specific knowledge. The sink is set
+# by the caller that owns the workspace — never inferred here.
+_CONVERSATION_SINK = "_muteki_conversation_sink"
+_CONVERSATION_FILE_CAP = 1_500_000    # chars kept from stdout per turn
+_CONVERSATION_RUN_CAP = 48_000_000    # chars kept per run directory
+
+
+def attach_conversation_sink(driver: "CliDriver", *, directory: str, label: str) -> None:
+    """Attach a durable transcript sink to ONE driver instance.
+
+    Callers that download many turns (a resume loop) share the instance, so the
+    index lives on the sink: every capture is a NEW file and never overwrites an
+    earlier turn of the same worker.
+    """
+
+    setattr(
+        driver,
+        _CONVERSATION_SINK,
+        {"dir": str(directory), "label": str(label), "index": 0, "run_cap": _CONVERSATION_RUN_CAP},
+    )
+
+
+def capture_cli_conversation(driver: "CliDriver", stdout: str, stderr: str) -> None:
+    """Persist one CLI turn's raw stream for the after-the-fact report writer.
+
+    The stream is the ONLY complete record of how an Intent was solved — the
+    Blackboard keeps just the verified conclusion. Best-effort by design: a
+    capture failure must never take down a Worker, and when no sink is attached
+    this is a cheap attribute miss.
+    """
+
+    sink = getattr(driver, _CONVERSATION_SINK, None)
+    if not isinstance(sink, dict):
+        return
+    try:
+        directory = Path(str(sink.get("dir") or ""))
+        label = str(sink.get("label") or "worker")
+        if not str(directory):
+            return
+        directory.mkdir(parents=True, exist_ok=True)
+        cap = int(sink.get("run_cap") or _CONVERSATION_RUN_CAP)
+        used = 0
+        for path in directory.glob("*.log"):
+            try:
+                used += path.stat().st_size
+            except OSError:
+                continue
+        if used >= cap:
+            return
+        index = int(sink.get("index") or 0) + 1
+        sink["index"] = index
+        stamp = time.strftime("%Y%m%dT%H%M%S", time.gmtime())
+        safe = re.sub(r"[^A-Za-z0-9._-]", "-", label)[:48] or "worker"
+        target = directory / f"{stamp}-{index:03d}-{safe}.log"
+        body = _trim_conversation_body(stdout, stderr)
+        target.write_text(body, encoding="utf-8", errors="replace")
+    except Exception:
+        return
+
+
+def _trim_conversation_body(stdout: str, stderr: str) -> str:
+    head = "----- stdout (engine stream: reasoning / tool calls / tool output) -----\n"
+    body = head + _trim_middle(stdout or "", _CONVERSATION_FILE_CAP)
+    tail_errors = _trim_middle(stderr or "", 200_000)
+    body += "\n----- stderr -----\n" + tail_errors
+    return body
+
+
+def _trim_middle(text: str, limit: int) -> str:
+    if len(text) <= limit:
+        return text
+    head = limit // 3
+    tail = limit - head
+    return f"{text[:head]}\n...[truncated {len(text) - limit} chars]...\n{text[-tail:]}"
+
+
+def detach_conversation_sink(driver: "CliDriver") -> None:
+    """Clear a per-worker sink so a reused driver cannot cross-wire two runs."""
+
+    try:
+        if hasattr(driver, _CONVERSATION_SINK):
+            delattr(driver, _CONVERSATION_SINK)
+    except Exception:
+        return
+
+
 def run_cli(driver: CliDriver, argv: list[str], *, cwd: str, timeout: int,
             env: Optional[dict] = None, container: "Optional[object]" = None) -> CliResult:
     """Run a CLI driver's argv as a subprocess and parse the result. `env`, if
@@ -1744,10 +2616,12 @@ def run_cli(driver: CliDriver, argv: list[str], *, cwd: str, timeout: int,
     except subprocess.TimeoutExpired as e:
         out = e.stdout if isinstance(e.stdout, str) else ""
         err = e.stderr if isinstance(e.stderr, str) else ""
+        capture_cli_conversation(driver, out or "", err or "")
         res = driver.parse(out or "", err or "")
         res.timed_out = True
         res.elapsed_s = time.time() - t0
         return res
+    capture_cli_conversation(driver, proc.stdout or "", proc.stderr or "")
     res = driver.parse(proc.stdout or "", proc.stderr or "")
     res.elapsed_s = time.time() - t0
     return res
@@ -1946,6 +2820,7 @@ def run_cli_streaming(
                 pass
             stderr_thread.join(timeout=1)
     stderr = "".join(err_lines)
+    capture_cli_conversation(driver, "".join(out_lines), stderr or "")
     res = driver.parse("".join(out_lines), stderr or "")
     res.timed_out = timed_out
     res.cancelled = cancelled

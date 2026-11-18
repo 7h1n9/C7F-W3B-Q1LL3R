@@ -15,8 +15,8 @@ from uuid import NAMESPACE_URL, uuid5
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
-from app.models.run import LogicalToolCall, RunExecutionLease, SolveRun, ToolExecutionTrace
 from app.core.exceptions import DomainError
+from app.models.run import LogicalToolCall, RunExecutionLease, SolveRun, ToolExecutionTrace
 
 
 class EffectiveLogicalToolCallService:

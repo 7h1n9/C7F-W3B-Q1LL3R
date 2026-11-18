@@ -1,7 +1,8 @@
 {
   "case_id": "xss-reflected",
   "vulnerability_type": "XSS",
-  "target": "http://benchmark.local/search?q=",
+  "target": "http://{{host}}:{{port}}",
+  "requires_range": "web-vuln-lab",
   "initial_knowledge": [
     "The search endpoint reflects a query value in the HTML response.",
     "The application has a browser-rendered result page."

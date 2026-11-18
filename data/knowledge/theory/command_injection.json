@@ -1,0 +1,48 @@
+{
+  "id": "theory-command-injection-001",
+  "type": "theory",
+  "category": "injection",
+  "subcategory": "command_injection",
+  "name": "命令执行",
+  "aliases": [
+    "命令执行",
+    "RCE",
+    "远程代码执行",
+    "命令注入"
+  ],
+  "severity": "high",
+  "description": "> 创建: 未知 | 更新: 2026-05-21 | 适用: PHP通用 (system/passthru/exec/shell_exec) | ⚠️ 部分图片托管于外部CDN `system` — 执行外部程序，并且显示输出 | 参数    | 说明         |",
+  "key_concepts": [
+    "# popen",
+    "wget 请求带出",
+    "escapeshellcmd",
+    "# shell_exec",
+    "HTTP 请求带出",
+    "Bypass 过滤",
+    "# 请求带出",
+    "# Linux 独有的",
+    "# system",
+    "escapeshellarg"
+  ],
+  "related_pocs": [
+    "pocs/high_value/afrog\\afrog-pocs\\vulnerability\\yunanbao-authservice-fastjson-rce.yaml",
+    "pocs/high_value/afrog\\afrog-pocs\\CNVD\\2020\\CNVD-2020-18740.yaml",
+    "pocs/high_value/afrog\\afrog-pocs\\CNVD\\2022\\CNVD-2022-10270.yaml",
+    "pocs/high_value/afrog\\afrog-pocs\\CVE\\2021\\CVE-2021-36260.yaml",
+    "pocs/high_value/afrog\\afrog-pocs\\CVE\\2022\\CVE-2022-24112.yaml"
+  ],
+  "related_payloads": [
+    "payloads/command_injection/extracted.json"
+  ],
+  "tags": [
+    "命令执行",
+    "RCE",
+    "远程代码执行",
+    "命令注入",
+    "injection",
+    "ctf",
+    "web"
+  ],
+  "source": "Des-CTF-Knowledge/命令执行.md",
+  "last_updated": "2026-10-22"
+}

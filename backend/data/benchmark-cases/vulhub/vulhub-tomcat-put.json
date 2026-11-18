@@ -1,0 +1,38 @@
+{
+  "case_id": "vulhub-tomcat-put",
+  "vulnerability_type": "FileUpload",
+  "target": "http://{{host}}:{{port}}",
+  "target_stack": ["tomcat", "java", "jsp"],
+  "initial_knowledge": [
+    "The target serves the stock Apache Tomcat ROOT application; there is no login and no form.",
+    "The exact version is printed in the Server header and in every error page.",
+    "A flag file exists on the target filesystem at /flag.txt and the web server process can read it."
+  ],
+  "attack_surface": [],
+  "expected_hypothesis": {
+    "type": "FileUpload",
+    "location_parameter": "path",
+    "status": "OPEN"
+  },
+  "expected_validation": {
+    "type": "FileUpload",
+    "status": "VALIDATED",
+    "requires": ["write_accepted", "content_retrievable"]
+  },
+  "expected_exploit": {
+    "status": "SUCCESS",
+    "scope_type": "ARBITRARY_FILE_WRITE",
+    "data_fields": ["/flag.txt"]
+  },
+  "expected_impact": {
+    "status": "CONFIRMED",
+    "severity": "CRITICAL",
+    "impact_type": "remote_code_execution"
+  },
+  "expected_finding": {
+    "status": "CREATED",
+    "vulnerability_type": "FileUpload",
+    "severity": "CRITICAL"
+  },
+  "turn_budget": 40
+}

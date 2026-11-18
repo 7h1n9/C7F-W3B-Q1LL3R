@@ -1,0 +1,22 @@
+name: '[SUCTF 2019]Upload Labs 2'
+category: web
+keywords:
+- suctf
+- upload
+- labs
+- github
+- team
+- tree
+- master
+- web
+- admin
+- php
+- include
+- config
+steps:
+- ROUND_BUDGET_EXHAUSTED_BEFORE_REASON
+evidence_chain: []
+success_format: CTF2\{[^}]+\}
+source: 45040cb3-4071-4990-8579-2bf0e4f86f05 (run e3e2668c-8676-44c2-a8ad-5fc1432f71ed)
+notes: NO_VERIFIED_FLAG
+kind: negative

@@ -1,0 +1,17 @@
+name: afr_1
+category: web
+keywords:
+- afr_1
+- ctfer
+- book
+- nu1l
+steps:
+- '[claude] Retrying recipe step 1/2 paths (`/?p=hello`, `/?p=php://filter/convert.base64-encode/resource=flag`)
+  — gateway 404s before reaching backend. Not a payload problem.'
+- RACE_WORKER_TIMEOUT
+- ROUND_BUDGET_EXHAUSTED_BEFORE_REASON
+evidence_chain: []
+success_format: CTF2\{[^}]+\}
+source: f86302db-465a-4e0a-8d4b-a33662f14225 (run 010a7d47-f829-4a54-af57-171ceac479a3)
+notes: NO_VERIFIED_FLAG
+kind: negative

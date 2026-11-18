@@ -137,7 +137,7 @@ async def test_hypotheses_persist_across_solver_loop_iterations() -> None:
         state_machine=TaskStateMachine(),
         planner=DeterministicPlanner(),
         policy=ActionPolicyValidator(),
-        worker_manager=WorkerManager(workers={"mock": MockWorker()}),
+        worker_manager=WorkerManager(workers={"runner": MockWorker()}),
         classifier=VulnerabilityClassifier(),
         challenge_context=challenge_context(),
         initial_response={"parameters": {"asset_no": "1"}},

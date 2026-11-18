@@ -1,0 +1,66 @@
+name: BUU UPLOAD COURSE 1
+category: web
+keywords:
+- buu
+- upload
+- course
+steps:
+- GET / returns 302 to index.php?file=upload.php; server openresty, PHP/7.3.5, no
+  Set-Cookie.
+- 'GET /index.php?file=upload.php returns 200 anonymous multipart upload form: action
+  index.php?file=upload.php, field upload_file, note uploads to ./uploads, no auth/session
+  cookie.'
+- Probing common auth/API paths login.php logout.php register.php auth.php session.php
+  config.php api.php flag.php source.php phpinfo.php returned 404; /api/ returned
+  404; unknown path rewrite reaches index.php and upload form.
+- '[claude] index.php filter regex is /^uploads\/[\d|\w]*.jpg$/m; bypass = include
+  uploads/<uniqid>.jpg (PHP inside jpg executes) -> RCE as www-data (source dumped
+  at /home/kali/workspace/work, webshell uploads/6'
+- '[claude] upload.php names every upload uniqid().jpg under ./uploads; /uploads/
+  dir listing 403'
+- '[claude] /flag readable as www-data; /tmp/flag.sh appends $FLAG to /flag'
+- '[claude] FOUND_FLAG=<FLAG>'
+- GET /health returns 200 text/plain exactly "ok" (Content-Length 2, no PHP headers),
+  a distinct nginx/API health endpoint; /health/ and /health.php are not equivalent
+  (302 and 404 respectively).
+- 'POST /index.php?file=upload.php with multipart field upload_file stores content
+  under random 12-hex-digit .jpg and message is "文件已储存在: uploads/<id>.jpg"; no session
+  cookie/auth token is set. Uploaded object is directly retrievable.'
+- 'file=upload.php is a literal allowlist: case changes, extensions, traversal, null/percent
+  encoding, wrappers, and added suffixes all return Chinese rejection "你不老实哦~".'
+- GET/HEAD/POST/PUT/OPTIONS /health all return 200 text/plain "ok"; query params (file,url,cmd,debug,format)
+  are ignored.
+- '[codex] GET /health is a distinct non-PHP surface returning 200 text/plain `ok`
+  with Content-Length 2; methods and query parameters do not alter it.'
+evidence_chain:
+- GET / returns 302 to index.php?file=upload.php; server openresty, PHP/7.3.5, no
+  Set-Cookie.
+- 'GET /index.php?file=upload.php returns 200 anonymous multipart upload form: action
+  index.php?file=upload.php, field upload_file, note uploads to ./uploads, no auth/session
+  cookie.'
+- Probing common auth/API paths login.php logout.php register.php auth.php session.php
+  config.php api.php flag.php source.php phpinfo.php returned 404; /api/ returned
+  404; unknown path rewrite reaches index.php and upload form.
+- '[claude] index.php filter regex is /^uploads\/[\d|\w]*.jpg$/m; bypass = include
+  uploads/<uniqid>.jpg (PHP inside jpg executes) -> RCE as www-data (source dumped
+  at /home/kali/workspace/work, webshell uploads/6'
+- '[claude] upload.php names every upload uniqid().jpg under ./uploads; /uploads/
+  dir listing 403'
+- '[claude] FOUND_FLAG=<FLAG>'
+- GET /health returns 200 text/plain exactly "ok" (Content-Length 2, no PHP headers),
+  a distinct nginx/API health endpoint; /health/ and /health.php are not equivalent
+  (302 and 404 respectively).
+- 'POST /index.php?file=upload.php with multipart field upload_file stores content
+  under random 12-hex-digit .jpg and message is "文件已储存在: uploads/<id>.jpg"; no session
+  cookie/auth token is set. Uploaded object is directly retrievable.'
+- 'file=upload.php is a literal allowlist: case changes, extensions, traversal, null/percent
+  encoding, wrappers, and added suffixes all return Chinese rejection "你不老实哦~".'
+- GET/HEAD/POST/PUT/OPTIONS /health all return 200 text/plain "ok"; query params (file,url,cmd,debug,format)
+  are ignored.
+- '[codex] GET /health is a distinct non-PHP surface returning 200 text/plain `ok`
+  with Content-Length 2; methods and query parameters do not alter it.'
+- '[codex] Unknown application routes generally redirect to `index.php?file=upload.php`;
+  `/uploads` redirects to `/uploads/`, which returns 403.'
+success_format: CTF2\{[^}]+\}
+source: 8b3a39e2-ea10-4319-b86b-0b3069285c28 (solver 3933e539-44da-4135-80c6-d5860fe64250)
+notes: ''

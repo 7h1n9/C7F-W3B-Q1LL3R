@@ -9,7 +9,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.multi_agent import AgentTask
 from app.models.run import RunExecutionLease, ToolCall
 
-
 PRODUCTION_ROLES = frozenset({"RECON", "EXPLOIT", "VERIFY"})
 ACTIVE_TOOL_STATUSES = ("REQUESTED", "STARTED")
 

@@ -1,0 +1,32 @@
+name: '[HCTF 2018]Hideandseek'
+category: web
+keywords:
+- hctf
+- hideandseek
+steps:
+- 'Reused session cookie username=a (any non-empty user logs in; admin is rejected).
+  /upload with field the_file accepts only .zip, then runs ''unzip -n <zip> -d <dir>;
+  cat <dir>/*''. A zip entry with create_system=3 and external_attr=(0o120777<<16)
+  is extracted as a symlink, so ''cat'' follows it -> arbitrary file read. PoC script:
+  /home/kali/workspace/scratch/zread.py + rd.sh'
+- '[codex] Any non-empty username logs in (admin is rejected with error=1); reused
+  cookie `session=eyJ1c2VybmFtZSI6ImEifQ.HcMnsg.YK3otkvMaRLWw30uuLv7luQlJc4`'
+- '[codex] /upload takes form field `the_file`, only `.zip` accepted, runs `unzip
+  -n <zip> -d <dir>` then `cat <dir>/*`; zip entry with `create_system=3` and `external_attr=(0o120777<<16)`
+  becomes a symlink and'
+- '[codex] /app/run.sh contains the original placeholder `flag{5x807qzunos8onr6socvg5rr7j6rgcxb}`
+  (not the live flag)'
+- '[codex] /app/requirements.txt: Flask 1.0.2, Werkzeug 0.14.1; app source at `/app/hard_t0_guess_n9f5a95b5ku9fg/hard_t0_guess_also_df45v48ytj9_main.py`'
+- '[codex] The flag is the live `/app/hard_t0_guess_n9f5a95b5ku9fg/flag.py`, read
+  through the zip symlink primitive (content: `flag = "<FLAG>"`).'
+evidence_chain:
+- 'Reused session cookie username=a (any non-empty user logs in; admin is rejected).
+  /upload with field the_file accepts only .zip, then runs ''unzip -n <zip> -d <dir>;
+  cat <dir>/*''. A zip entry with create_system=3 and external_attr=(0o120777<<16)
+  is extracted as a symlink, so ''cat'' follows it -> arbitrary file read. PoC script:
+  /home/kali/workspace/scratch/zread.py + rd.sh'
+- '[codex] The flag is the live `/app/hard_t0_guess_n9f5a95b5ku9fg/flag.py`, read
+  through the zip symlink primitive (content: `flag = "<FLAG>"`).'
+success_format: CTF2\{[^}]+\}
+source: 29d00841-cb51-434a-b89e-5ffaf66e2b4d (solver 8dc57680-23d7-44ea-aafb-34d72eeef9f8)
+notes: ''

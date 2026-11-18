@@ -1,0 +1,16 @@
+name: '[HCTF2018]final Web1'
+category: web
+keywords:
+- hctf2018
+- final
+- web1
+steps:
+- emmm/cn- php filter wrappers and {if} SSTI on index.php all yield 500-empty with
+  no output; add GBK wide-byte SQLi on emmm also dead (all values -> 未找到对应的模板, no
+  boolean/time diff)
+- RACE_WORKER_TIMEOUT
+evidence_chain: []
+success_format: CTF2\{[^}]+\}
+source: 607d89bf-ba87-4c92-9b66-cc7a1621e9d9 (run b838911a-c995-4d89-9a74-e46f179f21ad)
+notes: NO_VERIFIED_FLAG
+kind: negative

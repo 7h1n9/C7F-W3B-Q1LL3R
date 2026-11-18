@@ -1,0 +1,23 @@
+name: '[CISCN2019 华东南赛区]Web9 6872b3814a21'
+category: web
+keywords:
+- ciscn2019
+- web9
+- click
+- launch
+- instance
+steps:
+- RACE_WORKER_TIMEOUT
+- '[codex] `send_paper` pickle RCE via `key` (b64, raw-bytes, urlencoded, JSON, multipart
+  all tried; no unpickling, no timing oracle)'
+- '[codex] SSTI in `add_paper`/`show_paper` content (`{{7*7}}` and `{% debug %}` render
+  literally — re-confirms the board''s existing dead end)'
+- '[codex] Direct `/flag` fetch (returns the `show_paper` "No Found" body)'
+- '[codex] ports 81/82/83/86 as the app — 81 is openresty 502, 82/86 are stale nginx
+  default 404 vhosts, 83 is the BUUCTF panel whose `/dasctf_admin_portal/api/container`
+  answers `{"msg":"靶机不存在！"}` (boot/PATCH/D'
+evidence_chain: []
+success_format: CTF2\{[^}]+\}
+source: 6872b381-4a21-4632-bc5d-be5abf8074eb (run c4b0e4af-4b43-4d3e-858a-7ff39d59df82)
+notes: NO_VERIFIED_FLAG
+kind: negative

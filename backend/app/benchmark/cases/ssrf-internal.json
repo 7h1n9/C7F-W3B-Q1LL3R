@@ -1,7 +1,8 @@
 {
   "case_id": "ssrf-internal",
   "vulnerability_type": "SSRF",
-  "target": "http://benchmark.local/fetch?url=",
+  "target": "http://{{host}}:{{port}}",
+  "requires_range": "web-vuln-lab",
   "initial_knowledge": [
     "The server fetches a user-controlled URL.",
     "A local-only metadata endpoint exists behind the application network."

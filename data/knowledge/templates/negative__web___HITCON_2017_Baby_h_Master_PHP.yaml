@@ -1,0 +1,17 @@
+name: '[HITCON 2017]Baby^h Master PHP'
+category: web
+keywords:
+- hitcon
+- baby
+- master
+- php
+- github
+- t3hp0rp
+- hitcondockerfile
+steps:
+- RACE_WORKER_TIMEOUT
+evidence_chain: []
+success_format: CTF2\{[^}]+\}
+source: 4f5fbea3-acf3-42ff-aabc-4253bf3009af (run 8e5dd6a3-0187-4792-a3c5-5b4e9b5a805e)
+notes: NO_VERIFIED_FLAG
+kind: negative

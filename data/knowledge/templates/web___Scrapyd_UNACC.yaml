@@ -1,0 +1,26 @@
+name: '[Scrapyd]UNACC'
+category: web
+keywords:
+- scrapyd
+- unacc
+- github
+- vulhub
+- tree
+- master
+- scrapy
+steps:
+- '[claude] Scrapyd UNACC exploit executed successfully by uploading malicious egg
+  with code in spider __init__ method that reads FLAG environment variable'
+- '[claude] Flag was stored in environment variable FLAG and extracted via spider
+  initialization code that runs when spider is scheduled'
+- '[claude] 5. Retrieving the log file which contained the flag from the FLAG environment
+  variable'
+- Native Worker completed a bounded evidence-backed observation
+evidence_chain:
+- '[claude] Scrapyd UNACC exploit executed successfully by uploading malicious egg
+  with code in spider __init__ method that reads FLAG environment variable'
+- '[claude] 5. Retrieving the log file which contained the flag from the FLAG environment
+  variable'
+success_format: CTF2\{[^}]+\}
+source: 2b9db4f4-e8ea-423e-8070-7ab9542c6591 (solver b9efa49c-bae4-48e3-9e95-1b90eee1d1c7)
+notes: ''

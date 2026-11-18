@@ -1,0 +1,12 @@
+name: '[CISCN2019 华东北赛区]Web6 3d953868b71e'
+category: web
+keywords:
+- ciscn2019
+- web6
+steps:
+- RACE_WORKER_TIMEOUT
+evidence_chain: []
+success_format: CTF2\{[^}]+\}
+source: 3d953868-b71e-4401-be81-63135cd768f3 (run 430b1650-be44-420d-9d2e-46a04297813b)
+notes: NO_VERIFIED_FLAG
+kind: negative

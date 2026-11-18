@@ -2,9 +2,8 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from app.services.runner_client import normalize_runner_job_id
 from app.services import runner_client as runner_client_module
-from app.services.runner_client import RunnerClient
+from app.services.runner_client import RunnerClient, normalize_runner_job_id
 
 
 def test_normalize_runner_job_id_accepts_supported_runner_shapes():
@@ -21,6 +20,18 @@ def test_missing_runner_job_id_is_not_a_started_identifier():
 
 @pytest.mark.asyncio
 async def test_wait_job_collects_completed_result_without_waiting_for_sse(monkeypatch):
+    # This test pins the *protocol* logic of the legacy Runner client, so it has to
+    # opt the legacy channel back on explicitly.  The client now refuses to dial a
+    # Runner that the deployment does not use, and that refusal is correct -- this
+    # test is about what happens after a Runner answers, not about whether one is
+    # configured.
+    monkeypatch.setattr(
+        runner_client_module.get_settings(),
+        "legacy_kali_runner",
+        True,
+        raising=False,
+    )
+
     class Response:
         is_success = True
         status_code = 200

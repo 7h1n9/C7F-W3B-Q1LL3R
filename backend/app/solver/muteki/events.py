@@ -42,14 +42,51 @@ class EventType(StrEnum):
     GRAPH_COMPACTED = "graph_compacted"
     WORKER_STARTED = "worker_started"
     WORKER_STEP = "worker_step"
+    # One record per tool invocation, carrying the (redacted) command and a
+    # bounded excerpt of its output.  Deliberately *not* coalesced like
+    # WORKER_STEP: aggregation is what erased the command from the trace.
+    WORKER_COMMAND = "worker_command"
     WORKER_FINISHED = "worker_finished"
     PHASE_CHANGED = "phase_changed"
     PREPARE_ENGINE_CHECKED = "prepare.engine.checked"
+    # A failed engine's lane has been handed to a healthy one.  Recorded so the
+    # event stream shows *why* a single-Worker round was carrying two lanes --
+    # otherwise the degradation is invisible until the Run comes back unsolved.
+    ENGINE_BACKFILL = "engine.backfill"
+    # The curated FIRST ACTION was placed in a lane goal.  Recorded because the
+    # Race Worker's goal is otherwise *not persisted anywhere* -- Race proposes no
+    # Intent, so ``intent_proposed`` never carries it.  Without this event "the
+    # Worker ignored the FIRST ACTION" and "the FIRST ACTION was never injected"
+    # are indistinguishable from ``run_events``, which is exactly the ambiguity
+    # that made the 2026-11-07 adoption audit need an out-of-band script.
+    #
+    # Payload: ``text`` (what was injected), ``chars``, ``source`` (entry id +
+    # field), ``verdict`` (why this string was chosen), ``lane``, ``goal_chars``
+    # and ``in_window`` (did the 600-char ``intent_goal`` cut keep it).
+    EXPLOIT_FIRST_ACTION = "exploit.first_action"
+    # The same recording, for the lower-authority probe channel: a recipe that
+    # matched the box but was never measured here.
+    #
+    # Measured 2026-11-08: 26 of the 81 UNSOLVED Challenges now receive a concrete
+    # first command, but only 2 of those come through ``exploit.first_action`` --
+    # the other 24 arrive as probes.  Without a matching event, an adoption audit
+    # would read those 24 Runs as "no first action was available", which is the
+    # exact false negative the FIRST ACTION event was added to prevent.  Kept as a
+    # distinct type rather than a field on the existing event so the two
+    # authorities stay separable in a query.
+    #
+    # Payload: ``text``, ``chars``, ``lane``, ``goal_chars``, ``in_window``.
+    EXPLOIT_PROBE_ACTION = "exploit.probe_action"
     REASON_STARTED = "reason.started"
     REASON_COMPLETED = "reason.completed"
     REASON_FAILED = "reason.failed"
     REASON_MODEL_SELECTED = "runtime.reason.model.selected"
     REASON_MODEL_FALLBACK = "runtime.reason.model.fallback"
+    # The relay's content audit rejected the Reason prompt and the adapter is
+    # retrying with softened prose.  Recorded separately from a fallback: the
+    # model still answered, so a Run that shows this event has NOT lost its
+    # planning quality.
+    REASON_MODEL_CONTENT_POLICY = "runtime.reason.model.content_policy_retry"
     REASON_MODEL_REACTIVATED = "runtime.reason.model.reactivated"
     RUN_FINISHED = "run_finished"
 

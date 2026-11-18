@@ -1,0 +1,15 @@
+name: '[CISCN2019 华东北赛区]Web2 fcdea538603c'
+category: web
+keywords:
+- ciscn2019
+- web2
+- xss
+- buuoj
+- web
+steps:
+- RACE_WORKER_TIMEOUT
+evidence_chain: []
+success_format: CTF2\{[^}]+\}
+source: fcdea538-603c-4e4e-aedd-1225f21cca9d (run 926a35ed-30b9-4de7-a9f3-7aba967b367a)
+notes: NO_VERIFIED_FLAG
+kind: negative

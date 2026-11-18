@@ -1,0 +1,30 @@
+name: '[CISCN2019 东北赛区 Day2 Web3]Point System 93317e53f6f0'
+category: web
+keywords:
+- ciscn2019
+- day2
+- web3
+- point
+- system
+steps:
+- '[claude] Retrying / path, alternate paths (/index.php, /login, /admin, /flag),
+  raw-socket HTTP, absolute-form request URIs, unsetting local env proxies, blanking
+  ~/.curlrc, and 2-minute waits — all yield the i'
+- 'Instance 0df194c542eacc948b041b15 tunnel is dead: node 117.21.200.176:80 forwards
+  EVERY Host (incl. node5.buuoj.cn, ctf2.dasctf.com, example.com) to 127.0.0.1:7897
+  which refuses connections -> permanent HTTP/1.0 500 458-byte body, 10/10 requests
+  over 45s. Absolute-form URI, Host variants, X-Forwarded-For, raw sockets, 443 TLS
+  (EOF), 81 (502), 82/86 (only nginx default 404) all fail. Whale panel /dasctf_admin_portal/api/container
+  answers {success:false,msg:''靶机不存在''} for GET/POST/PATCH/DELETE/lock with any body,
+  query or Host -> container record destroyed, no boot path without CTFd login (panel
+  has only /, /api/container, /api/container/lock, /static/*; dirb common.txt + API
+  wordlists found nothing else).'
+- RACE_WORKER_TIMEOUT
+- '[codex] Whale control panel boot path: `/dasctf_admin_portal/api/container` returns
+  `靶机不存在` for every method (GET/POST/PATCH/DELETE/lock), every body, every query param
+  and every Host; no login/register/auth'
+evidence_chain: []
+success_format: CTF2\{[^}]+\}
+source: 93317e53-f6f0-4f76-99fb-a11566956a5f (run 86a648d6-574f-451e-a1cd-d506d8e99178)
+notes: NO_VERIFIED_FLAG
+kind: negative

@@ -22,6 +22,7 @@ from app.models.run import (
 )
 from app.models.skill import Skill
 from app.orchestration.state_machine import RunStatus
+from app.schemas.model_config import WORKER_ENGINE_TYPES
 from app.services.events import event_service
 from app.services.solver_state import solver_state_service
 
@@ -213,11 +214,11 @@ class RunDiagnosticsService:
             )
 
         tags = [item["code"] for item in anomalies]
-        is_codex_cli = run.engine_type == "codex_cli"
-        is_openai = run.engine_type == "openai_compatible"
-        model_source = "CODEX_CLI" if is_codex_cli else ("OPENAI_COMPATIBLE" if is_openai else None)
-        model_config_required = is_openai or is_codex_cli
-        model_config_applicable = is_openai or is_codex_cli
+        engine_type = run.engine_type or ""
+        engine_is_supported = engine_type in WORKER_ENGINE_TYPES
+        model_source = engine_type.upper() if engine_is_supported else None
+        model_config_required = engine_is_supported
+        model_config_applicable = engine_is_supported
         if run.last_error_code:
             tags.append(run.last_error_code)
         if no_progress_count:

@@ -1,0 +1,26 @@
+name: Sentinel-1B:被记忆的 FLAG(模型反演 / 训练数据提取)
+category: web
+keywords:
+- sentinel
+- sentinelai
+- next
+- token
+- canary
+- model
+- context_len
+- topk
+- vocab
+- predict
+- text
+- top
+steps:
+- '[claude] Flag recovered via DFS over /predict top-3 from seed "CTF2{": <FLAG>;
+  confirmed by POST /submit → {"status":"ok","msg":"正确!这就是被逐字记忆的原始数据。"}'
+- Native Worker completed a bounded evidence-backed observation
+evidence_chain:
+- '[claude] Flag recovered via DFS over /predict top-3 from seed "CTF2{": <FLAG>;
+  confirmed by POST /submit → {"status":"ok","msg":"正确!这就是被逐字记忆的原始数据。"}'
+- Native Worker completed a bounded evidence-backed observation
+success_format: CTF2\{[^}]+\}
+source: 87942332-d346-4602-864c-5d6c3956792b (solver 9ea99253-b33c-45e7-b223-d9c6fff37396)
+notes: ''

@@ -1,6 +1,8 @@
 param(
     [int]$BackendPort = 8000,
-    [int]$FrontendPort = 5173
+    [int]$FrontendPort = 5173,
+    # Protocol switch (optional local translation shim); see start-all.ps1.
+    [int]$SwitchPort = 8790
 )
 
 $ErrorActionPreference = "Stop"
@@ -9,6 +11,7 @@ $pidsRoot = Join-Path $repoRoot "data\pids"
 $services = @{
     backend = @{ Port = $BackendPort; Pattern = "app\.main:app.*--port\s+$BackendPort" }
     frontend = @{ Port = $FrontendPort; Pattern = "frontend[\\/]node_modules.*vite" }
+    switch = @{ Port = $SwitchPort; Pattern = "-m\s+protocol_switch" }
 }
 
 function Get-Listeners([int]$Port) {
@@ -38,7 +41,7 @@ function Stop-ServiceTree([string]$Name, [int]$Port, [string]$Pattern) {
     if (Test-Path -LiteralPath $pidPath) { Remove-Item -LiteralPath $pidPath -Force -ErrorAction SilentlyContinue }
 }
 
-foreach ($name in @("backend", "frontend")) {
+foreach ($name in @("switch", "backend", "frontend")) {
     $item = $services[$name]
     Stop-ServiceTree $name $item.Port $item.Pattern
 }

@@ -1,0 +1,20 @@
+name: '[极客大挑战 2019]LoveSQL 76b27bd26868'
+category: web
+keywords:
+- lovesql
+- imported
+- from
+- buuctf
+- ctfd
+steps:
+- '[claude] SQLi via `check.php?username=` (GET, single quote) — UNION reflected in
+  "Hello ... / password is ''...''", 3 columns.'
+- '[claude] DB=geek (MariaDB 10.3.18), tables geekuser + l0ve1ysq1; schema from information_schema.'
+- '[claude] geek.l0ve1ysq1 row id=16 username=flag, password=<FLAG> — confirmed twice
+  (plaintext + hex 43544632...7D).'
+- '[claude] FOUND_FLAG=<FLAG>'
+evidence_chain:
+- '[claude] FOUND_FLAG=<FLAG>'
+success_format: CTF2\{[^}]+\}
+source: 76b27bd2-6868-4d50-9601-fb0136240793 (solver 96e1f7a4-6e01-4060-8ec2-55f9cf763339)
+notes: ''

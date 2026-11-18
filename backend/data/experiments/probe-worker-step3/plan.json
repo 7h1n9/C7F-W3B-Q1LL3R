@@ -1,0 +1,17 @@
+{
+  "configuration_fingerprint": "2ebd42d2fc2d15b638b6a77f9f13870aaf3db3693329b0d4044cb97a04acf48f",
+  "created_at": "2026-10-15T18:21:00.572405+00:00",
+  "dry_run": false,
+  "manifest_created_at": "2026-10-15T18:21:00.086765+00:00",
+  "resume": false,
+  "schema_version": 1,
+  "skipped_cases": [],
+  "tasks": [
+    {
+      "arm": "off",
+      "artifact": "artifacts\\sql-injection-golden__off__r1.json",
+      "case_id": "sql-injection-golden",
+      "repeat": 1
+    }
+  ]
+}

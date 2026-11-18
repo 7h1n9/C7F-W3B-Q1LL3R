@@ -1,8 +1,8 @@
 """Private, run-scoped backend surface for the ctfctl MCP subprocess."""
 from __future__ import annotations
 
-import hashlib
 import asyncio
+import hashlib
 import secrets
 import shutil
 import tarfile
@@ -24,6 +24,7 @@ from app.models.multi_agent import AgentTask
 from app.models.run import AgentTurn, RunAttempt, RunExecutionLease, SolveRun, ToolInvocationTicket
 from app.orchestration.state_machine import RunStatus, transition
 from app.services.events import event_service
+from app.services.solver_state import solver_state_service
 from app.services.tool_permissions import effective_tools_for
 from app.services.workspace_policy import (
     READABLE_DIRECTORIES,
@@ -33,7 +34,6 @@ from app.services.workspace_policy import (
     searchable_path,
 )
 from app.services.workspace_sync import workspace_sync_service
-from app.services.solver_state import solver_state_service
 from app.tools.gateway import tool_gateway
 from app.tools.registry import load_tool_definitions
 

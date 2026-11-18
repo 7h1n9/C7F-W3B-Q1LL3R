@@ -1,0 +1,24 @@
+name: winter
+category: web
+keywords:
+- winter
+- simple
+- implementation
+- winternitz
+- signature
+- scheme
+- dicectf
+- quals
+- defund
+- dicegang
+- challenges
+- github
+steps:
+- route_exhausted route=web:index:content:analysis engine=openai-compatible:8deec5f3-5714-4baa-bf3b-4e4bbcd4b01a
+  worker=worker-4 intent=intent_b16ac33d7a0249f2968354302eaec1cf reason=No new endpoint
+  remains on the assigned route.
+evidence_chain: []
+success_format: CTF2\{[^}]+\}
+source: 91f7122b-1fa2-41c9-8d20-2bcc6fd78bcb (run 970691f7-999c-48dc-b86a-4802ea28dbe4)
+notes: NO_VERIFIED_FLAG
+kind: negative

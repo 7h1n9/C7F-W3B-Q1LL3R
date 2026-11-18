@@ -1,9 +1,9 @@
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
-from sqlalchemy import select
 
 from app.models import Base
 from app.models.challenge import Challenge

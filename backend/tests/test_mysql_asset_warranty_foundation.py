@@ -30,6 +30,23 @@ def _database_url(database: str) -> str:
     return make_url(MYSQL_ADMIN_URL).set(database=database).render_as_string(hide_password=False)
 
 
+def _alembic_head() -> str:
+    """The migration head, read from the scripts instead of pinned.
+
+    Hardcoding the revision made this test fail every time a migration landed --
+    it still named ``0041_attack_strategy_memory`` after ``0044`` had shipped, so
+    it was already red before the wire_api column was added.
+    """
+
+    from alembic.config import Config
+    from alembic.script import ScriptDirectory
+
+    root = Path(__file__).resolve().parents[1]
+    config = Config(str(root / "alembic.ini"))
+    config.set_main_option("script_location", str(root / "alembic"))
+    return str(ScriptDirectory.from_config(config).get_current_head())
+
+
 def _run_alembic(database_url: str, revision: str = "head") -> subprocess.CompletedProcess[str]:
     environment = os.environ.copy()
     environment["APP_DATABASE_URL"] = database_url
@@ -120,7 +137,7 @@ def test_mysql_migration_fresh_database() -> None:
                 async with engine.connect() as connection:
                     assert (await connection.execute(text("SELECT VERSION()"))).scalar()
                     assert (await connection.execute(text("SELECT DATABASE()"))).scalar() == database
-                    assert (await connection.execute(text("SELECT version_num FROM alembic_version"))).scalar() == "0041_attack_strategy_memory"
+                    assert (await connection.execute(text("SELECT version_num FROM alembic_version"))).scalar() == _alembic_head()
             finally:
                 await engine.dispose()
 

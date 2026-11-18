@@ -1,0 +1,41 @@
+{
+  "case_id": "sql-injection-golden",
+  "vulnerability_type": "SQL_INJECTION",
+  "target": "http://{{host}}:{{port}}",
+  "target_stack": ["flask", "mysql", "python"],
+  "initial_knowledge": [
+    "The target is a deterministic local benchmark service backed by MySQL 8.4.",
+    "POST /api/warranty/check accepts asset_no and department and returns a boolean matched signal.",
+    "asset_no is parameterized and must be PC-2026-013; department is concatenated into the SQL string.",
+    "The range's verification token is the setting_value column of challenge_settings where setting_name = 'verification_token'."
+  ],
+  "attack_surface": [
+    {"method": "POST", "endpoint": "/api/warranty/check", "parameter": "department", "role": "input"}
+  ],
+  "expected_hypothesis": {
+    "type": "SQL_INJECTION",
+    "location_parameter": "department",
+    "status": "OPEN"
+  },
+  "expected_validation": {
+    "type": "SQL_INJECTION",
+    "status": "VALIDATED",
+    "requires": ["baseline", "positive_control", "negative_control", "stable_differential"]
+  },
+  "expected_exploit": {
+    "status": "SUCCESS",
+    "scope_type": "BUSINESS_DATA",
+    "data_fields": ["challenge_settings.verification_token"]
+  },
+  "expected_impact": {
+    "status": "CONFIRMED",
+    "severity": "HIGH",
+    "impact_type": "database_data_disclosure"
+  },
+  "expected_finding": {
+    "status": "CREATED",
+    "vulnerability_type": "SQL_INJECTION",
+    "severity": "HIGH"
+  },
+  "turn_budget": 40
+}

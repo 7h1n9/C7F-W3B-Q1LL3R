@@ -1,0 +1,93 @@
+{
+  "by_arm": {
+    "on": {
+      "arm": "on",
+      "attempts": 1,
+      "average_duration_seconds": 484.0,
+      "average_tokens": 0.0,
+      "average_tool_calls": 9.0,
+      "average_turns_used": 9.0,
+      "errors": 0,
+      "evaluated_attempts": 1,
+      "final_status_distribution": {
+        "COMPLETED_UNSOLVED": 1
+      },
+      "metric_sample_counts": {
+        "duration_seconds": 1,
+        "tool_calls": 1,
+        "total_tokens": 1,
+        "turns_used": 1
+      },
+      "pass_at_1": 0.0,
+      "process_metrics": {
+        "prior_misled": {
+          "misled_intents": 0,
+          "pooled_misled_rate": null,
+          "prior_carrying_intents": 0,
+          "runs_that_received_a_prior": 0,
+          "runs_with_graph": 1
+        },
+        "repeat_attempts": {
+          "mean_repeat_ratio": 0.0,
+          "mean_same_shape_ratio": 1.0,
+          "pooled_repeat_ratio": 0.0,
+          "pooled_same_shape_ratio": 1.0,
+          "repeat_calls": 0,
+          "same_shape_calls": 9,
+          "total_calls": 9
+        },
+        "runs_measured": 1
+      },
+      "solved_within_budget": {
+        "false": 1,
+        "true": 0,
+        "unknown": 0
+      },
+      "success": 0,
+      "success_rate": 0.0,
+      "turns_used_distribution": {
+        "9": 1
+      }
+    }
+  },
+  "configuration_fingerprint": "65569ebe42ac4e25426069b608fb7c98bf8bd8f3c80c9ea75fee2b16223f088d",
+  "generated_at": "2026-10-18T17:15:47.066490+00:00",
+  "limitations": [
+    "Paired effects are exposed with an exact McNemar p-value and a bootstrap interval only once the paired sample clears 10; below that the delta is descriptive only.",
+    "Missing metrics are excluded from the corresponding average and counted separately.",
+    "The interval covers sampling noise across repetitions, not variety across cases: these cases share one range, so it says nothing about generalisation to other targets.",
+    "Process metrics describe how a Run searched, not whether it won; they are reported as null when nothing was measurable, so a null must never be read as a good score."
+  ],
+  "paired_effect": {
+    "bootstrap": {
+      "alpha": 0.05,
+      "iterations": 2000,
+      "seed": 20260101
+    },
+    "by_case": {},
+    "claim": "descriptive_only",
+    "definition": "mean(on success - off success) over matching case_id/repeat pairs",
+    "mcnemar": {
+      "concordant_pairs": 0,
+      "off_only_success": 0,
+      "on_only_success": 0,
+      "p_value": null,
+      "reported": false,
+      "significant": false,
+      "test": "exact_mcnemar_two_sided"
+    },
+    "minimum_recommended_samples": 10,
+    "on_minus_off_success_delta": null,
+    "pairs": 0,
+    "sample_adequate": false,
+    "sample_count": 0,
+    "success_delta": null,
+    "success_delta_bootstrap_ci_95": null,
+    "warning": "Only 0 paired case/repeat samples are available; at least 10 are required before making a performance claim. The reported delta is descriptive only."
+  },
+  "record_count": 1,
+  "schema_version": 1,
+  "skipped_case_count": 0,
+  "skipped_cases": [],
+  "success_definition": "evaluation_report.final_result == 'SUCCESS'; Run status alone is not success"
+}

@@ -16,9 +16,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.run import SolveRun
 from app.models.solver_state import SolverState
-from app.services.payload_strategy import payload_family, payload_strategy_manager
 from app.services.boolean_oracle_failure_analyzer import analyze_boolean_oracle
-
+from app.services.payload_strategy import payload_family, payload_strategy_manager
 
 CLASSIFICATIONS = {
     "TRUE_SIDE_FAILED",

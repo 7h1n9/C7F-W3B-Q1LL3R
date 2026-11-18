@@ -1,0 +1,27 @@
+name: '[CISCN2019 华北赛区 Day2 Web1]Hack World 7e8d176ae42e'
+category: web
+keywords:
+- ciscn2019
+- day2
+- web1
+- hack
+- world
+- uuid
+steps:
+- RACE_WORKER_TIMEOUT
+- '[claude] `substr((select(flag)from(flag)),P,1)=X` string/int comparisons are unreliable
+  (return truthy for many X); use `instr()`/`length()` instead.'
+- '[claude] blackboard live DB (`graph/upstream_shared_graph.db`) has schema but no
+  useful `events` facts populated (blackboard.py read-facts errors: no table content);
+  no teammate facts available.'
+- ROUND_BUDGET_EXHAUSTED_BEFORE_REASON
+- '[codex] Keyword blacklist blocks all tested SQL spellings: `and`/`or`/`xor`/`||`/`&&`/`union`/`select`/`substr`/`if`/`like`/`regexp`/`is`/`in`/`between`/`into`/`order`/`group`
+  — plus `/**/`, tab, `%%6f`, null'
+- '[codex] `id[]=array` only yields `stripos()` warnings, no type-juggling bypass;
+  no SQL errors echoed; `phpinfo.php` is not vulnerable to index.php''s filter (standalone
+  script).'
+evidence_chain: []
+success_format: CTF2\{[^}]+\}
+source: 7e8d176a-e42e-4df5-b139-02b950d75394 (run 89f58749-d203-411f-b612-1796ccec1678)
+notes: NO_VERIFIED_FLAG
+kind: negative

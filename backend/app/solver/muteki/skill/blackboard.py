@@ -27,11 +27,23 @@ import os
 import re
 import sqlite3
 import sys
-import time
 from datetime import UTC, datetime
 
 _ACTOR = os.environ.get("MUTEKI_WORKER_ID", "worker")
 _INTENT_ID = os.environ.get("MUTEKI_INTENT_ID", "").strip()
+
+# The challenge owns its flag shape (``CTF2{...}``, ``flag{...}``, ...).  The
+# Coordinator seeds this per Worker; hardcoding one banner silently rejected
+# every challenge that used a different prefix.
+_DEFAULT_FLAG_PATTERN = r"flag\{[^{}\r\n]+\}"
+_FLAG_PATTERN = os.environ.get("MUTEKI_FLAG_PATTERN", "").strip() or _DEFAULT_FLAG_PATTERN
+
+
+def _flag_matcher() -> "re.Pattern[str]":
+    try:
+        return re.compile(_FLAG_PATTERN)
+    except re.error:
+        return re.compile(_DEFAULT_FLAG_PATTERN)
 
 
 def _db_path() -> str:
@@ -499,7 +511,6 @@ def release_resource(resource_key: str) -> None:
     c = _conn()
     cid = _challenge_id(c)
     rkey = _normalize_resource_key(resource_key)
-    now = datetime.now(UTC).timestamp()
     if not _has_table(c, "resource_locks") or not rkey:
         print("OK")
         return
@@ -622,7 +633,7 @@ def read_poc(poc_id: str) -> None:
 def write_flag(flag: str, real_output: str) -> None:
     c = _conn()
     cid = _challenge_id(c)
-    if not re.fullmatch(r"flag\{[^{}\r\n]+\}", flag):
+    if not _flag_matcher().fullmatch(flag):
         print("REJECTED: FORMAT_INVALID")
         return
     if flag.casefold() in {"flag{test}", "flag{placeholder}", "flag{dummy}"}:

@@ -9,7 +9,6 @@ from __future__ import annotations
 
 from typing import Any
 
-
 _SQL_INJECTION = "SQL_INJECTION"
 
 # This is the controller's proposal vocabulary.  The policy may mention

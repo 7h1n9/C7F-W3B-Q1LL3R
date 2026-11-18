@@ -1,0 +1,16 @@
+name: xianzhi_xss
+category: web
+keywords:
+- xianzhi_xss
+- github
+- glzjin
+- ctf_web_docker
+- tree
+- master
+steps:
+- RACE_WORKER_TIMEOUT
+evidence_chain: []
+success_format: CTF2\{[^}]+\}
+source: 77dea6ac-7b09-4f54-857e-3e6893694c28 (run cc2116ad-05e0-4065-850a-8e47c0e8194a)
+notes: NO_VERIFIED_FLAG
+kind: negative

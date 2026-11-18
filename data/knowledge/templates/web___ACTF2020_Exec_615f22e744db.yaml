@@ -1,0 +1,19 @@
+name: '[ACTF2020 新生赛]Exec 615f22e744db'
+category: web
+keywords:
+- actf2020
+- exec
+- y1ng
+steps:
+- '[claude] `target` POST param is command-injectable (`127.0.0.1;cmd` works, `;`
+  not filtered) on the ping form at `/`'
+- '[claude] /flag readable directly by www-data — no need for path tricks'
+- '[claude] (Flag is CTF2{...} format, not flag{...} — captured verbatim from real
+  output.)'
+- Native Worker completed a bounded evidence-backed observation
+evidence_chain:
+- '[claude] (Flag is CTF2{...} format, not flag{...} — captured verbatim from real
+  output.)'
+success_format: CTF2\{[^}]+\}
+source: 615f22e7-44db-47ca-bfd2-321c105de694 (solver 03a44113-ea81-40d1-b0ce-d62552e02bbf)
+notes: ''

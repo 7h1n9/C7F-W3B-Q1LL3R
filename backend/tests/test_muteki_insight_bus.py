@@ -23,7 +23,6 @@ def test_publisher_does_not_receive_own():
         bus = InsightBus("test-run")
         q = bus.subscribe("worker-1")
         await bus.publish(Insight(kind=InsightKind.FACT, by="worker-1", text="port 80 is open"))
-        import time
         await asyncio.sleep(0.1)
         assert q.empty()
 
@@ -72,8 +71,7 @@ def test_duplicate_guidance_deduped():
         q = bus.subscribe("worker-2")
         await bus.publish(Insight(kind=InsightKind.GUIDANCE, by="review", text="check login"))
         await bus.publish(Insight(kind=InsightKind.GUIDANCE, by="review", text="check login"))
-        ins1 = await asyncio.wait_for(q.get(), timeout=2)
-        import time
+        await asyncio.wait_for(q.get(), timeout=2)
         await asyncio.sleep(0.1)
         assert q.empty()
 
@@ -86,7 +84,7 @@ def test_flag_deduped():
         q = bus.subscribe("worker-2")
         await bus.publish(Insight(kind=InsightKind.FLAG, by="worker-1", text="flag{test}"))
         await bus.publish(Insight(kind=InsightKind.FLAG, by="worker-2", text="flag{test}"))
-        ins1 = await asyncio.wait_for(q.get(), timeout=2)
+        await asyncio.wait_for(q.get(), timeout=2)
         await asyncio.sleep(0.1)
         assert q.empty()
 

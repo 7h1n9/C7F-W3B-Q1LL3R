@@ -14,6 +14,7 @@ from app.models.conversation import (
 )
 from app.models.model_config import ModelConfig
 from app.models.skill import Skill
+from app.schemas.model_config import CLI_PROVIDER_TYPES
 from app.services.crypto import decrypt_api_key
 
 
@@ -110,7 +111,7 @@ class ChatService:
         if (
             not config
             or not config.enabled
-            or config.provider_type == "codex_cli"
+            or config.provider_type in CLI_PROVIDER_TYPES
             or not config.base_url
             or not config.model_name
         ):

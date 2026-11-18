@@ -13,7 +13,6 @@ import contextlib
 import hashlib
 import json
 import logging
-import re
 import uuid
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -48,11 +47,6 @@ from app.models.run import (
 )
 from app.orchestration.role_agent_runtime import RoleAgentRuntime
 from app.orchestration.state_machine import RunStatus, transition
-from app.security.decision import security_decision_engine
-from app.security.lifecycle import vulnerability_lifecycle_engine
-from app.security.schemas import ExploitResult, InformationEvidence, ValidationResult
-from app.security.service import security_finding_service
-from app.security.task_policy import get_allowed_tools, validate_tools, vulnerability_type_from_metadata
 from app.schemas.multi_agent import (
     AgentRole,
     AgentTaskContract,
@@ -66,27 +60,44 @@ from app.schemas.multi_agent import (
     ProductionResultContext,
     TaskBudget,
 )
-from app.services.action_fingerprint import fingerprint_compiled_action
-from app.services.approved_action_compiler import approved_action_compiler
-from app.services.events import event_service
-from app.services.failure_classification import normalize_failure_classification
-from app.services.tool_outcome_classifier import ToolOutcome, classify_tool_outcome
-from app.services.multi_agent import deterministic_controller
-from app.services.solver_state import solver_state_service
-from app.services.run_finalizer import run_finalizer
-from app.services.tool_result_fact_reducer import tool_result_fact_reducer
-from app.services.boolean_oracle_diagnosis import diagnose_boolean_oracle, boolean_oracle_diagnosis_service
-from app.services.boolean_oracle_failure_analyzer import analyze_boolean_oracle
-from app.services.tool_failure_policy import blocked_failure_for_action, record_tool_failure
-from app.services.payload_strategy import payload_strategy_manager
-from app.services.metadata_stage_decider import metadata_stage_decider
-from app.services.tool_catalog_reconciler import tool_catalog_reconciler
-from app.services.experiment_strategy_manager import experiment_strategy_manager
-from app.services.strategy_continuation import build_strategy_portfolio, normalize_strategy, strategy_continuation_service, strategy_identity, validate_strategy_selection
 from app.security.attack_state import AttackState
 from app.security.attack_state_engine import attack_state_engine, validate_attack_state_selection
-from app.services.execution_recovery import execution_recovery_guard
+from app.security.decision import security_decision_engine
+from app.security.lifecycle import vulnerability_lifecycle_engine
+from app.security.schemas import ExploitResult, InformationEvidence, ValidationResult
+from app.security.service import security_finding_service
+from app.security.task_policy import (
+    get_allowed_tools,
+    validate_tools,
+    vulnerability_type_from_metadata,
+)
+from app.services.action_fingerprint import fingerprint_compiled_action
+from app.services.approved_action_compiler import approved_action_compiler
+from app.services.boolean_oracle_diagnosis import (
+    boolean_oracle_diagnosis_service,
+)
+from app.services.boolean_oracle_failure_analyzer import analyze_boolean_oracle
 from app.services.continuations import continuation_service
+from app.services.events import event_service
+from app.services.execution_recovery import execution_recovery_guard
+from app.services.experiment_strategy_manager import experiment_strategy_manager
+from app.services.failure_classification import normalize_failure_classification
+from app.services.metadata_stage_decider import metadata_stage_decider
+from app.services.multi_agent import deterministic_controller
+from app.services.payload_strategy import payload_strategy_manager
+from app.services.run_finalizer import run_finalizer
+from app.services.solver_state import solver_state_service
+from app.services.strategy_continuation import (
+    build_strategy_portfolio,
+    normalize_strategy,
+    strategy_continuation_service,
+    strategy_identity,
+    validate_strategy_selection,
+)
+from app.services.tool_catalog_reconciler import tool_catalog_reconciler
+from app.services.tool_failure_policy import blocked_failure_for_action, record_tool_failure
+from app.services.tool_outcome_classifier import ToolOutcome, classify_tool_outcome
+from app.services.tool_result_fact_reducer import tool_result_fact_reducer
 from app.tools.gateway import tool_gateway
 
 logger = logging.getLogger(__name__)
@@ -1914,7 +1925,9 @@ class MultiAgentOrchestrator:
                 # materialize a supported Boolean variant, but it must never
                 # use the previous experiment's migration recommendation to
                 # rewrite a different Planner proposal.
-                from app.services.boolean_oracle_failure_analyzer import apply_boolean_strategy_variant
+                from app.services.boolean_oracle_failure_analyzer import (
+                    apply_boolean_strategy_variant,
+                )
 
                 review.approved_arguments_json = apply_boolean_strategy_variant(semantic, selected_strategy)
         try:
@@ -2723,7 +2736,6 @@ class MultiAgentOrchestrator:
         task_id = task.id
         approved_action_id = approved_action.id
         tool_name = approved_action.tool_name
-        stage = phase_before_dispatch
 
         async def checkpoint(code: str, reason: str) -> AgentTaskResultContract:
             approved_action.status = "REJECTED"
@@ -3230,10 +3242,6 @@ class MultiAgentOrchestrator:
     async def _record_security_mapping(self, session, run: SolveRun, fact: VerifiedFact) -> None:
         """Materialize the security meaning of a newly verified legacy fact."""
         fact_value = fact.value_json if isinstance(fact.value_json, dict) else {}
-        direct_collection = {
-            "security.sql_injection.validation": "validation_results",
-            "security.sql_injection.exploit": "exploit_results",
-        }.get(fact.fact_key)
         mapped = security_finding_service.map_verified_fact(fact)
         if mapped is None and fact.fact_key == "security.sql_injection.exploit":
             mapped = security_finding_service.map_exploit_fact(fact)

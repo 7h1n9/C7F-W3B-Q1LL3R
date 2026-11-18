@@ -1,0 +1,12 @@
+name: l33t-hoster
+category: web
+keywords:
+- l33t
+- hoster
+steps:
+- RACE_WORKER_TIMEOUT
+evidence_chain: []
+success_format: CTF2\{[^}]+\}
+source: 472b418a-0e0e-4c5a-9a9c-89f7ac43c206 (run 834a2231-3124-4c46-b091-ed0204de50c7)
+notes: NO_VERIFIED_FLAG
+kind: negative

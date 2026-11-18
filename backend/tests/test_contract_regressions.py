@@ -2,9 +2,9 @@ import pytest
 
 from app.core.exceptions import DomainError
 from app.orchestration.state_machine import RunStatus, restart, transition
+from app.services.effective_logical_tool_calls import EffectiveLogicalToolCallService
 from app.services.sql_provenance import validate_sql_expression_provenance
 from app.services.workspace_policy import searchable_path
-from app.services.effective_logical_tool_calls import EffectiveLogicalToolCallService
 
 
 def test_pause_and_failure_do_not_become_solver_phases() -> None:

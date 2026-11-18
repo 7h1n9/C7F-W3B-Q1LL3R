@@ -7,6 +7,26 @@ from typing import Any, Iterable, Mapping
 SQLI_MARKERS = frozenset({"SQLI", "SQL_INJECTION", "SQLINJECTION", "SQL_INJECTION_GOLDEN"})
 SUPPORTED = frozenset({"SQLI", "PATH_TRAVERSAL", "COMMAND_INJECTION", "SSRF", "IDOR", "JWT", "SSTI", "XXE", "FILE_UPLOAD", "GENERIC_WEB"})
 
+# A CVE id in the Challenge's own name/description is the strongest signal there
+# is: the arena roster is one-CVE-per-box ("[Spring]CVE-2016-4977"), and the
+# recipe for that CVE already knows its family.  Keyed by the trailing
+# ``YYYY-NNNN`` so ``CVE-2018-12613``, ``CVE_2018_12613`` and a bare
+# ``2018-12613`` all hit the same entry.
+_CVE_FAMILIES: tuple[tuple[str, str, str], ...] = (
+    ("2018-12613", "PATH_TRAVERSAL", "phpMyAdmin index.php target LFI"),
+    ("2018-3760", "PATH_TRAVERSAL", "Rails Sprockets path traversal"),
+    ("2016-4977", "SSTI", "Spring Security OAuth2 SpEL injection"),
+    ("2018-2894", "FILE_UPLOAD", "WebLogic ws_utc arbitrary file write"),
+    ("2017-12615", "FILE_UPLOAD", "Tomcat PUT arbitrary file write"),
+    ("2018-2628", "COMMAND_INJECTION", "WebLogic T3 deserialization"),
+    ("2017-10271", "COMMAND_INJECTION", "WebLogic WLS-XMLDecoder deserialization"),
+    ("2021-44228", "COMMAND_INJECTION", "Log4Shell JNDI lookup"),
+)
+
+# Keys that carry a CVE reference or a human title.  ``adapter`` is deliberately
+# absent: it names the *platform execution adapter* (``dasctf_arena``).
+_CVE_TEXT_KEYS = ("name", "title", "description", "cve_id", "friendly_id", "tags", "category")
+
 
 @dataclass(frozen=True, slots=True)
 class ClassificationResult:
@@ -21,8 +41,19 @@ def classify_challenge(metadata: Mapping[str, Any] | None, facts: Iterable[Any] 
     explicit = _normalize(metadata.get("vulnerability_type"))
     if explicit:
         return ClassificationResult(explicit, 100, "explicit vulnerability_type metadata")
-    if metadata.get("adapter") or metadata.get("dbms"):
-        return ClassificationResult("SQLI", 100, "adapter/dbms metadata marks SQL challenge")
+    # The CVE id comes before any inference: it is declarative, and getting it
+    # wrong sends the whole round down the wrong tool domain.
+    by_cve = _classify_by_cve(metadata)
+    if by_cve is not None:
+        return by_cve
+    # ``adapter`` is the platform execution adapter (``"dasctf_arena"``), not a
+    # vulnerability signal.  It used to be treated as proof of a SQL challenge
+    # at confidence 100, which classified *every* arena box as SQLI -- that is
+    # how a Spring SpEL box and a phpMyAdmin LFI box both got dispatched
+    # ``sql_boolean_compare`` and burned their whole budget on a SQL oracle the
+    # target never had.  Only a declared DBMS counts, and only as a hint.
+    if _declares_sql_surface(metadata):
+        return ClassificationResult("SQLI", 90, "declared dbms with SQL surface")
 
     endpoints: list[dict[str, Any]] = []
     refs: list[str] = []
@@ -83,6 +114,48 @@ def classify_challenge(metadata: Mapping[str, Any] | None, facts: Iterable[Any] 
     if endpoints:
         return ClassificationResult("GENERIC_WEB", 55, "web surface discovered without a high-confidence signature", tuple(dict.fromkeys(refs)))
     return None
+
+
+def _classify_by_cve(metadata: Mapping[str, Any]) -> ClassificationResult | None:
+    """Map a declared CVE id to its vulnerability family.
+
+    Separators are normalised (``CVE-2018-12613``, ``CVE_2018_12613`` and
+    ``CVE 2018 12613`` all collapse to ``2018-12613``) because the arena titles
+    are authored upstream and are not consistent.
+    """
+
+    text = " ".join(str(metadata.get(key) or "") for key in _CVE_TEXT_KEYS)
+    if not text.strip():
+        return None
+    normalized = text.upper().replace("_", "-").replace(" ", "-")
+    for cve, family, reason in _CVE_FAMILIES:
+        if cve in normalized:
+            return ClassificationResult(family, 95, f"CVE {cve}: {reason}")
+    return None
+
+
+def _declares_sql_surface(metadata: Mapping[str, Any]) -> bool:
+    """True only when the metadata names *both* a DBMS and a SQL surface.
+
+    A bare ``dbms`` field is not enough -- plenty of web boxes bundle MySQL
+    without exposing an injectable parameter -- so the declaration has to name
+    the injection surface as well.
+    """
+
+    dbms = str(metadata.get("dbms") or "").strip().lower()
+    if not dbms:
+        return False
+    declared = " ".join(
+        str(metadata.get(key) or "")
+        for key in (
+            "vulnerability_type",
+            "attack_surface",
+            "surface",
+            "tags",
+            "description",
+        )
+    ).lower()
+    return any(marker in declared for marker in ("sql", "sqli", "injection", "query"))
 
 
 def _normalize(value: Any) -> str | None:

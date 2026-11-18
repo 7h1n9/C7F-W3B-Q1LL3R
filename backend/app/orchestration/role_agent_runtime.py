@@ -6,7 +6,6 @@ never receives MCP tools in this mode and it never owns the tool loop.
 
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import json
 import uuid
@@ -23,14 +22,12 @@ from app.models.multi_agent import AgentRolePolicy, AgentTask, ApprovedAction
 from app.models.run import AgentTurn, RunAttempt, SolveRun
 from app.schemas.multi_agent import (
     AgentRole,
-    AgentTaskKind,
     AgentTaskResultContract,
     AgentTaskStatus,
     AnalysisReviewContract,
     PlannerProposalContract,
     RoleAction,
     RoleFinishAction,
-    TaskBudget,
 )
 from app.services.multi_agent import deterministic_controller
 

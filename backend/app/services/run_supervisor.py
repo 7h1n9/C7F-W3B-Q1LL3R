@@ -23,10 +23,11 @@ from app.models.run import (
     ToolCall,
 )
 from app.models.solver_state import SolverState
-from app.orchestration.state_machine import TERMINAL, RunStatus, transition
+from app.orchestration.state_machine import TERMINAL, RunStatus, parse_run_status, transition
 from app.services.continuations import continuation_service
 from app.services.events import event_service
 from app.services.execution_recovery import execution_recovery_guard
+from app.services.flags import flag_service
 from app.services.reports import report_service
 from app.services.run_attempts import run_attempt_service
 from app.services.run_finalizer import run_finalizer
@@ -39,8 +40,25 @@ from app.solver.muteki.adapter.cost_bridge import load_muteki_usage
 USER_VISIBLE_TERMINAL = {"WAITING_USER", "COMPLETED_SOLVED", "COMPLETED_UNSOLVED", "CANCELLED"}
 MUTEKI_ATTEMPT_HEARTBEAT_SECONDS = 15.0
 MUTEKI_CANCEL_GRACE_SECONDS = 30.0
+# ``MutekiCoordinator.finalize`` is the only authority that closes the Solver
+# loop (RUN_FINISHED, Worker cancellation and Sandbox teardown).  Cancelling
+# the outer supervisor task is not the same as completing that handoff, so the
+# outer layer keeps a second, Coordinator-owned window before it lets any
+# caller turn the Run terminal.  Only a Run that exceeds both windows is
+# force-closed, and that closure always leaves durable evidence.
+# This ceiling must not be shorter than the Runtime's own
+# ``FINALIZE_GRACE_SECONDS`` (muteki_runtime.py), because the Runtime absorbs an
+# outer cancellation and keeps awaiting the same Finalize for that long.  A
+# shorter window here would report a forced closure while the Coordinator was
+# still finishing, mislabelling a completed handoff as GRACE_EXCEEDED.
+MUTEKI_FINALIZE_GRACE_SECONDS = 180.0
+# After the durable RUN_FINISHED handoff lands, the cancelled task still has to
+# unwind its own ``finally`` blocks (event flush, model/graph close, attempt
+# accounting) before the Run is closed cleanly.
+MUTEKI_FINALIZE_SETTLE_SECONDS = 5.0
 MUTEKI_NATIVE_TERMINAL_EVENT = "muteki.run_finished"
 MUTEKI_TERMINAL_RECONCILE_EVENT = "run.muteki_terminal_reconciled"
+MUTEKI_FINALIZE_GRACE_EXCEEDED_EVENT = "run.muteki_finalize_grace_exceeded"
 logger = logging.getLogger(__name__)
 
 
@@ -89,6 +107,144 @@ class RunOutcome:
         return cls(run.id, str(run.status), str(run.current_phase or ""), run.last_error_code, checkpoint.get("wp") or checkpoint.get("current_wp"))
 
 
+@dataclass(frozen=True)
+class MutekiCancelHandoff:
+    """Outcome of one Muteki cancel/stop handoff.
+
+    ``forced`` is the only value a caller may turn into a terminal Run without
+    the Coordinator's Finalize evidence.  It is always recorded as an explicit
+    ``MUTEKI_FINALIZE_GRACE_EXCEEDED_EVENT`` before it is returned, so a forced
+    closure can never be silent.
+    """
+
+    had_active_task: bool
+    task_stopped: bool
+    finalize_observed: bool
+    forced: bool
+
+
+def _runs_owning_a_container(run_ids: list[str]) -> list[str] | None:
+    """Narrow startup reaping to the Runs that actually still have a container.
+
+    ``teardown_container`` costs two docker processes per call (``docker rm -f``
+    plus a legacy per-worker sweep), so asking it about every persisted Run costs
+    ``2 * len(run_ids)`` docker invocations on every service start -- even when
+    the database holds nothing but Runs that finished months ago and were already
+    reaped.  One ``docker ps -a`` answers the same question for all of them.
+
+    Returns ``None`` when the answer cannot be obtained, which tells the caller
+    to fall back to reaping everything: an unavailable listing must never be
+    mistaken for "no containers exist", or a genuinely orphaned container would
+    leak silently.
+    """
+
+    try:
+        from muteki.solver.container_exec import _docker, _run_container_name, _safe
+
+        listing = _docker("ps", "-a", "--format", "{{.Names}}", timeout=20)
+        names = {line.strip() for line in (listing.stdout or "").splitlines() if line.strip()}
+    except Exception:
+        logger.exception("Cannot list Muteki containers; reaping every terminal Run instead")
+        return None
+    if not names:
+        return []
+    # Strays from the old per-worker design are matched by prefix, so collect the
+    # candidates once instead of rescanning the whole listing per Run.
+    legacy = [name for name in names if name.startswith("muteki-w-")]
+    owners: list[str] = []
+    for run_id in run_ids:
+        try:
+            own_name = _run_container_name(run_id)
+            own_prefix = f"muteki-w-{_safe(run_id)}-"
+        except Exception:
+            owners.append(run_id)
+            continue
+        if own_name in names or any(name.startswith(own_prefix) for name in legacy):
+            owners.append(run_id)
+    return owners
+
+
+async def _reap_muteki_container(run_id: str) -> None:
+    """Tear down any Sandbox still bearing this Run's name.
+
+    Coordinator Finalize normally owns this, and ``teardown_container`` is
+    idempotent, so the ordinary path costs nothing extra.  The reason to ask
+    again at the very end of a Muteki session is a container created *after*
+    that teardown: measured 2026-10-19, a Run reached COMPLETED_SOLVED at
+    16:42:22 while its container had been started one second earlier and then
+    sat idle with only ``runtime_agent`` inside -- no owner was left to reap
+    it.  This is the last point that still knows the Run's container name.
+
+    The listing is consulted first for the same reason startup reaping does it:
+    one ``docker ps -a`` is cheaper than a teardown call per Run.  An unknown
+    listing (``None``) falls through to asking, because "could not list" must
+    never be read as "nothing is there".
+    """
+
+    owners = await asyncio.to_thread(_runs_owning_a_container, [run_id])
+    # ``None`` means the listing was unavailable, which must be read as "unknown"
+    # rather than "empty" -- an unlistable container is exactly the leak this
+    # pass exists to close.
+    if owners != []:
+        try:
+            from muteki.solver.container_exec import teardown_container
+
+            await asyncio.to_thread(teardown_container, run_id, remove=True)
+        except Exception:  # noqa: BLE001 - cleanup must not fail the Run
+            logger.exception("Muteki container teardown failed run_id=%s", run_id)
+    _schedule_late_container_reap(run_id)
+
+
+# A container can still appear AFTER this pass.  Measured 2026-10-20: Run
+# ``eaf1de66`` reached COMPLETED_UNSOLVED at 00:00:45 and its Sandbox was
+# started at 00:00:48.7 -- three seconds too late for the teardown above, so it
+# idled with no owner left to reap it.  Provisioning can also start from the
+# A-lane ``python_run`` channel, which never goes through the official Worker's
+# ``_stopped`` guard, so the arrival cannot be prevented at the source.
+#
+# The window is short and bounded on purpose: two extra ``docker ps -a`` calls
+# per Run, and never more than ~30 s of tail.
+_LATE_REAP_DELAYS = (8.0, 30.0)
+_late_reap_tasks: set[asyncio.Task] = set()
+
+
+def _schedule_late_container_reap(run_id: str) -> None:
+    """Re-check for a Sandbox that is provisioned after the Run went terminal."""
+
+    async def _late_pass() -> None:
+        for delay in _LATE_REAP_DELAYS:
+            await asyncio.sleep(delay)
+            try:
+                owners = await asyncio.to_thread(_runs_owning_a_container, [run_id])
+            except Exception:  # noqa: BLE001 - a cleanup task must not raise
+                logger.exception("Late Muteki container check failed run_id=%s", run_id)
+                return
+            if not owners:
+                # Either it never appeared, or the first pass already removed
+                # it.  Keep watching until the window closes either way: "not
+                # listed yet" is exactly the state this exists to catch.
+                continue
+            try:
+                from muteki.solver.container_exec import teardown_container
+
+                await asyncio.to_thread(teardown_container, run_id, remove=True)
+            except Exception:  # noqa: BLE001 - cleanup must not fail the Run
+                logger.exception("Late Muteki container teardown failed run_id=%s", run_id)
+            logger.warning(
+                "Reaped a Muteki container provisioned after its Run finished run_id=%s",
+                run_id,
+            )
+            return
+
+    try:
+        task = asyncio.get_running_loop().create_task(_late_pass())
+    except RuntimeError:
+        return
+    _late_reap_tasks.add(task)
+    task.add_done_callback(_late_reap_tasks.discard)
+    logger.info("Late Muteki container window opened run_id=%s", run_id)
+
+
 class RunSupervisor:
     def __init__(self) -> None:
         self.run_supervisor_lock: dict[str, asyncio.Lock] = {}
@@ -111,10 +267,13 @@ class RunSupervisor:
     async def stop_worker(self) -> None:
         # The official Muteki Swarm tears down every run-scoped Sandbox from
         # its outer ``finally``.  Mirror that boundary when FastAPI itself is
-        # shutting down so a supervisor task cannot outlive the service.
+        # shutting down so a supervisor task cannot outlive the service.  A
+        # process shutdown does not write a terminal Run status -- startup
+        # reconciliation does -- so it must not wait for (or judge) the
+        # Coordinator Finalize handoff.
         for run_id in list(self._active_run_tasks):
             with contextlib.suppress(Exception):
-                await self.cancel_muteki(run_id)
+                await self.cancel_muteki(run_id, await_finalize=False)
         task = self._worker_task
         self._worker_task = None
         self._wake_queue = None
@@ -134,6 +293,10 @@ class RunSupervisor:
         process may also have left a RUNNING/PAUSED_RECOVERY Run without a
         live task; those containers are safe to reap because resume recreates
         the run-scoped Sandbox.
+
+        Only Runs that still have a container are handed to ``teardown_container``;
+        see ``_runs_owning_a_container`` for why an unconditional per-Run teardown
+        makes startup latency proportional to the whole Run history.
         """
 
         reapable_statuses = {status.value for status in TERMINAL} | {
@@ -154,13 +317,17 @@ class RunSupervisor:
         except Exception:
             logger.exception("Official Muteki container teardown is unavailable")
             return 0
+        run_ids = [str(run.id) for run in terminal_runs]
+        owners = await asyncio.to_thread(_runs_owning_a_container, run_ids)
+        if owners is None:
+            owners = run_ids
         reaped = 0
-        for run in terminal_runs:
+        for run_id in owners:
             try:
-                await asyncio.to_thread(teardown_container, str(run.id), remove=True)
+                await asyncio.to_thread(teardown_container, run_id, remove=True)
                 reaped += 1
             except Exception:
-                logger.exception("Terminal Muteki container reconciliation failed run_id=%s", run.id)
+                logger.exception("Terminal Muteki container reconciliation failed run_id=%s", run_id)
         return reaped
 
     async def reconcile_muteki_native_terminal(self, session, run: SolveRun) -> RunOutcome | None:
@@ -175,7 +342,11 @@ class RunSupervisor:
 
         if run is None or str(run.solver_mode or "").lower() != "muteki":
             return None
-        if RunStatus(run.status) in TERMINAL:
+        # An unrecognised persisted status reads as "not terminal": it must stay
+        # eligible for reconciliation, and it must not raise -- this call sits in
+        # the startup sweep, where one exception used to skip every other Run.
+        status = parse_run_status(run.status)
+        if status is not None and status in TERMINAL:
             return None
         run_id = str(run.id)
         active_task = self._active_run_tasks.get(run_id)
@@ -240,8 +411,17 @@ class RunSupervisor:
         if flag_found is None:
             report = run.report_json if isinstance(run.report_json, dict) else {}
             flag_found = bool(report.get("flag_verified"))
-        target = RunStatus.COMPLETED_SOLVED if bool(flag_found) else RunStatus.COMPLETED_UNSOLVED
         reason = str(nested.get("reason") or payload.get("reason") or "MUTEKI_NATIVE_FINALIZED")
+        if bool(flag_found):
+            target = RunStatus.COMPLETED_SOLVED
+        elif "TIMEOUT" in reason.upper():
+            # A durable terminal event can land after the process is
+            # interrupted but before _run_muteki writes the TIMEOUT status.
+            # Recovery must preserve the timeout reason instead of projecting
+            # the absence of a verified flag as an ordinary unsolved Run.
+            target = RunStatus.TIMEOUT
+        else:
+            target = RunStatus.COMPLETED_UNSOLVED
 
         current_status = RunStatus(run.status)
         if current_status == RunStatus.RUNNING:
@@ -263,11 +443,12 @@ class RunSupervisor:
                 run.status = RunStatus.REPORTING.value
         transition(run, target)
         run.current_phase = "REPORTING"
-        run.last_error_code = (
-            "MUTEKI_NATIVE_FINALIZED_RECONCILED_SOLVED"
-            if target == RunStatus.COMPLETED_SOLVED
-            else "MUTEKI_NATIVE_FINALIZED_RECONCILED_UNSOLVED"
-        )
+        if target == RunStatus.COMPLETED_SOLVED:
+            run.last_error_code = "MUTEKI_NATIVE_FINALIZED_RECONCILED_SOLVED"
+        elif target == RunStatus.TIMEOUT:
+            run.last_error_code = "MUTEKI_NATIVE_FINALIZED_RECONCILED_TIMEOUT"
+        else:
+            run.last_error_code = "MUTEKI_NATIVE_FINALIZED_RECONCILED_UNSOLVED"
         run.last_error_message = reason[:4000]
         checkpoint = dict(run.recovery_checkpoint_json or {})
         checkpoint["muteki_native_terminal"] = {
@@ -298,18 +479,29 @@ class RunSupervisor:
         return RunOutcome.from_run(run)
 
     async def reconcile_muteki_native_terminals(self, session, runs) -> int:
-        """Reconcile every persisted native-terminal Muteki Run once."""
+        """Reconcile every persisted native-terminal Muteki Run once.
+
+        Per-Run failures are logged and skipped.  This sweep is the one that
+        reclaims leases and reaps containers, so letting one malformed row abort
+        it would leave *every* later Run stale -- the blast radius is the whole
+        database, which is far worse than one Run going unreconciled.
+        """
 
         reconciled = 0
         for candidate in list(runs):
             run_id = str(getattr(candidate, "id", "") or "")
             if not run_id:
                 continue
-            run = await session.get(SolveRun, run_id, populate_existing=True)
-            if run is None:
-                continue
-            if await self.reconcile_muteki_native_terminal(session, run) is not None:
-                reconciled += 1
+            try:
+                run = await session.get(SolveRun, run_id, populate_existing=True)
+                if run is None:
+                    continue
+                if await self.reconcile_muteki_native_terminal(session, run) is not None:
+                    reconciled += 1
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("Muteki terminal reconciliation failed run_id=%s", run_id)
         return reconciled
 
     async def enqueue(self, run_id: str, *, reason: str) -> None:
@@ -392,9 +584,23 @@ class RunSupervisor:
                 async with SessionLocal() as session:
                     await self.continue_after_user_input(session, continuation["run_id"])
             else:
-                from app.orchestration.orchestrator import orchestrator
-
-                await orchestrator.start(continuation["run_id"], continuation["user_message"])
+                # Route through this supervisor's own dispatcher instead of
+                # calling the legacy controller directly.
+                #
+                # A persisted CHECKPOINT_RECOVERY continuation is what a service
+                # restart produces for a Run it interrupted -- and that Run may
+                # well be a canonical Muteki one, since a restart in the middle
+                # of a solve is exactly when one is written.  Entering
+                # ``orchestrator.start`` for it built the *legacy* engine and
+                # died on ``unsupported engine type: claude_cli``: an error that
+                # names a CLI but is really "this Run belongs to another
+                # controller".  ``continue_until_terminal`` routes by
+                # ``solver_mode`` and is the same entry a normal start uses, so
+                # there is one dispatch table rather than two that can diverge.
+                async with SessionLocal() as session:
+                    await self.continue_until_terminal(
+                        session, continuation["run_id"], continuation["user_message"]
+                    )
             if not completed_before_runtime:
                 async with SessionLocal() as session:
                     await continuation_service.complete(session, continuation["id"])
@@ -419,38 +625,70 @@ class RunSupervisor:
         if task is not None and self._active_run_tasks.get(run_id) is task:
             self._active_run_tasks.pop(run_id, None)
 
-    async def cancel_muteki(
+    async def cancel_muteki_with_handoff(
         self,
         run_id: str,
         *,
         grace_seconds: float = MUTEKI_CANCEL_GRACE_SECONDS,
-    ) -> bool:
-        """Cancel and reap one canonical Muteki run before lifecycle close.
+        finalize_grace_seconds: float = MUTEKI_FINALIZE_GRACE_SECONDS,
+        await_finalize: bool = True,
+    ) -> MutekiCancelHandoff:
+        """Cancel one canonical Muteki run and hand off its Finalize safely.
 
         The outer API must not mark a native Run terminal while its
         Coordinator is still able to append Graph events.  Cancelling the
         supervisor task first enters the official Swarm/Worker ``finally``
-        paths; the idempotent container teardown below also covers an orphan
-        left by a process restart where this supervisor has no task handle.
+        paths, but a cancelled task can also end *while* ``Coordinator.finalize``
+        (RUN_FINISHED, Worker cancellation, Sandbox teardown) is still running
+        -- for example when the cancellation lands inside the Runtime's own
+        cooperative total-timeout wait.  This method therefore waits twice:
+        once for the cancelled task, then for the Coordinator's durable
+        ``run_finished`` handoff.  Only when both windows expire is the closure
+        forced, and that forced closure is recorded as explicit evidence
+        instead of being written silently.
+
+        The idempotent container teardown below also covers an orphan left by a
+        process restart where this supervisor has no task handle.
         """
 
         task = self._active_run_tasks.get(run_id)
         current = asyncio.current_task()
-        if task is not None and task is not current and not task.done():
+        had_active_task = task is not None and task is not current
+        task_stopped = True
+        finalize_observed = True
+        forced = False
+        if had_active_task:
             task.cancel()
-            try:
-                await asyncio.wait_for(
-                    asyncio.shield(task),
-                    timeout=max(0.1, float(grace_seconds)),
+            task_stopped = await self._await_muteki_task(task, grace_seconds)
+            if not task_stopped:
+                logger.warning(
+                    "Muteki task did not stop within grace run_id=%s grace_seconds=%.1f",
+                    run_id,
+                    grace_seconds,
                 )
-            except asyncio.CancelledError:
-                # The cancelled Muteki task is expected to propagate
-                # CancelledError after its finally blocks have completed.
-                pass
-            except asyncio.TimeoutError:
-                logger.warning("Muteki task did not stop within grace run_id=%s", run_id)
-            except Exception:
-                logger.exception("Muteki task failed while being cancelled run_id=%s", run_id)
+            if await_finalize:
+                # ``_run_muteki`` releases the attempt/lease and the outer Run
+                # is closed by the caller right after this method returns, so
+                # the Coordinator's terminal handoff has to land first.
+                finalize_observed = await self._await_muteki_finalize_handoff(
+                    run_id, finalize_grace_seconds
+                )
+                if not finalize_observed:
+                    forced = True
+                    await self._record_muteki_finalize_grace_exceeded(
+                        run_id,
+                        reason="CANCEL_FINALIZE_GRACE_EXCEEDED",
+                        detail={
+                            "grace_seconds": float(grace_seconds),
+                            "finalize_grace_seconds": float(finalize_grace_seconds),
+                            "task_stopped": bool(task_stopped),
+                        },
+                    )
+                    task.cancel()
+                elif not task_stopped:
+                    task_stopped = await self._await_muteki_task(
+                        task, MUTEKI_FINALIZE_SETTLE_SECONDS
+                    )
 
         # Official Muteki teardown is idempotent and is the only container
         # cleanup authority.  It is also required for orphaned tasks from a
@@ -461,7 +699,167 @@ class RunSupervisor:
             await asyncio.to_thread(teardown_container, run_id, remove=True)
         except Exception:
             logger.exception("Muteki container teardown failed run_id=%s", run_id)
-        return task is not None
+        return MutekiCancelHandoff(
+            had_active_task=had_active_task,
+            task_stopped=task_stopped,
+            finalize_observed=finalize_observed,
+            forced=forced,
+        )
+
+    async def cancel_muteki(
+        self,
+        run_id: str,
+        *,
+        grace_seconds: float = MUTEKI_CANCEL_GRACE_SECONDS,
+        finalize_grace_seconds: float = MUTEKI_FINALIZE_GRACE_SECONDS,
+        await_finalize: bool = True,
+    ) -> bool:
+        """Cancel and reap one canonical Muteki run before lifecycle close.
+
+        Returns whether this supervisor owned a live task for the Run.  See
+        :meth:`cancel_muteki_with_handoff` for the Finalize-handoff contract.
+        """
+
+        handoff = await self.cancel_muteki_with_handoff(
+            run_id,
+            grace_seconds=grace_seconds,
+            finalize_grace_seconds=finalize_grace_seconds,
+            await_finalize=await_finalize,
+        )
+        return handoff.had_active_task
+
+    async def _await_muteki_task(self, task: asyncio.Task, timeout_seconds: float) -> bool:
+        """Wait for one cancelled Muteki task to finish its ``finally`` blocks."""
+
+        if task.done():
+            return True
+        try:
+            await asyncio.wait_for(
+                asyncio.shield(task),
+                timeout=max(0.1, float(timeout_seconds)),
+            )
+        except asyncio.CancelledError:
+            # The cancelled Muteki task is expected to propagate
+            # CancelledError after its finally blocks have completed.
+            return True
+        except asyncio.TimeoutError:
+            return False
+        except Exception:
+            logger.exception("Muteki task failed while being cancelled")
+            return True
+        return True
+
+    async def _muteki_finalize_handoff_state(self, run_id: str) -> str:
+        """Classify the durable Coordinator handoff for one Run.
+
+        ``pending`` means a native Muteki session already produced Graph events
+        but has not written its terminal ``run_finished`` handoff yet.  Every
+        other answer (``observed``/``none``/``unknown``) keeps the caller's
+        previous behaviour, so an unreachable database can never turn a
+        cancellation into an indefinite wait.
+        """
+
+        try:
+            async with SessionLocal() as session:
+                run = await session.get(SolveRun, run_id)
+                if run is None:
+                    return "unknown"
+                terminal = await session.scalar(
+                    select(RunEvent)
+                    .where(
+                        RunEvent.run_id == run_id,
+                        RunEvent.event_type == MUTEKI_NATIVE_TERMINAL_EVENT,
+                    )
+                    .order_by(RunEvent.sequence.desc())
+                )
+                if terminal is not None:
+                    attempt = await session.scalar(
+                        select(RunAttempt)
+                        .where(RunAttempt.run_id == run_id)
+                        .order_by(RunAttempt.attempt_number.desc())
+                    )
+                    if attempt is not None and attempt.started_at is not None:
+                        event_at = terminal.created_at
+                        attempt_at = attempt.started_at
+                        if event_at.tzinfo is None:
+                            event_at = event_at.replace(tzinfo=UTC)
+                        if attempt_at.tzinfo is None:
+                            attempt_at = attempt_at.replace(tzinfo=UTC)
+                        if event_at < attempt_at:
+                            # A handoff from an earlier attempt is not evidence
+                            # for the attempt that is running right now.
+                            return "pending"
+                    return "observed"
+                activity = await session.scalar(
+                    select(RunEvent.id)
+                    .where(
+                        RunEvent.run_id == run_id,
+                        RunEvent.event_type.like("muteki.%"),
+                    )
+                    .limit(1)
+                )
+                return "pending" if activity is not None else "none"
+        except Exception:
+            logger.debug(
+                "Muteki Finalize handoff state unavailable run_id=%s", run_id, exc_info=True
+            )
+            return "unknown"
+
+    async def _await_muteki_finalize_handoff(self, run_id: str, timeout_seconds: float) -> bool:
+        """Wait for the Coordinator's durable RUN_FINISHED handoff.
+
+        Returns ``True`` as soon as the handoff is observed (or cannot be
+        observed at all) and ``False`` only when a live native session has still
+        not produced it when the window expires.
+        """
+
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + max(0.0, float(timeout_seconds))
+        while True:
+            state = await self._muteki_finalize_handoff_state(run_id)
+            if state != "pending":
+                return True
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                return False
+            await asyncio.sleep(min(0.5, max(0.05, remaining)))
+
+    async def _record_muteki_finalize_grace_exceeded(
+        self,
+        run_id: str,
+        *,
+        reason: str,
+        detail: dict | None = None,
+    ) -> None:
+        """Record a Muteki closure that happened without the Finalize handoff.
+
+        Forced closure is a lifecycle anomaly, never a normal path, so it is
+        always logged at ``error`` level and persisted as a Run event that
+        carries the exact reason and window.
+        """
+
+        payload = {"run_id": run_id, "reason": reason, **(detail or {})}
+        logger.error(
+            "Muteki Run closed without the Coordinator Finalize handoff run_id=%s "
+            "reason=%s detail=%s",
+            run_id,
+            reason,
+            detail or {},
+        )
+        try:
+            async with SessionLocal() as session:
+                await event_service.append(
+                    session,
+                    run_id,
+                    MUTEKI_FINALIZE_GRACE_EXCEEDED_EVENT,
+                    payload,
+                )
+        except Exception:
+            # The durable record is best effort: a cleared database or a
+            # shutdown race must not block the forced teardown itself.
+            logger.exception(
+                "Muteki Finalize handoff evidence could not be persisted run_id=%s", run_id
+            )
 
     async def _worker_loop(self) -> None:
         # Keep the queue object local for the lifetime of this loop.  Shutdown
@@ -499,7 +897,13 @@ class RunSupervisor:
                     except asyncio.CancelledError:
                         if asyncio.current_task() and asyncio.current_task().cancelling():
                             raise
-            except Exception:
+            except (Exception, SystemExit):
+                # Last-resort net for the whole supervisor queue.  ``SystemExit``
+                # is included because it is a ``BaseException``: a plain
+                # ``except Exception`` would let one escape, and an escaping
+                # ``SystemExit`` in the loop thread tears down the event loop --
+                # one bad Run ending the whole service.  A wake-up failing is
+                # normal; the queue must survive it and take the next one.
                 logger.exception("Supervisor wakeup failed run_id=%s reason=%s", run_id, reason)
             finally:
                 queue.task_done()
@@ -898,6 +1302,63 @@ class RunSupervisor:
         await run_finalizer.finish_unsolved_with_wp(session, run, "NO_PROGRESS_LOOP")
         return await self._outcome(session, run)
 
+    async def _record_runtime_flag_isolated(
+        self, run_id: str, candidate: str, *, required: bool = True
+    ) -> None:
+        """Write a reported flag to the ledger on a session of its own.
+
+        ``_run_muteki`` shares its session with ``MutekiRuntime``, whose Workers
+        touch the event loop's session from ``asyncio.to_thread`` callbacks.
+        By the time a solved Run reports its flag that session can already be in
+        a failed-flush state, and every ORM read on it then raises
+        ``PendingRollbackError`` or ``MissingGreenlet``.  The old code caught
+        that, logged a warning and carried on -- so Run ``bc80a2fd`` reached
+        ``COMPLETED_SOLVED`` holding the byte-exact flag while
+        ``flag_candidates`` stayed empty.  The benchmark evaluator reads only
+        that table, so the Run was a real solve scored as INCOMPLETE.
+
+        A fresh session has none of that history: it loads the Run and its
+        Challenge by primary key and commits on its own, so the ledger cannot be
+        lost to whatever happened to the solve transaction.
+        """
+
+        try:
+            async with SessionLocal() as ledger:
+                fresh_run = await ledger.get(SolveRun, run_id)
+                if fresh_run is None:
+                    raise LookupError(f"run {run_id} disappeared before its flag was recorded")
+                fresh_challenge = await ledger.get(Challenge, fresh_run.challenge_id)
+                if fresh_challenge is None:
+                    raise LookupError(
+                        f"challenge {fresh_run.challenge_id} missing for run {run_id}"
+                    )
+                await flag_service.record_runtime_flag(
+                    ledger, fresh_run, fresh_challenge, candidate
+                )
+        except Exception:  # noqa: BLE001 - see the docstring for why this is contained
+            if not required:
+                logger.warning(
+                    "unable to record suspected flag for run %s", run_id, exc_info=True
+                )
+                return
+            # A real flag that cannot reach the ledger turns a solve into an
+            # INCOMPLETE in every downstream report.  Log at error level and
+            # leave a durable Run event, so this is never silent again.
+            logger.error(
+                "flag ledger write FAILED for run %s; the solve will read as INCOMPLETE",
+                run_id,
+                exc_info=True,
+            )
+            with contextlib.suppress(Exception):
+                async with SessionLocal() as ledger:
+                    await event_service.append(
+                        ledger,
+                        run_id=run_id,
+                        event_type="flag.ledger_write_failed",
+                        payload={"candidate": candidate, "reason": "see backend log"},
+                    )
+                    await ledger.commit()
+
     async def _run_muteki(self, session, run: SolveRun) -> RunOutcome:
         """Run the canonical Muteki engine as an explicit opt-in mode."""
         from app.models.challenge import Challenge
@@ -946,7 +1407,25 @@ class RunSupervisor:
                 max_rounds=None,
                 max_workers=10,
             )
-            await session.refresh(run)
+            try:
+                await session.refresh(run)
+            except Exception:  # noqa: BLE001 - a broken session must not kill the Run
+                # ``run_once`` drives container work from Worker threads.  When
+                # one of those touches the async session, the ORM comes back
+                # with expired attributes and no greenlet left to reload them;
+                # the refresh then raises ``MissingGreenlet`` and, before this
+                # guard, took the whole lifecycle coroutine with it -- leaving
+                # a finished Run parked on RUNNING forever.  Re-opening the row
+                # by primary key is enough to continue.
+                logger.warning(
+                    "Muteki refresh failed run_id=%s; reloading the Run row",
+                    run_id,
+                    exc_info=True,
+                )
+                await session.rollback()
+                run = await session.get(SolveRun, run_id, populate_existing=True)
+                if run is None:
+                    raise
             # Native Muteki Workers are one durable application ToolCall even
             # though their internal CLI may issue several sandbox commands.
             # Reconcile the existing Run counters from that authoritative
@@ -990,6 +1469,12 @@ class RunSupervisor:
                 "reason": result.reason,
                 "flag": result.flag if result.flag_found else None,
                 "flag_verified": bool(result.flag_found),
+                # Values the pipeline recovered that do not fit the challenge's
+                # declared banner.  They are NOT solves and are NOT submitted --
+                # they are materialised as reviewable candidates so an operator
+                # decides, because the usual cause is a value taken from
+                # somewhere other than the target.
+                "suspected_flags": list(getattr(result, "suspected_flags", ()) or ()),
                 "evidence_refs": [str(item) for item in evidence_refs],
                 "evidence_count": len(evidence_refs),
                 "graph_path": result.graph_path,
@@ -1007,14 +1492,54 @@ class RunSupervisor:
                     }
                 )
             await session.commit()
+            # The runtime owns the solve; the platform owns the flag ledger.
+            # Muteki reported its flag only through ``muteki.flag_found``, so
+            # ``flag_candidates`` stayed empty and the benchmark evaluator --
+            # which reads only that table -- scored a solved case as
+            # INCOMPLETE.  Record it here, where the ORM Challenge (and its
+            # declared banner) is available, and re-verify the value instead of
+            # trusting the runtime's own bit.
+            if result.flag_found and result.flag:
+                await self._record_runtime_flag_isolated(run_id, str(result.flag))
+            for suspected in getattr(result, "suspected_flags", ()) or ():
+                # A suspect is informative only, so a failure here is genuinely
+                # tolerable -- unlike a real flag, which must reach the ledger.
+                await self._record_runtime_flag_isolated(
+                    run_id, str(suspected), required=False
+                )
+            if result.status not in {
+                RunStatus.COMPLETED_SOLVED.value,
+                RunStatus.COMPLETED_UNSOLVED.value,
+            }:
+                # The Coordinator owns the terminal handoff.  When the runtime
+                # returns without it, the outer Run is about to become
+                # terminal while Finalize never landed: keep that anomaly
+                # durable instead of closing the Run silently.
+                if await self._muteki_finalize_handoff_state(run_id) == "pending":
+                    await self._record_muteki_finalize_grace_exceeded(
+                        run_id,
+                        reason="RUNTIME_RETURNED_WITHOUT_HANDOFF",
+                        detail={"runtime_status": str(result.status)},
+                    )
             if result.status in {
                 RunStatus.COMPLETED_SOLVED.value,
                 RunStatus.COMPLETED_UNSOLVED.value,
             }:
                 await report_service.generate_muteki(session, run, result)
-        except Exception as error:
+        except (Exception, SystemExit) as error:
+            # ``SystemExit`` is included on purpose.  It is a ``BaseException``,
+            # so it slips past every ``except Exception`` between a failed host
+            # operation and here -- and one that escapes a background task
+            # terminates the whole event loop, taking the API with it.  A Run may
+            # fail for any reason; the service may not.  Converting it here means
+            # such a failure lands on the Run as FAILED_ENGINE instead.
             await session.rollback()
-            run = await session.get(SolveRun, run.id)
+            # ``rollback`` expires every attribute on ``run``.  Reading
+            # ``run.id`` afterwards re-loads it lazily, and that load has no
+            # greenlet once the session has already been unwound -- the
+            # ``MissingGreenlet`` that escaped this handler and killed the
+            # lifecycle coroutine.  ``run_id`` was captured before the try.
+            run = await session.get(SolveRun, run_id)
             if run is None:
                 raise
             if RunStatus(run.status) not in {RunStatus.COMPLETED_SOLVED, RunStatus.COMPLETED_UNSOLVED}:
@@ -1053,6 +1578,10 @@ class RunSupervisor:
                     await session.refresh(current_run)
                     await _reconcile_muteki_run_counters(session, current_run)
                     await session.commit()
+            # Last point that still owns this Run's Sandbox name.  A Run about
+            # to return to the supervisor has no further owner, so a container
+            # left behind now is a leak until the next service restart.
+            await _reap_muteki_container(run_id)
         await event_service.append(session, run_id, "run.completed" if result.status.startswith("COMPLETED") else "run.failed", {"engine": "muteki", "status": run.status, "reason": result.reason, "flag_verified": result.flag_found})
         return await self._outcome(session, run)
 
@@ -1122,9 +1651,72 @@ class RunSupervisor:
         async with SessionLocal() as session:
             try:
                 return await self.continue_until_terminal(session, run_id, user_message)
+            except (Exception, SystemExit) as error:
+                # This coroutine *is* the Run's lifecycle.  Anything escaping
+                # here -- typically a session that died under the runtime --
+                # used to end the task and leave the Run row on RUNNING with
+                # no owner: ``_active_run_tasks`` is unregistered in the
+                # ``finally`` below, so even the cancel endpoint can no longer
+                # reach it.  Measured 2026-10-19: a ``MissingGreenlet`` from a
+                # ``run.id`` read after ``rollback`` did exactly that and the
+                # Run sat at RUNNING until an operator gave up on it.
+                logger.exception("run_background crashed run_id=%s", run_id)
+                closed = await self._close_crashed_run(run_id, error)
+                return RunOutcome(run_id, closed or "FAILED_ENGINE", "", "SUPERVISOR_CRASHED")
             finally:
                 self._unregister_run_task(run_id, task)
                 self._release_run_lock(run_id, lock)
+
+    async def _close_crashed_run(self, run_id: str, error: BaseException) -> str | None:
+        """Force a Run terminal after its lifecycle coroutine died.
+
+        The Run row is the durable projection of the lifecycle, so a coroutine
+        that ends without writing it leaves a zombie that nothing owns.  A
+        fresh session is used on purpose: the session that raised is the thing
+        that broke.
+
+        Returns the status the Run was left in, or ``None`` when the row is
+        gone or could not be read at all.  A Run that is already settled is
+        reported as-is rather than overwritten: the crash happened *after* the
+        useful work, and the caller wants to see that work, not the failure.
+        """
+
+        from app.core.database import SessionLocal
+        from app.orchestration.state_machine import RunStatus, transition
+
+        try:
+            async with SessionLocal() as session:
+                run = await session.get(SolveRun, run_id, populate_existing=True)
+                if run is None:
+                    return None
+                status = RunStatus(str(run.status))
+                if status in {
+                    RunStatus.COMPLETED_SOLVED,
+                    RunStatus.COMPLETED_UNSOLVED,
+                    RunStatus.TIMEOUT,
+                    RunStatus.CANCELLED,
+                    RunStatus.FAILED_ENGINE,
+                    # WAITING_USER is the one non-terminal status that is
+                    # *not* a zombie: a human owns it and can answer.  Marking
+                    # it failed here would burn the operator's only way back
+                    # into the Run, so a crash while waiting is logged and
+                    # left for that person to retry.
+                    RunStatus.WAITING_USER,
+                }:
+                    return str(run.status)
+                if status == RunStatus.RUNNING:
+                    # The shared state machine has no RUNNING -> FAILED_ENGINE
+                    # edge; REPORTING is the lifecycle bridge the error handler
+                    # in ``_run_muteki`` uses for the same reason.
+                    transition(run, RunStatus.REPORTING)
+                transition(run, RunStatus.FAILED_ENGINE)
+                run.last_error_code = "SUPERVISOR_CRASHED"
+                run.last_error_message = f"{type(error).__name__}: {error}"[:4000]
+                await session.commit()
+                return RunStatus.FAILED_ENGINE.value
+        except Exception:  # noqa: BLE001 - last-resort cleanup must not raise
+            logger.exception("unable to close crashed run_id=%s", run_id)
+        return None
 
     async def run_after_user_input_background(self, run_id: str) -> RunOutcome:
         lock = self.run_supervisor_lock.setdefault(run_id, asyncio.Lock())
@@ -1149,6 +1741,15 @@ class RunSupervisor:
                 if current == baseline:
                     return await self._mark_user_input_no_progress(session, run, current)
                 return RunOutcome.from_run(run)
+            except (Exception, SystemExit) as error:
+                # Same boundary as ``run_background``: this task owns the Run
+                # for as long as it lives, and an escape here leaves a row that
+                # no endpoint can reach.  The difference is what counts as
+                # settled -- a Run that is still WAITING_USER is kept there so
+                # the operator can answer again.
+                logger.exception("run_after_user_input_background crashed run_id=%s", run_id)
+                closed = await self._close_crashed_run(run_id, error)
+                return RunOutcome(run_id, closed or "WAITING_USER", "", "SUPERVISOR_CRASHED")
             finally:
                 self._unregister_run_task(run_id, task)
                 self._release_run_lock(run_id, lock)

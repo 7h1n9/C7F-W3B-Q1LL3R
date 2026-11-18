@@ -1,0 +1,18 @@
+name: '[CISCN2019 华北赛区 Day1 Web2]ikun 47b5f60bc587'
+category: web
+keywords:
+- ciscn2019
+- day1
+- web2
+- ikun
+steps:
+- RACE_WORKER_TIMEOUT
+- '[claude] alg=none / empty-sig / weak-secret brute (rockyou 14M, masks, CTF lists)
+  all fail — strict HS256 verify; the only viable secret was the source-leaked `1Kun`.'
+- '[claude] Reaching flag via level/lv6 alone, /info IDOR, SQLi in id/price/discount,
+  SSTI in username/email/next — none reflect or execute.'
+evidence_chain: []
+success_format: CTF2\{[^}]+\}
+source: 47b5f60b-c587-4676-8e62-5a352b9129cf (run 78889b76-c22b-447b-b04c-83639b64e588)
+notes: NO_VERIFIED_FLAG
+kind: negative

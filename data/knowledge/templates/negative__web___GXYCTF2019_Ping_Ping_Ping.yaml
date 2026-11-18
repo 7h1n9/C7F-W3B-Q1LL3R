@@ -1,0 +1,17 @@
+name: '[GXYCTF2019]Ping Ping Ping'
+category: web
+keywords:
+- gxyctf2019
+- ping
+- imported
+- from
+- buuctf
+- ctfd
+steps:
+- RACE_WORKER_TIMEOUT
+- ROUND_BUDGET_EXHAUSTED_BEFORE_REASON
+evidence_chain: []
+success_format: CTF2\{[^}]+\}
+source: b9ab36d2-4cd4-4977-9291-d13c5b1dc713 (run 4c54bd02-c70b-4874-9c62-5743dcedb862)
+notes: NO_VERIFIED_FLAG
+kind: negative

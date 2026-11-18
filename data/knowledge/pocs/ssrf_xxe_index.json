@@ -1,0 +1,248 @@
+[
+  {
+    "id": "founder-add-or-update-org-xxe",
+    "name": "方正畅享全媒体新闻采编系统addOrUpdateOrg存在XXE漏洞",
+    "file": "afrog\\afrog-pocs\\vulnerability\\founder-add-or-update-org-xxe.yaml",
+    "score": 12
+  },
+  {
+    "id": "vmware-vcenter-provider-logo-ssrf",
+    "name": "Vmware VCenter - Arbitrary File Read",
+    "file": "afrog\\afrog-pocs\\vulnerability\\vmware-vcenter-provider-logo-ssrf.yaml",
+    "score": 12
+  },
+  {
+    "id": "xiruanyun-xms-detect",
+    "name": "西软云XMS",
+    "file": "afrog\\afrog-pocs\\fingerprinting\\xiruanyun-xms-detect.yaml",
+    "score": 11
+  },
+  {
+    "id": "CVE-2017-12629",
+    "name": "Apache Solr <= 7.1 XML entity injection",
+    "file": "afrog\\afrog-pocs\\CVE\\2017\\CVE-2017-12629.yaml",
+    "score": 10
+  },
+  {
+    "id": "CVE-2018-1000600",
+    "name": "Pre-auth Fully-responded SSRF",
+    "file": "afrog\\afrog-pocs\\CVE\\2018\\CVE-2018-1000600.yaml",
+    "score": 10
+  },
+  {
+    "id": "CVE-2018-15531",
+    "name": "JavaMelody XXE",
+    "file": "afrog\\afrog-pocs\\CVE\\2018\\CVE-2018-15531.yaml",
+    "score": 10
+  },
+  {
+    "id": "CVE-2018-8033",
+    "name": "Apache OFBiz XXE",
+    "file": "afrog\\afrog-pocs\\CVE\\2018\\CVE-2018-8033.yaml",
+    "score": 10
+  },
+  {
+    "id": "CVE-2020-13379",
+    "name": "Grafana 3.0.1-7.0.1 - Server-Side Request Forgery",
+    "file": "afrog\\afrog-pocs\\CVE\\2020\\CVE-2020-13379.yaml",
+    "score": 10
+  },
+  {
+    "id": "CVE-2021-44139",
+    "name": "Alibaba Sentinel - Server-side request forgery (SSRF)",
+    "file": "afrog\\afrog-pocs\\CVE\\2021\\CVE-2021-44139.yaml",
+    "score": 10
+  },
+  {
+    "id": "CVE-2022-2414",
+    "name": "Dogtag PKI XML实体注入漏洞 CVE-2022-2414",
+    "file": "afrog\\afrog-pocs\\CVE\\2022\\CVE-2022-2414.yaml",
+    "score": 10
+  },
+  {
+    "id": "CVE-2023-25717",
+    "name": "Ruckus Wireless Admin - Remote Code Execution",
+    "file": "afrog\\afrog-pocs\\CVE\\2023\\CVE-2023-25717.yaml",
+    "score": 10
+  },
+  {
+    "id": "CVE-2024-22024",
+    "name": "Ivanti Pulse Connect Secure VPN XXE",
+    "file": "afrog\\afrog-pocs\\CVE\\2024\\CVE-2024-22024.yaml",
+    "score": 10
+  },
+  {
+    "id": "CVE-2024-29198",
+    "name": "金和OA-C6系统ActionDataSet接口XXE漏洞",
+    "file": "afrog\\afrog-pocs\\CVE\\2024\\CVE-2024-29198.yaml",
+    "score": 10
+  },
+  {
+    "id": "CVE-2025-30220",
+    "name": "GeoServer XXE 漏洞",
+    "file": "afrog\\afrog-pocs\\CVE\\2025\\CVE-2025-30220.yaml",
+    "score": 10
+  },
+  {
+    "id": "CVE-2025-58360",
+    "name": "GeoServer XML外部实体注入漏洞",
+    "file": "afrog\\afrog-pocs\\CVE\\2025\\CVE-2025-58360.yaml",
+    "score": 10
+  },
+  {
+    "id": "ecology-oa-deleteuserrequestinfobyxml-xxe",
+    "name": "泛微 OA deleteUserRequestInfoByXml XXE",
+    "file": "afrog\\afrog-pocs\\vulnerability\\ecology-oa-deleteuserrequestinfobyxml-xxe.yaml",
+    "score": 10
+  },
+  {
+    "id": "jinhe-oa-addressimportpub-xxe",
+    "name": "金和OA AddressImportPub.aspx XXE漏洞",
+    "file": "afrog\\afrog-pocs\\vulnerability\\jinhe-oa-addressimportpub-xxe.yaml",
+    "score": 10
+  },
+  {
+    "id": "jinhe-oa-c6-actiondataset-xxe",
+    "name": "金和OA-C6系统ActionDataSet接口XXE漏洞",
+    "file": "afrog\\afrog-pocs\\vulnerability\\jinhe-oa-c6-actiondataset-xxe.yaml",
+    "score": 10
+  },
+  {
+    "id": "jinhe-oa-checkwwd-xxe",
+    "name": "金和OA CheckPwd.aspx XXE漏洞",
+    "file": "afrog\\afrog-pocs\\vulnerability\\jinhe-oa-checkwwd-xxe.yaml",
+    "score": 10
+  },
+  {
+    "id": "resin-inputfile-fileread-or-ssrf",
+    "name": "resin inputfile fileread",
+    "file": "afrog\\afrog-pocs\\vulnerability\\resin-inputfile-fileread.yaml",
+    "score": 10
+  },
+  {
+    "id": "wanhu-oa-tele-conference-service-xxe",
+    "name": "万户OA TeleConferenceService XXE注入漏洞",
+    "file": "afrog\\afrog-pocs\\vulnerability\\wanhu-oa-tele-conference-service-xxe.yaml",
+    "score": 10
+  },
+  {
+    "id": "xiruanyun-xms-futurehotel-operate-xxe",
+    "name": "西软云XMS-futurehotel-operate 接口存在XXE漏洞",
+    "file": "afrog\\afrog-pocs\\vulnerability\\xiruanyun-xms-futurehotel-operate-xxe.yaml",
+    "score": 10
+  },
+  {
+    "id": "yonyou-nccloud-iupdateservice-xxe",
+    "name": "用友NC Cloud IUpdateService接口存在XXE漏洞",
+    "file": "afrog\\afrog-pocs\\vulnerability\\yonyou-nccloud-iupdateservice-xxe.yaml",
+    "score": 10
+  },
+  {
+    "id": "yonyou-u8-ufgovbank-xxe",
+    "name": "用友GRP-U8 ufgovbank XXE漏洞",
+    "file": "afrog\\afrog-pocs\\vulnerability\\yonyou-u8-ufgovbank-xxe.yaml",
+    "score": 10
+  },
+  {
+    "id": "",
+    "name": "yaml-poc-microsoft-exchange_server-logical-CVE-2021-26855",
+    "file": "xray\\xpoc-xray2.0-poc\\yaml-poc-microsoft-exchange_server-logical-CVE-2021-26855.yml",
+    "score": 9
+  },
+  {
+    "id": "CVE-2021-28164",
+    "name": "Jetty Authorization Before Parsing and Canonicalization",
+    "file": "afrog\\afrog-pocs\\CVE\\2021\\CVE-2021-28164.yaml",
+    "score": 9
+  },
+  {
+    "id": "CVE-2019-18394",
+    "name": "Openfire Full Read SSRF",
+    "file": "afrog\\afrog-pocs\\CVE\\2019\\CVE-2019-18394.yaml",
+    "score": 8
+  },
+  {
+    "id": "CVE-2019-9670",
+    "name": "Zimbra Collaboration XXE",
+    "file": "afrog\\afrog-pocs\\CVE\\2019\\CVE-2019-9670.yaml",
+    "score": 8
+  },
+  {
+    "id": "CVE-2021-21287",
+    "name": "MinIO Browser API - Server-Side Request Forgery",
+    "file": "afrog\\afrog-pocs\\CVE\\2021\\CVE-2021-21287.yaml",
+    "score": 8
+  },
+  {
+    "id": "CVE-2021-21975",
+    "name": "vRealize Operations Manager API SSRF (VMWare Operations)",
+    "file": "afrog\\afrog-pocs\\CVE\\2021\\CVE-2021-21975.yaml",
+    "score": 8
+  },
+  {
+    "id": "CVE-2021-22214",
+    "name": "Unauthenticated Gitlab SSRF - CI Lint API",
+    "file": "afrog\\afrog-pocs\\CVE\\2021\\CVE-2021-22214.yaml",
+    "score": 8
+  },
+  {
+    "id": "CVE-2021-27905",
+    "name": "Apache Solr <= 8.8.1 SSRF",
+    "file": "afrog\\afrog-pocs\\CVE\\2021\\CVE-2021-27905.yaml",
+    "score": 8
+  },
+  {
+    "id": "CVE-2025-53833",
+    "name": "LaRecipe 模板注入漏洞",
+    "file": "afrog\\afrog-pocs\\CVE\\2025\\CVE-2025-53833.yaml",
+    "score": 8
+  },
+  {
+    "id": "angjie-crm-rptviewer-ssrf",
+    "name": "昂捷CRM-RptViewer.aspx存在SSRF漏洞",
+    "file": "afrog\\afrog-pocs\\vulnerability\\angjie-crm-rptviewer-ssrf.yaml",
+    "score": 8
+  },
+  {
+    "id": "jinhe-oa-addtask-sqli",
+    "name": "金和OA-AddTask.aspx存在SQL注入漏洞",
+    "file": "afrog\\afrog-pocs\\vulnerability\\jinhe-oa-addtask-sqli.yaml",
+    "score": 8
+  },
+  {
+    "id": "jinhe-oa-taskreportconfirm-sqli",
+    "name": "金和OA-TaskReportConfirm.aspx存在SQL注入漏洞",
+    "file": "afrog\\afrog-pocs\\vulnerability\\jinhe-oa-taskreportconfirm-sqli.yaml",
+    "score": 8
+  },
+  {
+    "id": "jinhe-oa-xmlhttp-xxe",
+    "name": "金和OA-XmlHttp.aspx-XXE漏洞",
+    "file": "afrog\\afrog-pocs\\vulnerability\\jinhe-oa-xmlhttp-xxe.yaml",
+    "score": 8
+  },
+  {
+    "id": "sangfor-dc-sangforindex-xxe",
+    "name": "深信服 DC数据中心管理系统 sangforindex XML实体注入",
+    "file": "afrog\\afrog-pocs\\vulnerability\\sangfor-dc-sangforindex-xxe.yaml",
+    "score": 8
+  },
+  {
+    "id": "seeyon-oa-getajaxdataservlet-xxe",
+    "name": "致远OA getAjaxDataServlet XXE",
+    "file": "afrog\\afrog-pocs\\vulnerability\\seeyon-oa-getajaxdataservlet-xxe.yaml",
+    "score": 8
+  },
+  {
+    "id": "shikongzhiyou-richclient.openform-xxe",
+    "name": "时空智友企业流程化管控系统 XML 外部实体注入漏洞",
+    "file": "afrog\\afrog-pocs\\vulnerability\\shikongzhiyou-richclient.openform-xxe.yaml",
+    "score": 8
+  },
+  {
+    "id": "solr-file-read",
+    "name": "Apache Solr <= 8.8.1 Arbitrary File Read",
+    "file": "afrog\\afrog-pocs\\vulnerability\\solr-file-read.yaml",
+    "score": 8
+  }
+]

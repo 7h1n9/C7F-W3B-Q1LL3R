@@ -1,0 +1,96 @@
+{
+  "configuration_fingerprint": "0f519c144596fce303fdf74a5bd0b1e775d5d0f03cb01e4581d302810d7b00d7",
+  "created_at": "2026-10-15T17:49:03.668489+00:00",
+  "dry_run": true,
+  "manifest_created_at": "2026-10-15T17:49:03.137127+00:00",
+  "resume": false,
+  "schema_version": 1,
+  "skipped_cases": [
+    {
+      "available_range": "asset-warranty-mysql",
+      "case_id": "ssrf-internal",
+      "requires_range": "web-vuln-lab",
+      "status": "SKIPPED_REQUIRES_RANGE_MISSING"
+    },
+    {
+      "available_range": "asset-warranty-mysql",
+      "case_id": "xss-reflected",
+      "requires_range": "web-vuln-lab",
+      "status": "SKIPPED_REQUIRES_RANGE_MISSING"
+    }
+  ],
+  "tasks": [
+    {
+      "arm": "off",
+      "artifact": "artifacts\\sql-injection-golden__off__r1.json",
+      "case_id": "sql-injection-golden",
+      "repeat": 1
+    },
+    {
+      "arm": "on",
+      "artifact": "artifacts\\sql-injection-golden__on__r1.json",
+      "case_id": "sql-injection-golden",
+      "repeat": 1
+    },
+    {
+      "arm": "off",
+      "artifact": "artifacts\\sql-injection-boolean__off__r1.json",
+      "case_id": "sql-injection-boolean",
+      "repeat": 1
+    },
+    {
+      "arm": "on",
+      "artifact": "artifacts\\sql-injection-boolean__on__r1.json",
+      "case_id": "sql-injection-boolean",
+      "repeat": 1
+    },
+    {
+      "arm": "off",
+      "artifact": "artifacts\\sql-injection-golden__off__r2.json",
+      "case_id": "sql-injection-golden",
+      "repeat": 2
+    },
+    {
+      "arm": "on",
+      "artifact": "artifacts\\sql-injection-golden__on__r2.json",
+      "case_id": "sql-injection-golden",
+      "repeat": 2
+    },
+    {
+      "arm": "off",
+      "artifact": "artifacts\\sql-injection-boolean__off__r2.json",
+      "case_id": "sql-injection-boolean",
+      "repeat": 2
+    },
+    {
+      "arm": "on",
+      "artifact": "artifacts\\sql-injection-boolean__on__r2.json",
+      "case_id": "sql-injection-boolean",
+      "repeat": 2
+    },
+    {
+      "arm": "off",
+      "artifact": "artifacts\\sql-injection-golden__off__r3.json",
+      "case_id": "sql-injection-golden",
+      "repeat": 3
+    },
+    {
+      "arm": "on",
+      "artifact": "artifacts\\sql-injection-golden__on__r3.json",
+      "case_id": "sql-injection-golden",
+      "repeat": 3
+    },
+    {
+      "arm": "off",
+      "artifact": "artifacts\\sql-injection-boolean__off__r3.json",
+      "case_id": "sql-injection-boolean",
+      "repeat": 3
+    },
+    {
+      "arm": "on",
+      "artifact": "artifacts\\sql-injection-boolean__on__r3.json",
+      "case_id": "sql-injection-boolean",
+      "repeat": 3
+    }
+  ]
+}

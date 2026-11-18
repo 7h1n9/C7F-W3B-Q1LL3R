@@ -1,0 +1,17 @@
+name: BUU XXE COURSE 1
+category: web
+keywords:
+- buu
+- xxe
+- course
+steps:
+- '[codex] Guessed reconnaissance paths (`index.php`, `api`, `login`, `session`, `flag`,
+  `.git/HEAD`) exposed no usable authentication or API surface; responses were only
+  OpenResty 502 or generic 404 pages.'
+- RACE_WORKER_TIMEOUT
+- MUTEKI_RUN_TIMEOUT
+evidence_chain: []
+success_format: flag\{[^}]+\}
+source: fdba8694-57e4-493a-8b34-38e79e3c0346 (run 635175a4-79c9-43a5-a0f3-0f1acd1842d4)
+notes: MUTEKI_RUN_TIMEOUT
+kind: negative

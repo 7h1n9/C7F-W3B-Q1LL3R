@@ -1,0 +1,12 @@
+name: '[HCTF 2018]admin'
+category: web
+keywords:
+- hctf
+- admin
+steps:
+- NO_HEALTHY_WORKER_PROFILE
+evidence_chain: []
+success_format: CTF2\{[^}]+\}
+source: 5b792078-306a-4ec2-be2c-fa217375eb3d (run 1f812a97-97a3-4422-b93c-9b3ed67c1402)
+notes: NO_HEALTHY_WORKER_PROFILE
+kind: negative

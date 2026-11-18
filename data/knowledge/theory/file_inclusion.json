@@ -1,0 +1,44 @@
+{
+  "id": "theory-file-inclusion-001",
+  "type": "theory",
+  "category": "file_ops",
+  "subcategory": "file_inclusion",
+  "name": "文件包含",
+  "aliases": [
+    "文件包含",
+    "LFI",
+    "RFI",
+    "本地文件包含",
+    "远程文件包含"
+  ],
+  "severity": "high",
+  "description": "> 创建: 未知 | 更新: 2026-05-21 | 适用: PHP通用 (include/require系列) | ⚠️ 部分图片托管于外部CDN 何为LFI？全程Local File Inclusion，中文译作本地文件包含漏洞。 既然是包含漏洞，那肯定少不了包含的函数。在PHP中，通常是下面四个包含函数：",
+  "key_concepts": [
+    "两种文件包含",
+    "会直接报错并退出程序的执行",
+    "# 过滤器列表",
+    "会抛出一个警告，程序继续正常运行",
+    "PHP伪协议简单入门",
+    "# php://input",
+    "# 远程包含",
+    "不会被识别为php代码",
+    "session文件包含",
+    "文件读取"
+  ],
+  "related_pocs": [],
+  "related_payloads": [
+    "payloads/file_inclusion/extracted.json"
+  ],
+  "tags": [
+    "文件包含",
+    "LFI",
+    "RFI",
+    "本地文件包含",
+    "远程文件包含",
+    "file_ops",
+    "ctf",
+    "web"
+  ],
+  "source": "Des-CTF-Knowledge/文件包含.md",
+  "last_updated": "2026-10-22"
+}

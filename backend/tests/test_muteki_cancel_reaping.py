@@ -54,7 +54,7 @@ async def test_cancel_muteki_reaps_orphan_container_without_restarting_worker(mo
 
 
 @pytest.mark.asyncio
-async def test_startup_reaps_only_terminal_muteki_runs(monkeypatch) -> None:
+async def test_startup_reaps_terminal_and_restart_orphaned_muteki_runs(monkeypatch) -> None:
     supervisor = RunSupervisor()
     calls: list[str] = []
 
@@ -64,15 +64,34 @@ async def test_startup_reaps_only_terminal_muteki_runs(monkeypatch) -> None:
             assert remove is True
             calls.append(run_id)
 
+        @staticmethod
+        def _docker(*_args, **_kwargs) -> SimpleNamespace:
+            # The startup sweep asks Docker which Runs still have a container
+            # before it tears anything down; see ``_runs_owning_a_container``.
+            return SimpleNamespace(
+                stdout="muteki-run-terminal-muteki\nmuteki-run-live-muteki\n"
+            )
+
+        @staticmethod
+        def _run_container_name(run_id: str) -> str:
+            return f"muteki-run-{run_id}"
+
+        @staticmethod
+        def _safe(value: str) -> str:
+            return value
+
     monkeypatch.setitem(__import__("sys").modules, "muteki.solver.container_exec", _ContainerExec)
     runs = [
         SimpleNamespace(id="terminal-muteki", solver_mode="muteki", status="CANCELLED"),
+        # A process restart cannot tell a live Run from a dead one, and resume
+        # recreates the run-scoped Sandbox, so a RUNNING Muteki Run with a
+        # container is an orphan too.
         SimpleNamespace(id="live-muteki", solver_mode="muteki", status="RUNNING"),
         SimpleNamespace(id="terminal-legacy", solver_mode="solver_v2", status="CANCELLED"),
     ]
 
-    assert await supervisor.reap_terminal_muteki_containers(runs) == 1
-    assert calls == ["terminal-muteki"]
+    assert await supervisor.reap_terminal_muteki_containers(runs) == 2
+    assert calls == ["terminal-muteki", "live-muteki"]
 
 
 @pytest.mark.asyncio
@@ -88,7 +107,7 @@ async def test_terminal_muteki_run_is_not_restarted_by_supervisor(monkeypatch) -
     )
 
     class _Session:
-        async def get(self, _model, _run_id):
+        async def get(self, _model, _run_id, **_kwargs):
             return run
 
     async def fail_if_called(*_args, **_kwargs):

@@ -1,0 +1,24 @@
+name: '[HBCTF2017]大美西安'
+category: web
+keywords:
+- hbctf2017
+- imported
+- from
+- buuctf
+- ctfd
+steps:
+- RACE_WORKER_TIMEOUT
+- '[claude] `file` param WAF blocks `php://`, `..`, and `filter` substrings (returns
+  "Attack Detected!" or 502); direct php-filter/traversal LFI via `file` is ruled
+  out.'
+- '[claude] `flag.php`, `fl0g.php`, `db.php`, `phpinfo.php` all 404; `admin.php`/`upload.php`
+  direct = 502; no `.git`/backup files served.'
+- '[codex] WAF-bypass direction could not be exercised/characterized this session:
+  the target''s intermittent `502 Bad Gateway` responses and the halt instruction
+  prevented me from obtaining an authenticated sess'
+- MUTEKI_RUN_TIMEOUT
+evidence_chain: []
+success_format: CTF2\{[^}]+\}
+source: d29ed873-3561-416d-8a47-6d5a61adb1cf (run 8520f669-535e-4005-9f72-bd24c21f092d)
+notes: MUTEKI_RUN_TIMEOUT
+kind: negative

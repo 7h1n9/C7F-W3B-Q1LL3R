@@ -23,6 +23,31 @@ def referenced_artifacts(text: str) -> list[str]:
     return re.findall(r"artifact[_ ]?([0-9a-f]{8,})", text)
 
 
+#: Any CTF-shaped ``banner{body}``, deliberately looser than a challenge's
+#: declared pattern.
+#:
+#: The declared pattern is operator input, and when it is wrong -- left at the
+#: ``flag`` default while the challenge actually uses ``CTF2{...}``, or carrying a
+#: banner typo -- a strict full-match means the real flag is never even recorded,
+#: so the run can never solve no matter what the worker found.  Accepting it
+#: instead costs nothing: the provenance requirement below is unchanged, so a
+#: hallucinated flag still cannot pass.
+#:
+#: Why not simply ``\w+\{...\}``: that would turn ``body{color:red}`` and
+#: ``if{...}`` from any page's source into candidates.  Requiring the banner to be
+#: non-lowercase (``CTF2``, ``XXX``, ``XXCTF``) or to spell ``flag``/``ctf``
+#: (``flag``, ``dasctf``, ``picoCTF``) keeps every real banner in and ordinary
+#: source code out.
+GENERIC_FLAG_PATTERN = (
+    r"(?:[A-Za-z0-9_]*[A-Z][A-Za-z0-9_]*"
+    r"|[A-Za-z0-9_]*(?i:ctf)[A-Za-z0-9_]*"
+    r"|(?i:flag)[A-Za-z0-9_]*)"
+    r"\{[^{}\r\n\"'\\]{1,256}\}"
+)
+
+GENERIC_FLAG_RE = re.compile(GENERIC_FLAG_PATTERN)
+
+
 # Inner-body tokens that mean "a flag goes here", not an actual flag. The model
 # writes these in prose ("scanning pages for flag{...}", "FOUND_FLAG=<flag>") and
 # a blind format-scan would otherwise grab them. Matched against the {...} body,
@@ -147,6 +172,27 @@ def _looks_like_real_token(flag: str) -> bool:
     return has_alpha and (has_digit or has_sep)
 
 
+def matches_flag_format(flag: str, flag_format: str) -> bool:
+    """Does ``flag`` satisfy the challenge's format, or at least look like a flag?
+
+    The challenge's own pattern wins when it matches; the generic shape is the
+    fallback so a misconfigured banner cannot make a real flag unrepresentable.
+    A declared format of ``TOKEN_FLAG_FORMAT`` keeps its own contract and is not
+    widened -- a bare token has no braces to shape-match on, and its strength
+    floor already encodes the intent.
+    """
+
+    if flag_format == TOKEN_FLAG_FORMAT:
+        return _looks_like_real_token(flag)
+    text = str(flag or "")
+    try:
+        if re.search(flag_format, text):
+            return True
+    except re.error:
+        pass
+    return GENERIC_FLAG_RE.fullmatch(text) is not None
+
+
 def flag_ok(flag: str, raw_output: str, *, flag_format: str, artifacts: Any) -> bool:
     """True iff `flag` matches the format contract AND is NOT a placeholder template
     AND is traceable to real output: present verbatim in `raw_output`, or in the
@@ -154,7 +200,9 @@ def flag_ok(flag: str, raw_output: str, *, flag_format: str, artifacts: Any) -> 
     expose read_text(aid)).
 
     Two format contracts:
-      - the usual brace `flag_format` regex (default) — `flag` must match it;
+      - the usual brace `flag_format` regex (default) -- `flag` must match it, or
+        at least the generic ``banner{body}`` shape (see GENERIC_FLAG_PATTERN), so
+        a challenge whose banner was configured wrong still accepts its real flag;
       - the `TOKEN_FLAG_FORMAT` sentinel ("token") — for bare-token challenges, the
         brace match is replaced by a strength floor (_looks_like_real_token), so a
         recovered secret like W3lc0m3T0Gh0st is accepted while a quoted common word is
@@ -165,10 +213,7 @@ def flag_ok(flag: str, raw_output: str, *, flag_format: str, artifacts: Any) -> 
     that did NOT solve still gets marked solved because it mentioned `flag{...}`/
     `{uuid}` in its prose and a loose flag_format + the self-referential "appears in
     output" check let it through."""
-    if flag_format == TOKEN_FLAG_FORMAT:
-        if not _looks_like_real_token(flag):
-            return False
-    elif not re.search(flag_format, flag):
+    if not matches_flag_format(flag, flag_format):
         return False
     if is_placeholder_flag(flag):
         return False

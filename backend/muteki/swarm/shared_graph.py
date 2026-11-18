@@ -25,20 +25,19 @@ is NEVER reachable as a pluggable verifier here.
 
 from __future__ import annotations
 
-import json
 import hashlib
+import json
 import re
 import sqlite3
 import threading
 import time
-from urllib.parse import urlparse
 from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any, Optional, Protocol, runtime_checkable
+from urllib.parse import urlparse
 
-from muteki.models.solve_graph import Challenge, Evidence, SolveGraph
+from muteki.models.solve_graph import Challenge, SolveGraph
 from muteki.solver.result_codes import is_genuine_giveup
-
 
 # ── event types (C: append-only log) ─────────────────────────────────────────
 EV_FACT_ADDED = "fact_added"
@@ -243,6 +242,8 @@ class SharedGraph(Protocol):
                      intent_id: Optional[str] = None) -> int: ...
 
     def add_dead_end(self, *, actor: str, reason: str) -> int: ...
+
+    def dead_end_reasons(self, *, limit: Optional[int] = None) -> list[str]: ...
 
     def flag_found(self, *, actor: str, flag: str,
                    artifact_id: Optional[str] = None,
@@ -904,6 +905,24 @@ class SQLiteSharedGraph:
             return -1
         return self._append(EV_DEAD_END, actor, {"reason": reason},
                             dedupe_key=f"deadend::{reason}")
+
+    def dead_end_reasons(self, *, limit: Optional[int] = None) -> list[str]:
+        """The directions this swarm already ruled out, in discovery order.
+
+        Negative distillation needs exactly this list: what was tried and
+        failed is the most direct way to stop the next Run from repeating it.
+        ``limit`` keeps the most recent N entries when set.
+        """
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT json_extract(payload,'$.reason') FROM events "
+                "WHERE challenge_id=? AND kind=? ORDER BY seq",
+                (self.challenge.id, EV_DEAD_END),
+            ).fetchall()
+        reasons = [str(row[0]).strip() for row in rows if row and str(row[0]).strip()]
+        if limit is not None:
+            reasons = reasons[-int(limit):]
+        return reasons
 
     @staticmethod
     def _norm_dead_end_text(text: str) -> str:
@@ -2072,9 +2091,9 @@ class SQLiteSharedGraph:
         if lane_key and self.is_lane_held_by_other(lane_key, by_worker):
             lane = self.normalize_lane_key(lane_key)
             owner = ""
-            for l in self.active_lanes():
-                if l["lane_key"] == lane:
-                    owner = l["owner_worker"]
+            for entry in self.active_lanes():
+                if entry["lane_key"] == lane:
+                    owner = entry["owner_worker"]
                     break
             blockers.append({"kind": "lane", "key": lane, "owner": owner})
         if resource_key:

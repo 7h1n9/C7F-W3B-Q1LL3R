@@ -1,0 +1,22 @@
+name: '[CISCN2019 华东南赛区]Web11 2bb77b34dd46'
+category: web
+keywords:
+- ciscn2019
+- web11
+- click
+- launch
+- instance
+steps:
+- '[claude] This is not a vulnerability to exploit or a hidden path to find - the
+  web server simply isn''t responding to HTTP requests at all.'
+- Native Worker completed a bounded evidence-backed observation
+- '[codex] The blackboard DB under the skill dir is uninitialized (`sqlite3: no such
+  table: events`), so I couldn''t write facts there — they''re printed above for the
+  team.'
+evidence_chain:
+- '[codex] The blackboard DB under the skill dir is uninitialized (`sqlite3: no such
+  table: events`), so I couldn''t write facts there — they''re printed above for the
+  team.'
+success_format: CTF2\{[^}]+\}
+source: 2bb77b34-dd46-49c1-aaf8-a0603640037b (solver 7067c156-6eff-4488-8b6e-f87f5e0aa982)
+notes: ''

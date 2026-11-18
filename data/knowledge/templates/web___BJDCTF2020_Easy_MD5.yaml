@@ -1,0 +1,36 @@
+name: '[BJDCTF2020]Easy MD5'
+category: web
+keywords:
+- bjdctf2020
+- easy
+- md5
+- github
+- bjdsecca
+steps:
+- 'Easy MD5 chain: GET /leveldo4.php?password=ffifdyop yields redirect levels91.php;
+  GET levels91.php?a=QNKCDZO&b=240610708 yields redirect levell14.php.'
+- 'Final stage: POST /levell14.php with param1[]=a&param2[]=b. PHP 7.3 md5(array)
+  returns NULL for both; distinct arrays satisfy !== and strict digest ===; response
+  includes flag.'
+- '[codex] `/leveldo4.php?password=ffifdyop` bypasses the binary-MD5 SQL check and
+  redirects to `levels91.php`.'
+- '[codex] `/levels91.php?a=QNKCDZO&b=240610708` satisfies the loose MD5 comparison
+  and redirects to `levell14.php`.'
+- '[codex] `POST /levell14.php` with `param1[]=a&param2[]=b` makes both `md5()` calls
+  return `NULL`, satisfying the strict digest comparison and revealing the flag.'
+- '[codex] The reproducible request chain and captured responses are saved in [PoC.md](/home/kali/workspace/shared/easy_md5/PoC.md)
+  and [final-response.html](/home/kali/workspace/shared/easy_md5/final-response.h'
+- Native Worker completed a bounded evidence-backed observation
+evidence_chain:
+- 'Easy MD5 chain: GET /leveldo4.php?password=ffifdyop yields redirect levels91.php;
+  GET levels91.php?a=QNKCDZO&b=240610708 yields redirect levell14.php.'
+- 'Final stage: POST /levell14.php with param1[]=a&param2[]=b. PHP 7.3 md5(array)
+  returns NULL for both; distinct arrays satisfy !== and strict digest ===; response
+  includes flag.'
+- '[codex] `/leveldo4.php?password=ffifdyop` bypasses the binary-MD5 SQL check and
+  redirects to `levels91.php`.'
+- '[codex] The reproducible request chain and captured responses are saved in [PoC.md](/home/kali/workspace/shared/easy_md5/PoC.md)
+  and [final-response.html](/home/kali/workspace/shared/easy_md5/final-response.h'
+success_format: CTF2\{[^}]+\}
+source: fbc5624e-f7ea-4ee9-acda-723f9c9ae86b (solver 59bed365-37aa-4c7c-8a3d-f11be074d437)
+notes: ''

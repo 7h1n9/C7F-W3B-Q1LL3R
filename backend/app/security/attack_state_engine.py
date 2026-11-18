@@ -2,11 +2,10 @@
 
 from __future__ import annotations
 
-from typing import Any, Mapping, Iterable
+from typing import Any, Iterable, Mapping
 
 from app.security.attack_state import AttackState
 from app.services.strategy_continuation import normalize_strategy, strategy_identity
-
 
 _ACTION_TO_STRATEGY = {
     "BOOLEAN_COMMENT_HASH": "BOOLEAN_AND_COMMENT_HASH",

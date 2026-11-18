@@ -1,0 +1,25 @@
+name: '[PWNHUB 公开赛 2018]傻 fufu 的工作日 3f75ae34bc02'
+category: web
+keywords:
+- pwnhub
+- fufu
+steps:
+- /health = 200 'ok' plain text from openresty (2 bytes), new endpoint not on board
+- openresty front proxy returns 502 for GET /%2E/ (no upstream) while //, /%2e%2e/,
+  /a/.. are rewritten to /index.php; normalised-prefix + encoded suffix gives Apache
+  404/403 => nginx proxy_pass prefix-strip differential confirmed
+- '[claude] Flag is <FLAG>, read from /flag_9bc85242c9f1a7663e6806778e8a8558 via upload/6af639c46b3e7.php
+  webshell (POST upfile array with keys 1=gif,2=php bypasses whitelist v'
+- '[claude] VERIFIED_FACT=Flag is <FLAG>, read from /flag_9bc85242c9f1a7663e6806778e8a8558
+  via upload/6af639c46b3e7.php webshell (POST upfile array with keys 1=gif,2=php bypass'
+- Native Worker completed a bounded evidence-backed observation
+evidence_chain:
+- /health = 200 'ok' plain text from openresty (2 bytes), new endpoint not on board
+- openresty front proxy returns 502 for GET /%2E/ (no upstream) while //, /%2e%2e/,
+  /a/.. are rewritten to /index.php; normalised-prefix + encoded suffix gives Apache
+  404/403 => nginx proxy_pass prefix-strip differential confirmed
+- '[claude] VERIFIED_FACT=Flag is <FLAG>, read from /flag_9bc85242c9f1a7663e6806778e8a8558
+  via upload/6af639c46b3e7.php webshell (POST upfile array with keys 1=gif,2=php bypass'
+success_format: CTF2\{[^}]+\}
+source: 3f75ae34-bc02-41ff-ba30-72072158e338 (solver 67a82dc9-0cee-4ca1-ae98-b9bad5c91ec8)
+notes: ''

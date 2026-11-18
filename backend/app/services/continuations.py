@@ -9,7 +9,6 @@ from sqlalchemy.exc import IntegrityError
 
 from app.models.run import RunContinuation
 
-
 CONTINUATION_PENDING = "PENDING"
 CONTINUATION_RUNNING = "RUNNING"
 CONTINUATION_COMPLETED = "COMPLETED"
@@ -23,6 +22,25 @@ def utc_now() -> datetime:
 
 class ContinuationService:
     owner_instance_id = f"{socket.gethostname()}:{__import__('os').getpid()}"
+
+    #: Backoff applied when a *failed* continuation is re-armed, scaled by how
+    #: many times it has already been claimed.
+    #:
+    #: A failed recovery used to be permanent.  ``request`` returned whatever row
+    #: carried the dedupe key, and ``claim`` only takes ``PENDING`` -- so once a
+    #: recovery attempt failed, every later wake-up found the same ``FAILED`` row,
+    #: enqueued nothing and returned.  The Run stayed exactly where it was while
+    #: every supervisor sweep reported it as being recovered: the same silent stall
+    #: as a dead loop, with nothing to look at.  A transient failure while
+    #: recovering a Run must cost one delay, not the Run.
+    #:
+    #: Bounded rather than immediate: the supervisor sweeps every 5 seconds, and a
+    #: permanently broken Run would otherwise be re-dispatched on that cadence,
+    #: spawning a whole solver runtime per sweep.  The retry stays visible on the
+    #: row (``attempts``, last error) without turning one broken Run into a load
+    #: generator.
+    REARM_BACKOFF_SECONDS = 30.0
+    REARM_BACKOFF_MAX_SECONDS = 600.0
 
     async def request(
         self,
@@ -39,6 +57,24 @@ class ContinuationService:
             RunContinuation.dedupe_key == dedupe_key,
         ))
         if existing is not None:
+            if existing.status == CONTINUATION_FAILED:
+                # The dedupe key means "this recovery step, at this Run
+                # revision".  A FAILED row did not perform it, so returning the
+                # row as-is silently drops the request forever.  Put it back in
+                # the queue, later, so the failure costs a delay instead of the
+                # Run.  ``attempts`` and the last error are kept as the record.
+                existing.status = CONTINUATION_PENDING
+                existing.available_at = utc_now() + timedelta(
+                    seconds=min(
+                        self.REARM_BACKOFF_SECONDS * max(1, int(existing.attempts or 0)),
+                        self.REARM_BACKOFF_MAX_SECONDS,
+                    )
+                )
+                existing.owner_instance_id = None
+                existing.claimed_at = None
+                if payload:
+                    existing.payload_json = dict(payload)
+                await session.flush()
             return existing
         item = RunContinuation(
             id=str(uuid.uuid4()),

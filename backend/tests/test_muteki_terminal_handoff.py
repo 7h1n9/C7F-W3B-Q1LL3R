@@ -43,7 +43,12 @@ async def _create_run(session, *, status: str = "RUNNING") -> SolveRun:
     return run
 
 
-def _terminal_event(*, flag_found: bool, sequence: int = 1) -> RunEvent:
+def _terminal_event(
+    *,
+    flag_found: bool,
+    reason: str | None = None,
+    sequence: int = 1,
+) -> RunEvent:
     return RunEvent(
         run_id="",
         sequence=sequence,
@@ -51,7 +56,7 @@ def _terminal_event(*, flag_found: bool, sequence: int = 1) -> RunEvent:
         payload_json={
             "muteki_event_type": "run_finished",
             "payload": {
-                "reason": "FLAG_VERIFIED" if flag_found else "NO_VERIFIED_FLAG",
+                "reason": reason or ("FLAG_VERIFIED" if flag_found else "NO_VERIFIED_FLAG"),
                 "flag_found": flag_found,
                 "verified_flag_count": 1 if flag_found else 0,
             },
@@ -102,6 +107,39 @@ async def test_reconcile_native_terminal_marks_unsolved() -> None:
         assert run.status == "COMPLETED_UNSOLVED"
         assert run.current_phase == "REPORTING"
         assert run.recovery_checkpoint_json["muteki_native_terminal"]["flag_found"] is False
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_reconcile_native_terminal_preserves_timeout() -> None:
+    engine, sessions = await _session_factory()
+    async with sessions() as session:
+        run = await _create_run(session)
+        event = _terminal_event(flag_found=False, reason="MUTEKI_RUN_TIMEOUT")
+        event.run_id = run.id
+        session.add(event)
+        await session.commit()
+
+        outcome = await RunSupervisor().reconcile_muteki_native_terminal(session, run)
+
+        assert outcome is not None
+        assert outcome.status == "TIMEOUT"
+        await session.refresh(run)
+        assert run.status == "TIMEOUT"
+        assert run.current_phase == "REPORTING"
+        terminal = run.recovery_checkpoint_json["muteki_native_terminal"]
+        assert terminal["reason"] == "MUTEKI_RUN_TIMEOUT"
+        assert terminal["flag_found"] is False
+        assert terminal["outer_status"] == "TIMEOUT"
+        reconciled = await session.scalar(
+            select(RunEvent).where(
+                RunEvent.run_id == run.id,
+                RunEvent.event_type == "run.muteki_terminal_reconciled",
+            )
+        )
+        assert reconciled is not None
+        assert reconciled.payload_json["status"] == "TIMEOUT"
+        assert reconciled.payload_json["reason"] == "MUTEKI_RUN_TIMEOUT"
     await engine.dispose()
 
 
@@ -187,6 +225,14 @@ async def test_reap_terminal_muteki_containers_includes_running_orphan(monkeypat
         return True
 
     monkeypatch.setattr(container_exec, "teardown_container", fake_teardown)
+    # A RUNNING Run is only an orphan if it actually still has a container; the
+    # startup sweep asks Docker first so a long Run history costs one listing
+    # instead of two docker processes per Run.
+    monkeypatch.setattr(
+        container_exec,
+        "_docker",
+        lambda *_args, **_kwargs: SimpleNamespace(stdout="muteki-run-run-orphan\n"),
+    )
     run = SimpleNamespace(id="run-orphan", solver_mode="muteki", status="RUNNING")
 
     reaped = await RunSupervisor().reap_terminal_muteki_containers([run])

@@ -1,0 +1,25 @@
+name: '[GXYCTF2019]BabyUpload'
+category: web
+keywords:
+- gxyctf2019
+- babyupload
+- github
+- imaginiso
+- gxy_ctf
+- tree
+- master
+- web
+steps:
+- '[claude] Upload chain works: upload `.htaccess` containing `AddType application/x-httpd-php
+  .gif` (must NOT start with `GIF89a` prefix — prefix breaks Apache parsing), then
+  upload a `.gif` whose content is `<s'
+- '[claude] Egress/Apache has `system,exec,shell_exec,popen,proc_open,passthru` etc.
+  disabled, but file functions work. PHP 5.6.23, Apache/2.4.10 (Debian), openresty
+  front.'
+- '[claude] Flag lives at `/flag`, readable: `<FLAG>` (base64 `Q1RGMns3MzBmNTk4ZS0xMmEyLTRiMjMtYTIwMS0zNmMyYjM3NGJmNjR9Cg==`).'
+- '[claude] FOUND_FLAG=<FLAG>'
+evidence_chain:
+- '[claude] FOUND_FLAG=<FLAG>'
+success_format: CTF2\{[^}]+\}
+source: bbfe39f2-589f-4f64-a1da-63ce8667d6a6 (solver 8f5d7f39-03a3-4454-9c3c-a18334b8c86b)
+notes: ''

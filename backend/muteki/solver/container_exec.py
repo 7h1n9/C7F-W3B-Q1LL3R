@@ -44,9 +44,9 @@ import threading
 import time
 import uuid
 from dataclasses import dataclass, field
-from typing import Callable, Optional, Any
+from typing import Any, Callable, Optional
 
-from muteki.solver.cli_driver import CliDriver, CliResult, StreamStep
+from muteki.solver.cli_driver import CliDriver, CliResult, StreamStep, capture_cli_conversation
 from muteki.solver.credential_accounts import CONTAINER_ACCOUNTS_ROOT
 
 # Tool-only worker image. Real credentials are injected from Credential Accounts
@@ -278,7 +278,17 @@ class ContainerHandle:
         return self.to_container_path(host_cwd)
 
     def to_container_path(self, host_path: str) -> str:
-        """Map a host path under a mounted root to its container path."""
+        """Map a host path under a mounted root to its container path.
+
+        The result must use POSIX separators regardless of the HOST platform:
+        ``os.path.relpath`` on Windows returns ``graph\\db.sqlite``, and the
+        container is Linux, so ``/home/kali/workspace/graph\\db.sqlite`` is one
+        FILE NAME there.  Measured 2026-10-29: every Worker received
+        ``MUTEKI_BLACKBOARD_DB=/home/kali/workspace/graph\\upstream_shared_graph.db``,
+        sqlite3 therefore opened (and created) a shadow database beside the real
+        one, and ``blackboard.py`` answered ``no such table: events`` — 404 times
+        in a single Run, and that Run finished with 0 facts on the board.
+        """
         try:
             rel = os.path.relpath(os.path.abspath(host_path), os.path.abspath(self.host_workspace))
         except ValueError:
@@ -293,9 +303,9 @@ class ContainerHandle:
                 if arel == ".":
                     return CONTAINER_ACCOUNTS_ROOT
                 if not arel.startswith(".."):
-                    return f"{CONTAINER_ACCOUNTS_ROOT}/{arel}"
+                    return f"{CONTAINER_ACCOUNTS_ROOT}/{arel.replace(os.sep, '/')}"
             return CONTAINER_WORKSPACE
-        return f"{CONTAINER_WORKSPACE}/{rel}"
+        return f"{CONTAINER_WORKSPACE}/{rel.replace(os.sep, '/')}"
 
 
 @dataclass
@@ -559,7 +569,9 @@ def ensure_container(run_id: str, host_workspace: str, *,
             # form ENTRYPOINT; the supervisor ignores the baked --sock/--workspace and
             # uses --connect/--run-id (token comes from the bind-mounted control file).
             from muteki.solver.control_receiver import (
-                CONTROL_HOST_FROM_CONTAINER, DEFAULT_CONTROL_PORT)
+                CONTROL_HOST_FROM_CONTAINER,
+                DEFAULT_CONTROL_PORT,
+            )
             run = _docker(*run_cmd, image,
                           "--connect", f"{CONTROL_HOST_FROM_CONTAINER}:{DEFAULT_CONTROL_PORT}",
                           "--run-id", run_id,
@@ -876,12 +888,14 @@ class _DockerExecBackend:
                     timeout=15)
             out = e.stdout if isinstance(e.stdout, str) else ""
             err = e.stderr if isinstance(e.stderr, str) else ""
+            capture_cli_conversation(driver, out or "", err or "")
             res = driver.parse(out or "", err or "")
             res.timed_out = True
             res.elapsed_s = time.time() - t0
             res.runtime_status = _RUNTIME_REGISTRY.finish(
                 rec, status="timeout", timed_out=True, error="host timeout")
             return res
+        capture_cli_conversation(driver, proc.stdout or "", proc.stderr or "")
         res = driver.parse(proc.stdout or "", proc.stderr or "")
         if proc.returncode == 137:
             oom_after = _oom_kill_count(handle.container)
@@ -1017,6 +1031,7 @@ class _DockerExecBackend:
                              f"=== STDERR ===\n{(stderr or '')[:8000]}\n")
             except Exception:
                 pass
+        capture_cli_conversation(driver, "".join(out_lines), stderr or "")
         res = driver.parse("".join(out_lines), stderr or "")
         res.timed_out = timed_out
         res.oom_killed = oom_killed

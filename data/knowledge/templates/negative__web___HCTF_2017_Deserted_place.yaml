@@ -1,0 +1,16 @@
+name: '[HCTF 2017]Deserted place'
+category: web
+keywords:
+- hctf
+- deserted
+- place
+- url
+- web
+steps:
+- RACE_WORKER_TIMEOUT
+- ROUND_BUDGET_EXHAUSTED_BEFORE_REASON
+evidence_chain: []
+success_format: CTF2\{[^}]+\}
+source: 65129663-d539-471f-881b-cfcc7deec850 (run 17531d1d-0c13-4f10-a2b3-8183d26d9b67)
+notes: NO_VERIFIED_FLAG
+kind: negative

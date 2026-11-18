@@ -1,6 +1,4 @@
 import {
-  ApartmentOutlined,
-  BarChartOutlined,
   CaretRightOutlined,
   CheckCircleFilled,
   ClockCircleOutlined,
@@ -23,7 +21,7 @@ import {
 } from "@ant-design/icons";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Alert, Badge, Button, Card, Empty, Input, Modal, Space, Statistic, Table, Tabs, Tag, Typography, message } from "antd";
-import { useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from "react";
 import { useParams } from "react-router-dom";
 import { RunStatusTag } from "../components/RunStatusTag";
 import { api } from "../services/api";
@@ -34,18 +32,21 @@ type EventPayload = Record<string, unknown>;
 type NormalizedEvent = { type: string; actor: string; payload: EventPayload; verified: boolean };
 type WorkerState = { id: string; role: string; engine: string; status: "running" | "finished"; intentId?: string };
 type IntentState = { id: string; description: string; status: "open" | "claimed" | "done"; worker?: string; tool?: string; classification?: string; result?: string };
-type FactState = { sequence: number; content: string; verified: boolean; evidenceCount: number };
+type FactState = { sequence: number; content: string; verified: boolean; evidenceCount: number; state?: "unresolved" | "challenged" | "revalidated" };
 type BoardState = { phase: string; flagFound: boolean; workers: WorkerState[]; intents: IntentState[]; facts: FactState[]; reviewCount: number };
 type CaseBoardCard = {
   id: string;
   kind: "fact" | "finding" | "flag";
   content: string;
+  /** Secondary line: Codex/board semantic summary. Never replaces ``content``. */
+  summary?: string;
   sourceContent?: string;
   verified: boolean;
   evidenceRefs: string[];
   source?: string;
   sequence: number;
 };
+type CaseBoardSections = { confirmed: CaseBoardCard[]; pending: CaseBoardCard[] };
 type BoardPosition = { x: number; y: number };
 type BoardLayout = { runId: string; positions: Record<string, BoardPosition> };
 type WorkspaceMoment = { id: string; kind: "system" | "user"; title: string; summary: string; timestamp: string; tone: "success" | "danger" | "active" | "quiet"; sequence?: number; status?: string };
@@ -175,10 +176,6 @@ function normalizeEvent(event: RunEvent): NormalizedEvent {
   };
 }
 
-function eventKey(event: RunEvent): string {
-  return event.event_type.startsWith("muteki.") ? event.event_type : event.event_type;
-}
-
 function eventTone(type: string): "success" | "danger" | "active" | "quiet" {
   if (type.includes("failed") || type.includes("dead_end") || type.includes("rejected")) return "danger";
   if (type.includes("flag") || type.includes("verified") || type.includes("completed") || type.includes("concluded")) return "success";
@@ -223,10 +220,34 @@ function numberValue(value: unknown): number | undefined {
 function verifiedCanonicalFlag(
   runStatus: string | undefined,
   reportJson?: Record<string, unknown>,
+  flagPattern?: string,
 ): string | undefined {
   if (runStatus !== "COMPLETED_SOLVED" || reportJson?.flag_verified !== true) return undefined;
   const value = reportJson.flag;
-  return typeof value === "string" && /^flag\{[^{}\r\n]+\}$/i.test(value.trim()) ? value.trim() : undefined;
+  if (typeof value !== "string") return undefined;
+  const text = value.trim();
+  // The banner is per-challenge: CTF2{...}, DASCTF{...}, flag{...}. Testing a
+  // hardcoded flag{...} hid every other banner behind "FLAG EVENT RECORDED"
+  // even though the Run was solved. Prefer the challenge's own pattern and fall
+  // back to the generic banner{body} shape the backend also accepts.
+  return matchesFlagPattern(text, flagPattern) ? text : undefined;
+}
+
+function matchesFlagPattern(value: string, flagPattern?: string): boolean {
+  const generic = /^[A-Za-z0-9_]*[A-Z][A-Za-z0-9_]*\{[^{}\r\n"'\\]{1,256}\}$/;
+  if (flagPattern) {
+    try {
+      // Anchored so a permissive ``[^}]+`` cannot match a substring.
+      if (new RegExp(`^(?:${flagPattern})$`).test(value)) return true;
+    } catch {
+      /* an unusable pattern falls through to the generic shape */
+    }
+  }
+  if (!generic.test(value) && !/^flag\{[^{}\r\n"'\\]{1,256}\}$/i.test(value)) return false;
+  // Mirrors the backend's placeholder policy: ``flag{...}`` / ``DASCTF{placeholder}``
+  // are "put a flag here" prose, never a result.
+  const body = value.slice(value.indexOf("{") + 1, -1).trim().toLowerCase();
+  return !["...", "…", "xxx", "xxxx", "placeholder", "redacted", "todo", "tbd", "your_flag", "the flag", "flag"].includes(body);
 }
 
 function projectKeyMoments(events: RunEvent[], inputs: RunUserInput[]): WorkspaceMoment[] {
@@ -240,7 +261,7 @@ function projectKeyMoments(events: RunEvent[], inputs: RunUserInput[]): Workspac
       title: eventLabels[event.event_type] ?? event.event_type,
       summary: safeEventSummary(event),
       timestamp: event.created_at,
-      tone: eventTone(eventKey(event)),
+      tone: eventTone(event.event_type),
       sequence: event.sequence,
     }];
   });
@@ -317,14 +338,6 @@ function formatDuration(startedAt?: string | null, finishedAt?: string | null): 
   return `${hours ? `${hours}:` : ""}${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
 }
 
-function formatRatio(value?: number | null): string {
-  return value === undefined || value === null ? "—" : Number(value).toFixed(2);
-}
-
-function formatScore(value?: number | null): string {
-  return value === undefined || value === null ? "—" : Number(value).toFixed(1);
-}
-
 function projectBoard(events: RunEvent[], nativeState?: MutekiGraphState): BoardState {
   const workers = new Map<string, WorkerState>();
   const intents = new Map<string, IntentState>();
@@ -379,7 +392,22 @@ function projectBoard(events: RunEvent[], nativeState?: MutekiGraphState): Board
     }
     if (type === "fact_added") {
       const refs = Array.isArray(payload.evidence_refs) ? payload.evidence_refs : [];
-      facts.push({ sequence: event.sequence, content: text(payload.content, "未命名事实"), verified: Boolean(payload.verified ?? verified), evidenceCount: refs.length });
+      facts.push({ sequence: event.sequence, content: text(payload.content, "未命名事实"), verified: Boolean(payload.verified ?? verified), evidenceCount: refs.length, state: "unresolved" });
+    }
+    // Fact lifecycle. A rejected/merged/superseded fact is a conclusion: it
+    // must leave the pending list instead of sitting there as "待验证"
+    // forever, which is what made the board look like an ever-growing pile of
+    // open questions. Challenged/revalidated keep the fact visible but state
+    // its review status.
+    if (type === "fact_rejected" || type === "fact_merged" || type === "fact_superseded") {
+      const target = Number(payload.fact_seq ?? 0);
+      const index = facts.findIndex((fact) => fact.sequence === target);
+      if (index >= 0) facts.splice(index, 1);
+    }
+    if (type === "fact_challenged" || type === "fact_revalidated") {
+      const target = Number(payload.fact_seq ?? 0);
+      const fact = facts.find((item) => item.sequence === target);
+      if (fact) fact.state = type === "fact_challenged" ? "challenged" : "revalidated";
     }
   }
 
@@ -400,45 +428,106 @@ function projectBoard(events: RunEvent[], nativeState?: MutekiGraphState): Board
         worker: intent.worker ?? undefined,
         result: intent.result,
       })),
-      facts: [...nativeState.facts].sort((left, right) => right.sequence - left.sequence).map((fact) => ({
-        sequence: fact.sequence,
-        content: fact.content || "未命名事实",
-        verified: fact.verified,
-        evidenceCount: fact.evidence_refs.length,
-      })),
+      // Verified facts first: the confirmed picture is what the operator is
+      // looking for, and putting the newest pending candidate on top is what
+      // buried it.
+      facts: [...nativeState.facts]
+        .sort((left, right) => Number(right.verified) - Number(left.verified) || right.sequence - left.sequence)
+        .map((fact) => ({
+          sequence: fact.sequence,
+          content: fact.content || "未命名事实",
+          verified: fact.verified,
+          evidenceCount: fact.evidence_refs.length,
+          state: fact.state === "challenged" || fact.state === "revalidated" ? fact.state : "unresolved",
+        })),
       reviewCount,
     };
   }
-  return { phase, flagFound, workers: [...workers.values()].reverse(), intents: [...intents.values()].reverse(), facts: facts.reverse(), reviewCount };
+  return { phase, flagFound, workers: [...workers.values()].reverse(), intents: [...intents.values()].reverse(), facts: [...facts].sort((left, right) => Number(right.verified) - Number(left.verified) || right.sequence - left.sequence), reviewCount };
 }
 
-function projectCaseBoard(nativeState: MutekiGraphState | undefined, fallback: BoardState, canonicalFlag?: string): CaseBoardCard[] {
-  const cards: CaseBoardCard[] = [];
+type CaseBoardFact = {
+  sequence: number;
+  content: string;
+  summary_zh?: string;
+  verified: boolean;
+  evidence_refs: string[];
+  source_worker_id?: string;
+};
+
+function projectCaseBoard(nativeState: MutekiGraphState | undefined, fallback: BoardState, canonicalFlag?: string): CaseBoardSections {
+  const confirmed: CaseBoardCard[] = [];
+  const pending: CaseBoardCard[] = [];
   const semanticByCard = new Map((nativeState?.board_semantic?.items ?? []).map((item) => [item.card_id, item]));
-  const facts: Array<{ sequence: number; content: string; summary_zh?: string; verified: boolean; evidence_refs: string[]; source_worker_id?: string }> = nativeState?.available ? (nativeState.key_conditions ?? []) : fallback.facts.filter((fact) => fact.verified && fact.evidenceCount > 0).map((fact) => ({
+
+  // The native SharedGraph is the authority: ``key_conditions`` holds the facts
+  // the backend already gated as confirmed, while ``facts`` still carries every
+  // non-retired fact — including the unverified ones that used to be filtered
+  // out of the board entirely.
+  const nativeConfirmed: CaseBoardFact[] = (nativeState?.available ? nativeState.key_conditions ?? [] : []).map((fact) => ({
     sequence: fact.sequence,
     content: fact.content,
-    summary_zh: fact.content,
+    summary_zh: fact.summary_zh,
+    verified: fact.verified,
+    evidence_refs: fact.evidence_refs ?? [],
+    source_worker_id: fact.source_worker_id,
+  }));
+  const fallbackFacts: CaseBoardFact[] = fallback.facts.map((fact) => ({
+    sequence: fact.sequence,
+    content: fact.content,
     verified: fact.verified,
     evidence_refs: Array.from({ length: fact.evidenceCount }, (_, index) => `evidence-${index + 1}`),
   }));
-  for (const fact of facts) {
+  const isConfirmedFact = (fact: CaseBoardFact) => fact.verified && fact.evidence_refs.length > 0;
+  const confirmedFacts = nativeState?.available ? nativeConfirmed : fallbackFacts.filter(isConfirmedFact);
+  const confirmedSequences = new Set(confirmedFacts.map((fact) => fact.sequence));
+  // Confirmed vs. pending is a *split*, never a drop: everything that is not a
+  // confirmed key condition is still rendered, just in its own section.
+  const pendingFacts: CaseBoardFact[] = nativeState?.available
+    ? (nativeState.facts ?? [])
+      .filter((fact) => !confirmedSequences.has(fact.sequence))
+      .map((fact) => ({
+        sequence: fact.sequence,
+        content: fact.content,
+        verified: fact.verified,
+        evidence_refs: fact.evidence_refs ?? [],
+        source_worker_id: fact.source_worker_id,
+      }))
+    : fallbackFacts.filter((fact) => !isConfirmedFact(fact));
+
+  const buildFactCard = (fact: CaseBoardFact): CaseBoardCard | undefined => {
     const content = text(fact.content).trim();
-    if (!content) continue;
-    cards.push({
+    if (!content) return undefined;
+    const semantic = semanticByCard.get(`fact-${fact.sequence}`)?.summary_zh?.trim();
+    const detail = fact.summary_zh?.trim();
+    // The body is always the original fact text. The Codex/board summary is
+    // demoted to a subtitle, so a shorter summary can no longer stand in for
+    // (and therefore hide) the evidence text.
+    const summary = [semantic, detail].find((item) => item && item !== content && !content.startsWith(item));
+    return {
       id: `fact-${fact.sequence}-${content}`,
       kind: /flag|password|credential|账号|密码|token/i.test(content) ? "finding" : "fact",
-      content: text(semanticByCard.get(`fact-${fact.sequence}`)?.summary_zh, text(fact.summary_zh, `已确认条件：${content}`)),
+      content,
+      summary,
       sourceContent: content,
       verified: fact.verified,
       evidenceRefs: fact.evidence_refs ?? [],
       source: fact.source_worker_id,
       sequence: fact.sequence,
-    });
+    };
+  };
+
+  for (const fact of confirmedFacts) {
+    const card = buildFactCard(fact);
+    if (card) confirmed.push(card);
+  }
+  for (const fact of pendingFacts) {
+    const card = buildFactCard(fact);
+    if (card) pending.push(card);
   }
   for (const flag of nativeState?.flags ?? []) {
     if (!flag.flag || !flag.verified || !flag.evidence_refs.length) continue;
-    cards.push({
+    confirmed.push({
       id: `flag-${flag.sequence}-${flag.flag}`,
       kind: "flag",
       content: flag.flag,
@@ -451,40 +540,110 @@ function projectCaseBoard(nativeState: MutekiGraphState | undefined, fallback: B
   for (const poc of nativeState?.pocs ?? []) {
     const label = poc.name || poc.poc_id;
     if (!label || poc.status === "rejected" || !poc.artifact_id) continue;
-    cards.push({
+    confirmed.push({
       id: `poc-${poc.poc_id}`,
       kind: "finding",
       content: `PoC: ${label}${poc.note ? ` — ${poc.note}` : ""}`,
       verified: poc.status !== "rejected",
       evidenceRefs: poc.artifact_id ? [poc.artifact_id] : [],
       source: "Muteki PoC",
-      sequence: cards.length + 1,
+      sequence: confirmed.length + 1,
     });
   }
-  if (canonicalFlag && !cards.some((card) => card.kind === "flag" && card.content === canonicalFlag)) {
-    cards.push({ id: "canonical-flag", kind: "flag", content: canonicalFlag, verified: true, evidenceRefs: [], source: "Completion Gate", sequence: cards.length + 1 });
+  if (canonicalFlag && !confirmed.some((card) => card.kind === "flag" && card.content === canonicalFlag)) {
+    confirmed.push({ id: "canonical-flag", kind: "flag", content: canonicalFlag, verified: true, evidenceRefs: [], source: "Completion Gate", sequence: confirmed.length + 1 });
   }
-  return cards.sort((left, right) => left.sequence - right.sequence);
+  return {
+    confirmed: confirmed.sort((left, right) => left.sequence - right.sequence),
+    pending: pending.sort((left, right) => left.sequence - right.sequence),
+  };
 }
 
-function CaseBoardCanvas({ cards, fullscreen, positions, semantic, currentRevision, onPositionChange, onArrange, onAnalyze, onToggleFullscreen }: {
+function CaseNote({ card, section, expanded, fullscreen, style, onToggleExpand, onPointerDown }: {
+  card: CaseBoardCard;
+  section: "confirmed" | "pending";
+  expanded: boolean;
+  fullscreen: boolean;
+  style: CSSProperties;
+  onToggleExpand: (cardId: string) => void;
+  onPointerDown: (event: ReactPointerEvent<HTMLElement>) => void;
+}) {
+  const bodyRef = useRef<HTMLDivElement>(null);
+  const [clamped, setClamped] = useState(false);
+
+  // Measure the *unclamped* height so the expand control only shows up when the
+  // text actually exceeds the collapsed 4-line box. Without this every short
+  // note would carry a pointless "展开" button.
+  useEffect(() => {
+    const body = bodyRef.current;
+    if (!body || expanded) return;
+    const frame = window.requestAnimationFrame(() => {
+      const collapsedHeight = body.clientHeight;
+      const display = body.style.display;
+      body.style.display = "block";
+      body.style.setProperty("-webkit-line-clamp", "unset");
+      const fullHeight = body.scrollHeight;
+      body.style.display = display;
+      body.style.removeProperty("-webkit-line-clamp");
+      setClamped(fullHeight > collapsedHeight + 1);
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [card.content, expanded, fullscreen]);
+
+  const head = section === "pending"
+    ? "未验证线索"
+    : card.kind === "flag" ? "最终答案" : card.kind === "finding" ? "关键发现" : "已确认事实";
+  const provenance = section === "pending"
+    ? card.verified ? "已验证但未列入关键条件" : "未验证 · 仅供推断参考"
+    : "已验证";
+
+  return (
+    <article
+      className={`muteki-case-note is-${card.kind} ${section === "pending" ? "is-pending" : "is-verified"} ${expanded ? "is-expanded" : ""}`}
+      data-board-card-id={card.id}
+      style={style}
+      onPointerDown={onPointerDown}
+    >
+      <div className="muteki-case-note-head"><strong>{head}</strong><span>#{card.sequence}</span></div>
+      <div ref={bodyRef} className={`muteki-case-note-content ${expanded ? "is-expanded" : ""}`}>{card.content}</div>
+      {card.summary ? <div className="muteki-case-note-summary">{card.summary}</div> : null}
+      {(clamped || expanded) && (
+        <button
+          type="button"
+          className="muteki-case-note-toggle"
+          onPointerDown={(event) => event.stopPropagation()}
+          onClick={(event) => { event.stopPropagation(); onToggleExpand(card.id); }}
+        >
+          {expanded ? "收起" : `展开全文 · ${card.content.trim().length} 字`}
+        </button>
+      )}
+      <small>{provenance} · 证据 {card.evidenceRefs.length} 条{card.source ? ` · 来源 ${card.source}` : ""}</small>
+    </article>
+  );
+}
+
+function CaseBoardCanvas({ cards, pendingCards, fullscreen, positions, semantic, currentRevision, expandedCards, onToggleExpand, onPositionChange, onArrange, onAnalyze, onToggleFullscreen }: {
   cards: CaseBoardCard[];
+  pendingCards: CaseBoardCard[];
   fullscreen: boolean;
   positions: Record<string, BoardPosition>;
   semantic?: MutekiBoardSemantic;
   currentRevision?: number;
+  expandedCards: Record<string, boolean>;
+  onToggleExpand: (cardId: string) => void;
   onPositionChange: (cardId: string, position: BoardPosition) => void;
   onArrange: () => void;
   onAnalyze: () => void;
   onToggleFullscreen: () => void;
 }) {
   const semanticCurrent = semantic?.status === "completed" && semantic.revision === currentRevision;
-  const boardRef = useRef<HTMLDivElement>(null);
   const dragRef = useRef<{ cardId: string; offsetX: number; offsetY: number; width: number; height: number }>();
 
   const beginDrag = (event: ReactPointerEvent<HTMLElement>, cardId: string) => {
-    const board = boardRef.current;
-    if (!board) return;
+    // Dragging must not steal pointer events from expanded text selection or
+    // from the expand/collapse button.
+    const target = event.target as HTMLElement | null;
+    if (target?.closest(".muteki-case-note-content.is-expanded, .muteki-case-note-toggle")) return;
     const card = event.currentTarget.getBoundingClientRect();
     dragRef.current = {
       cardId,
@@ -498,17 +657,39 @@ function CaseBoardCanvas({ cards, fullscreen, positions, semantic, currentRevisi
 
   const moveDrag = (event: ReactPointerEvent<HTMLDivElement>) => {
     const drag = dragRef.current;
-    const board = boardRef.current;
-    if (!drag || !board) return;
+    if (!drag) return;
+    // Resolve the board from the element handling the event so both the
+    // confirmed and the pending section can host draggable notes.
+    const board = event.currentTarget;
     const bounds = board.getBoundingClientRect();
     const maxX = Math.max(0, bounds.width - drag.width - 8);
     const maxY = Math.max(0, bounds.height - drag.height - 8);
-    const x = Math.max(0, Math.min(maxX, event.clientX - bounds.left - drag.offsetX));
-    const y = Math.max(0, Math.min(maxY, event.clientY - bounds.top - drag.offsetY));
+    const x = Math.max(0, Math.min(maxX, event.clientX - bounds.left + board.scrollLeft - drag.offsetX));
+    const y = Math.max(0, Math.min(maxY, event.clientY - bounds.top + board.scrollTop - drag.offsetY));
     onPositionChange(drag.cardId, { x: (x / Math.max(1, bounds.width)) * 100, y: (y / Math.max(1, bounds.height)) * 100 });
   };
 
   const endDrag = () => { dragRef.current = undefined; };
+  const boardHandlers = { onPointerMove: moveDrag, onPointerUp: endDrag, onPointerCancel: endDrag };
+  const renderNote = (card: CaseBoardCard, index: number, section: "confirmed" | "pending") => {
+    const position = positions[card.id] ?? defaultBoardPosition(index);
+    return (
+      <CaseNote
+        key={card.id}
+        card={card}
+        section={section}
+        expanded={Boolean(expandedCards[card.id])}
+        fullscreen={fullscreen}
+        style={{ left: `${position.x}%`, top: `${position.y}%` }}
+        onToggleExpand={onToggleExpand}
+        onPointerDown={(event) => beginDrag(event, card.id)}
+      />
+    );
+  };
+  // A note grows past the board's fixed height when expanded; switching the
+  // board to a scroll container keeps the whole text reachable instead of
+  // clipping it again at the board edge.
+  const hasExpandedNote = [...cards, ...pendingCards].some((card) => expandedCards[card.id]);
 
   return (
     <>
@@ -517,6 +698,7 @@ function CaseBoardCanvas({ cards, fullscreen, positions, semantic, currentRevisi
           <span><i className="is-fact" /> 已确认事实</span>
           <span><i className="is-finding" /> 关键发现</span>
           <span><i className="is-verified" /> 有证据支撑</span>
+          {pendingCards.length ? <span><i className="is-pending" /> 未验证 {pendingCards.length}</span> : null}
         </div>
         <Space size={4}>
           <Button size="small" type="text" onClick={onArrange}>自动整理</Button>
@@ -528,28 +710,20 @@ function CaseBoardCanvas({ cards, fullscreen, positions, semantic, currentRevisi
           </Button>
         </Space>
       </div>
-      <div
-        ref={boardRef}
-        className={`muteki-case-board ${fullscreen ? "is-fullscreen-board" : ""}`}
-        onPointerMove={moveDrag}
-        onPointerUp={endDrag}
-        onPointerCancel={endDrag}
-      >
-        {cards.length ? cards.map((card) => (
-          <article
-            className={`muteki-case-note is-${card.kind} ${card.verified ? "is-verified" : "is-pending"}`}
-            key={card.id}
-            data-board-card-id={card.id}
-            style={{ left: `${(positions[card.id] ?? defaultBoardPosition(cards.indexOf(card))).x}%`, top: `${(positions[card.id] ?? defaultBoardPosition(cards.indexOf(card))).y}%` }}
-            onPointerDown={(event) => beginDrag(event, card.id)}
-            title={card.sourceContent && card.sourceContent !== card.content ? `原始事实：${card.sourceContent}` : card.content}
-          >
-            <div className="muteki-case-note-head"><strong>{card.kind === "flag" ? "最终答案" : card.kind === "finding" ? "关键发现" : "已确认事实"}</strong><span>#{card.sequence}</span></div>
-            <div className="muteki-case-note-content">{clip(card.content, 220)}</div>
-            <small>已验证 · 证据 {card.evidenceRefs.length} 条{card.source ? ` · 来源 ${card.source}` : ""}</small>
-          </article>
-        )) : <div className="muteki-case-board-empty"><PushpinOutlined /><span>等待 Blackboard 写入已确认条件</span><small>只显示有效、已验证且具备证据引用的关键事实</small></div>}
+      <div className={`muteki-case-board ${fullscreen ? "is-fullscreen-board" : ""} ${hasExpandedNote ? "has-expanded-note" : ""}`} {...boardHandlers}>
+        {cards.length ? cards.map((card, index) => renderNote(card, index, "confirmed")) : <div className="muteki-case-board-empty"><PushpinOutlined /><span>等待 Blackboard 写入已确认条件</span><small>已验证且带证据引用的关键线索显示在这里；未验证线索单独放在下方分区</small></div>}
       </div>
+      {pendingCards.length ? (
+        <section className="muteki-case-board-pending">
+          <div className="muteki-case-board-pending-head">
+            <span><ClockCircleOutlined /> 未验证线索</span>
+            <small>{pendingCards.length} 条 · 尚未通过证据校验，仅供参考</small>
+          </div>
+          <div className={`muteki-case-board is-pending-board ${fullscreen ? "is-fullscreen-board" : ""} ${hasExpandedNote ? "has-expanded-note" : ""}`} {...boardHandlers}>
+            {pendingCards.map((card, index) => renderNote(card, index, "pending"))}
+          </div>
+        </section>
+      ) : null}
     </>
   );
 }
@@ -593,11 +767,16 @@ export function WorkspacePage() {
   const [continuation, setContinuation] = useState("");
   const [artifactContent, setArtifactContent] = useState<{ path: string; content: string }>();
   const [pocExporting, setPocExporting] = useState(false);
+  const [writeupExporting, setWriteupExporting] = useState(false);
   const [caseBoardFullscreen, setCaseBoardFullscreen] = useState(false);
   const [caseBoardLayout, setCaseBoardLayout] = useState<BoardLayout>(() => readBoardLayout(id));
+  // Expansion is keyed by card id so it survives the 2s polling re-render and
+  // is shared between the inline board and the fullscreen board.
+  const [expandedCaseCards, setExpandedCaseCards] = useState<Record<string, boolean>>({});
 
   useEffect(() => {
     setCaseBoardLayout(readBoardLayout(id));
+    setExpandedCaseCards({});
   }, [id]);
 
   useEffect(() => {
@@ -626,7 +805,6 @@ export function WorkspacePage() {
   });
   const boardSemantic = mutekiState.data?.board_semantic;
   const usageSummary = useQuery({ queryKey: ["run-usage", id], queryFn: () => api.getRunUsage(id), refetchInterval: liveRefetchInterval });
-  const runScore = useQuery({ queryKey: ["run-score", id], queryFn: () => api.getRunScore(id), refetchInterval: liveRefetchInterval });
   const tools = useQuery({ queryKey: ["tool-calls", id], queryFn: () => api.getToolCalls(id), refetchInterval: liveRefetchInterval });
   const observations = useQuery({ queryKey: ["observations", id], queryFn: () => api.getObservations(id), refetchInterval: liveRefetchInterval });
   const artifacts = useQuery({ queryKey: ["artifacts", id], queryFn: () => api.getArtifacts(id), refetchInterval: liveRefetchInterval });
@@ -661,8 +839,8 @@ export function WorkspacePage() {
   }, [eventUsage, usageSummary.data?.total]);
   const modelUsages = usageSummary.data?.models ?? [];
   const canonicalFlag = useMemo(
-    () => verifiedCanonicalFlag(run.data?.status, report.data?.report_json),
-    [run.data?.status, report.data?.report_json],
+    () => verifiedCanonicalFlag(run.data?.status, report.data?.report_json, report.data?.flag_pattern),
+    [run.data?.status, report.data?.report_json, report.data?.flag_pattern],
   );
   const caseBoard = useMemo(() => projectCaseBoard(mutekiState.data, board, canonicalFlag), [board, canonicalFlag, mutekiState.data]);
   const semanticAnalysis = useMutation({
@@ -683,9 +861,13 @@ export function WorkspacePage() {
   const updateCaseBoardPosition = (cardId: string, position: BoardPosition) => {
     setCaseBoardLayout((current) => ({ runId: id, positions: { ...current.positions, [cardId]: position } }));
   };
+  const toggleCaseCardExpanded = (cardId: string) => {
+    setExpandedCaseCards((current) => ({ ...current, [cardId]: !current[cardId] }));
+  };
   const arrangeCaseBoard = () => {
     const positions: Record<string, BoardPosition> = {};
-    caseBoard.forEach((card, index) => { positions[card.id] = defaultBoardPosition(index); });
+    caseBoard.confirmed.forEach((card, index) => { positions[card.id] = defaultBoardPosition(index); });
+    caseBoard.pending.forEach((card, index) => { positions[card.id] = defaultBoardPosition(index); });
     setCaseBoardLayout({ runId: id, positions });
   };
   const pendingVerifiedFlag = board.flagFound && !canonicalFlag;
@@ -740,6 +922,25 @@ export function WorkspacePage() {
     }
   };
 
+  const exportWriteup = async () => {
+    if (writeupExporting) return;
+    setWriteupExporting(true);
+    try {
+      const result = await api.downloadRunReport(id);
+      const url = URL.createObjectURL(result.blob);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = result.filename;
+      anchor.click();
+      URL.revokeObjectURL(url);
+      message.success("Writeup 已导出");
+    } catch (error) {
+      message.error((error as Error).message);
+    } finally {
+      setWriteupExporting(false);
+    }
+  };
+
   useEffect(() => {
     setEvents([]);
     let refreshTimer: ReturnType<typeof setTimeout> | undefined;
@@ -771,11 +972,14 @@ export function WorkspacePage() {
         if (types.some((type) => type === "run.completed" || type.startsWith("flag.") || type === "muteki.flag_found")) {
           void client.invalidateQueries({ queryKey: ["flags", id] });
           void client.invalidateQueries({ queryKey: ["report", id] });
-          void client.invalidateQueries({ queryKey: ["run-score", id] });
         }
-        if (types.some((type) => type === "run.score.computed")) {
-          void client.invalidateQueries({ queryKey: ["run-score", id] });
-          void client.invalidateQueries({ queryKey: ["runs"] });
+        // A Muteki Run can go terminal through the native handoff rather than
+        // the in-process runtime.  Its report/Writeup and PoC only become
+        // exportable after the terminal event, so refresh them here too.
+        if (types.some((type) => type === "muteki.run_finished" || type === "run.muteki_terminal_reconciled")) {
+          void client.invalidateQueries({ queryKey: ["report", id] });
+          void client.invalidateQueries({ queryKey: ["flags", id] });
+          void client.invalidateQueries({ queryKey: ["artifacts", id] });
         }
       }, 220);
     });
@@ -848,52 +1052,6 @@ export function WorkspacePage() {
         </div> : <div className="muteki-usage-empty">当前运行尚未收到引擎用量回报；不会用估算值冒充真实 Token。</div>}
       </details>
 
-      {runScore.data ? (
-        <Card
-          className="muteki-score-card"
-          title={<Space><BarChartOutlined /> 解题评分</Space>}
-          extra={<span className="muteki-event-count">公式 {runScore.data.formula_version}</span>}
-        >
-          <div className="muteki-score-grid">
-            <div className="muteki-score-total">
-              <strong>{formatScore(runScore.data.total_score)}</strong>
-              <span>总分</span>
-            </div>
-            <div className="muteki-score-metric">
-              <span>解出</span>
-              <strong>{runScore.data.solved ? "是" : "否"}</strong>
-            </div>
-            <div className="muteki-score-metric">
-              <span>时间比率</span>
-              <strong>{formatRatio(runScore.data.time_ratio)}</strong>
-              <small>实际 / 预测</small>
-            </div>
-            <div className="muteki-score-metric">
-              <span>Token 比率</span>
-              <strong>{formatRatio(runScore.data.token_ratio)}</strong>
-              <small>实际 / 预测</small>
-            </div>
-            <div className="muteki-score-metric">
-              <span>实际耗时</span>
-              <strong>{formatDuration(run.data?.started_at, run.data?.finished_at)}</strong>
-            </div>
-            <div className="muteki-score-metric">
-              <span>实际 Token</span>
-              <strong>{formatTokens(runScore.data.actual_tokens ?? 0)}</strong>
-            </div>
-          </div>
-          {runScore.data.score_status === "NO_PREDICTION" ? (
-            <div className="muteki-score-empty">预测未就绪，暂未评分</div>
-          ) : null}
-          {runScore.data.prediction_snapshot?.rationale_zh ? (
-            <div className="muteki-score-reason">
-              <span>预测理由</span>
-              {String(runScore.data.prediction_snapshot.rationale_zh)}
-            </div>
-          ) : null}
-        </Card>
-      ) : null}
-
       <Alert className="muteki-safety-bar" showIcon icon={<SafetyCertificateOutlined />} type="info" message="授权边界已启用：Worker 只能通过当前 Run 的 Tool Gateway 访问允许主机与工作区。" />
 
       <div className="muteki-main-layout">
@@ -916,9 +1074,9 @@ export function WorkspacePage() {
           <Card
             className="muteki-case-board-card"
             title={<Space><PushpinOutlined /> 案情分析板 / Blackboard</Space>}
-            extra={<span className="muteki-event-count">{caseBoard.length} 个关键条件 · {caseBoard.reduce((total, card) => total + card.evidenceRefs.length, 0)} 条证据</span>}
+            extra={<span className="muteki-event-count">{caseBoard.confirmed.length} 个已确认 · {caseBoard.pending.length} 个未验证 · {[...caseBoard.confirmed, ...caseBoard.pending].reduce((total, card) => total + card.evidenceRefs.length, 0)} 条证据</span>}
           >
-            <CaseBoardCanvas cards={caseBoard} fullscreen={false} positions={caseBoardLayout.positions} semantic={boardSemantic} currentRevision={mutekiState.data?.revision} onPositionChange={updateCaseBoardPosition} onArrange={arrangeCaseBoard} onAnalyze={() => semanticAnalysis.mutate()} onToggleFullscreen={() => setCaseBoardFullscreen(true)} />
+            <CaseBoardCanvas cards={caseBoard.confirmed} pendingCards={caseBoard.pending} fullscreen={false} positions={caseBoardLayout.positions} semantic={boardSemantic} currentRevision={mutekiState.data?.revision} expandedCards={expandedCaseCards} onToggleExpand={toggleCaseCardExpanded} onPositionChange={updateCaseBoardPosition} onArrange={arrangeCaseBoard} onAnalyze={() => semanticAnalysis.mutate()} onToggleFullscreen={() => setCaseBoardFullscreen(true)} />
           </Card>
 
           <Card className="muteki-input-card" title={<Space><SendOutlined /> Coordinator Input</Space>} extra={<span className="muteki-subtle">下一轮 Step 生效</span>}>
@@ -933,10 +1091,10 @@ export function WorkspacePage() {
         {caseBoardFullscreen && (
           <div className="muteki-case-board-fullscreen" role="dialog" aria-modal="true" aria-label="案情分析板全屏">
             <div className="muteki-case-board-fullscreen-head">
-              <div><strong>案情分析板 / Blackboard</strong><span>只显示已确认、可追溯的关键条件</span></div>
+              <div><strong>案情分析板 / Blackboard</strong><span>上方为已确认线索，下方虚线分区为未验证线索</span></div>
               <Button icon={<FullscreenExitOutlined />} onClick={() => setCaseBoardFullscreen(false)}>退出全屏</Button>
             </div>
-            <CaseBoardCanvas cards={caseBoard} fullscreen positions={caseBoardLayout.positions} semantic={boardSemantic} currentRevision={mutekiState.data?.revision} onPositionChange={updateCaseBoardPosition} onArrange={arrangeCaseBoard} onAnalyze={() => semanticAnalysis.mutate()} onToggleFullscreen={() => setCaseBoardFullscreen(false)} />
+            <CaseBoardCanvas cards={caseBoard.confirmed} pendingCards={caseBoard.pending} fullscreen positions={caseBoardLayout.positions} semantic={boardSemantic} currentRevision={mutekiState.data?.revision} expandedCards={expandedCaseCards} onToggleExpand={toggleCaseCardExpanded} onPositionChange={updateCaseBoardPosition} onArrange={arrangeCaseBoard} onAnalyze={() => semanticAnalysis.mutate()} onToggleFullscreen={() => setCaseBoardFullscreen(false)} />
           </div>
         )}
 
@@ -952,15 +1110,20 @@ export function WorkspacePage() {
                   <div className="muteki-inspector-body">
                     <div className={`muteki-result-banner ${canonicalFlag ? "is-solved" : ""}`}>
                       {canonicalFlag ? <CheckCircleFilled /> : <ClockCircleOutlined />}
-                      <div><strong>{canonicalFlag ? "FLAG VERIFIED" : pendingVerifiedFlag ? "FLAG EVENT RECORDED" : terminal ? "RUN FINISHED" : "WAITING FOR EVIDENCE"}</strong><span>{canonicalFlag ? "Completion Gate 已确认结果" : pendingVerifiedFlag ? "已收到验证事件，但当前 Run 尚未完成正式结果落盘" : health.data?.next_action ?? "Coordinator 等待下一条有效观察"}</span></div>
+                      <div><strong>{canonicalFlag ? "FLAG 已验证" : pendingVerifiedFlag ? "已记录验证事件" : terminal ? "运行已结束" : "等待证据"}</strong><span>{canonicalFlag ? "Completion Gate 已确认结果" : pendingVerifiedFlag ? "已收到验证事件，但当前 Run 尚未完成正式结果落盘" : health.data?.next_action ?? "Coordinator 等待下一条有效观察"}</span></div>
                     </div>
                     {canonicalFlag && <div className="muteki-canonical-flag">
-                      <div className="muteki-canonical-flag-label"><CheckCircleFilled /> Verified Flag <Tag color="green">Evidence-backed</Tag></div>
+                      <div className="muteki-canonical-flag-label"><CheckCircleFilled /> 已验证 Flag <Tag color="green">含证据支撑</Tag></div>
                       <Typography.Text className="muteki-canonical-flag-value" copyable={{ text: canonicalFlag }}>{canonicalFlag}</Typography.Text>
-                      <small>Canonical Muteki Completion result</small>
+                      <small>Muteki 完成门禁的正式结果</small>
                       <Button className="muteki-poc-export" icon={<DownloadOutlined />} loading={pocExporting} onClick={exportPoc}>导出可复现 PoC 包</Button>
                     </div>}
-                    <div className="muteki-inspector-section-title">Flag Candidates</div>
+                    {report.data?.content ? (
+                      <div className="muteki-export-actions">
+                        <Button className="muteki-writeup-export" icon={<DownloadOutlined />} loading={writeupExporting} onClick={exportWriteup}>导出 Writeup（Markdown）</Button>
+                      </div>
+                    ) : null}
+                    <div className="muteki-inspector-section-title">Flag 候选</div>
                     {flagRows.length ? flagRows.map((item) => {
                       const meta = flagMeta(item.review_state);
                       return <div className="muteki-flag-row" key={item.id}><Typography.Text ellipsis={{ tooltip: item.candidate }}>{item.candidate}</Typography.Text><Space size={4}><Tag color={meta.color}>{meta.label}</Tag><Button type="text" size="small" icon={<CheckCircleFilled />} onClick={() => reviewFlag.mutate({ candidateId: item.id, reviewState: "VALID" })} /><Button danger type="text" size="small" icon={<WarningOutlined />} onClick={() => reviewFlag.mutate({ candidateId: item.id, reviewState: "INVALID" })} /></Space></div>;
@@ -978,7 +1141,7 @@ export function WorkspacePage() {
                       <div className="muteki-inspector-section-title">当前认知</div>
                     {pendingVerifiedFlag && <div className="muteki-pending-flag"><div><ClockCircleOutlined /> Verified event retained</div><small>当前 Run 尚未通过最终生命周期状态，Completion Gate/report 生成后才会展示具体 Flag。</small></div>}
                     {canonicalFlag && <div className="muteki-blackboard-flag"><div><CheckCircleFilled /> Verified Flag</div><Typography.Text copyable={{ text: canonicalFlag }}>{canonicalFlag}</Typography.Text><small>Completion Gate → canonical Blackboard result</small></div>}
-                    {board.facts.length ? board.facts.slice(0, 8).map((fact) => <div className="muteki-fact-row" key={`${fact.sequence}-${fact.content}`}><span className="muteki-fact-icon">{fact.verified ? <CheckCircleFilled /> : <ClockCircleOutlined />}</span><div><Typography.Text>{clip(fact.content, 120)}</Typography.Text><small>#{fact.sequence} · {fact.verified ? "已验证" : "待验证"} · Evidence {fact.evidenceCount}</small></div></div>) : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="黑板暂无事实" />}
+                    {board.facts.length ? <><div className="muteki-result-chips"><Tag color="green">已验证 {board.facts.filter((fact) => fact.verified).length}</Tag><Tag color="gold">待验证 {board.facts.filter((fact) => !fact.verified).length}</Tag></div>{board.facts.slice(0, 8).map((fact) => <div className="muteki-fact-row" key={`${fact.sequence}-${fact.content}`}><span className="muteki-fact-icon">{fact.verified ? <CheckCircleFilled /> : <ClockCircleOutlined />}</span><div><Typography.Text>{clip(fact.content, 120)}</Typography.Text><small>#{fact.sequence} · {fact.verified ? "已验证" : fact.state === "challenged" ? "待验证 · 已派验证单" : "待验证"} · Evidence {fact.evidenceCount}</small></div></div>)}</> : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="黑板暂无事实" />}
                     <div className="muteki-inspector-section-title">User Prompts → Blackboard</div>
                     {runMessages.data?.length ? runMessages.data.slice(-4).reverse().map((input) => <div className="muteki-blackboard-input" key={input.id}><div><strong>{input.content}</strong><small>revision {input.revision} · {input.status}</small></div></div>) : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无用户提示" />}
                     <div className="muteki-inspector-section-title">Intent Queue</div>

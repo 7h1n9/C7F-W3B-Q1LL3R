@@ -1,3 +1,5 @@
+import asyncio
+import logging
 import os
 import socket
 import uuid
@@ -7,6 +9,7 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.db_retry import is_transient_lock_error, sleep_before_lock_retry
 from app.core.exceptions import DomainError
 from app.models.multi_agent import AgentTask
 from app.models.run import (
@@ -16,7 +19,7 @@ from app.models.run import (
     SolveRun,
     ToolInvocationTicket,
 )
-from app.orchestration.state_machine import TERMINAL, RunStatus
+from app.orchestration.state_machine import TERMINAL, RunStatus, parse_run_status
 from app.schemas.multi_agent import AgentTaskStatus
 from app.services.events import event_service
 from app.services.execution_recovery import execution_recovery_guard
@@ -28,12 +31,49 @@ def utc_now() -> datetime:
     return datetime.now(UTC)
 
 
+logger = logging.getLogger(__name__)
+
+# Run start is the busiest moment for the Run row: the supervisor writes the
+# attempt and its execution lease while recovery, heartbeats and the previous
+# Run's finalizer are still committing.  Measured on 2026-10-20, a backend
+# restart produced enough of that overlap to kill runs ``9f221910``,
+# ``0dcc1934`` and ``b76030e8`` with 1205 within a minute of starting -- each
+# one a challenge that never got to run at all.  A lock wait is transient by
+# definition, so it is retried rather than reported as an engine failure.
+_BEGIN_LOCK_RETRIES = 4
+
+
 def ensure_aware(value: datetime | None) -> datetime | None:
     if value is None:
         return None
     if value.tzinfo is None:
         return value.replace(tzinfo=UTC)
     return value.astimezone(UTC)
+
+
+async def _reload_loaded_instances(session: AsyncSession) -> None:
+    """Undo the expire-everything side effect of a retry ``rollback``.
+
+    ``Session.rollback()`` expires every loaded instance, and under asyncio an
+    expired attribute cannot lazily reload -- the next read raises
+    ``greenlet_spawn has not been called``.  Measured on run ``2d8105f2``:
+    ``_run_muteki`` loads the Challenge *before* ``begin``, so the retry's
+    rollback broke it and the Run died as ``MUTEKI_RUNTIME_ERROR`` on a
+    challenge that had only just survived the lock wait.  Retrying must be
+    invisible to callers that already hold ORM objects.
+
+    Instances created inside the failed attempt are gone from the identity map
+    after the rollback, so this only touches what the caller still owns.
+    """
+
+    for instance in list(session.sync_session.identity_map.values()):
+        try:
+            await session.refresh(instance)
+        except Exception:  # noqa: BLE001 - best effort, see docstring
+            # A row deleted underneath us, or a transient instance.  Leaving it
+            # expired is what the caller would have seen anyway; the point of
+            # this pass is to not make a *recoverable* failure worse.
+            continue
 
 
 class RunAttemptService:
@@ -155,6 +195,38 @@ class RunAttemptService:
         return changed
 
     async def begin(self, session: AsyncSession, run: SolveRun) -> tuple[RunAttempt, RunExecutionLease]:
+        run_id = str(run.id)
+        current = run
+        for index in range(_BEGIN_LOCK_RETRIES):
+            try:
+                return await self._begin_once(session, current)
+            except DomainError:
+                # A real conflict (already executing, not restartable): retrying
+                # it would only delay the 409 the caller must see.
+                raise
+            except Exception as error:  # noqa: BLE001 - reclassified below
+                if index + 1 >= _BEGIN_LOCK_RETRIES or not is_transient_lock_error(error):
+                    raise
+                logger.warning(
+                    "Run %s hit a transient lock wait taking its execution lease "
+                    "(attempt %d/%d); retrying instead of failing the Run",
+                    run_id,
+                    index + 1,
+                    _BEGIN_LOCK_RETRIES,
+                )
+                await session.rollback()
+                await sleep_before_lock_retry(index)
+                await _reload_loaded_instances(session)
+                # The rollback also expired the Run, so re-read it rather than
+                # touching an attribute that would lazily reload it outside the
+                # event loop's greenlet context.
+                reloaded = await session.get(SolveRun, run_id)
+                if reloaded is None:
+                    raise
+                current = reloaded
+        raise RuntimeError("begin() exhausted its retries without returning")
+
+    async def _begin_once(self, session: AsyncSession, run: SolveRun) -> tuple[RunAttempt, RunExecutionLease]:
         if RunStatus(run.status) == RunStatus.COMPLETED_SOLVED or run.thread_invalidated:
             raise DomainError(
                 "RUN_NOT_RESTARTABLE",
@@ -310,9 +382,18 @@ class RunAttemptService:
         leases = list((await session.scalars(select(RunExecutionLease))).all())
         for lease in leases:
             run = await session.get(SolveRun, lease.run_id)
+            # Tolerant read on purpose.  This sweep reclaims leases for the whole
+            # history at startup, so a persistence row carrying a status the enum
+            # no longer knows must not raise ``ValueError`` here: one bad row would
+            # take every other Run's lease cleanup down with it, silently, behind a
+            # healthy-looking API.  Unknown reads as *not terminal* -- the safe
+            # direction: the stale lease is still reclaimed and the Run is left
+            # eligible for reconciliation instead of being declared finished on the
+            # strength of a string nobody can interpret.
+            run_terminal = bool(run) and parse_run_status(run.status) in TERMINAL
             expired = (ensure_aware(lease.expires_at) or now) <= now
             stale_owner = lease.owner_instance_id != self.owner_instance_id
-            if (run and RunStatus(run.status) in TERMINAL) or expired or stale_owner:
+            if run_terminal or expired or stale_owner:
                 if expired or stale_owner:
                     attempt = await session.get(RunAttempt, lease.attempt_id)
                     if attempt and attempt.status == "RUNNING":
@@ -320,7 +401,7 @@ class RunAttemptService:
                         attempt.error_code = "SERVICE_RESTART_INTERRUPTED_TASK" if stale_owner and not expired else "PROCESS_INTERRUPTED"
                         attempt.finished_at = now
                         aborted_attempts += 1
-                        if run and stale_owner and not expired and RunStatus(run.status) not in TERMINAL:
+                        if run and stale_owner and not expired and not run_terminal:
                             run.status = RunStatus.PAUSED_RECOVERY.value
                             await event_service.append(session, run.id, "run.paused_recovery", {"classification": "SERVICE_RESTART_INTERRUPTED_TASK", "retryable": True})
                 # Tickets reference the lease by foreign key.  Reconcile
@@ -334,7 +415,10 @@ class RunAttemptService:
         attempts = list((await session.scalars(select(RunAttempt).where(RunAttempt.status == "RUNNING"))).all())
         for attempt in attempts:
             run = await session.get(SolveRun, attempt.run_id)
-            if run and RunStatus(run.status) in TERMINAL:
+            # Same tolerant read as above.  ``attempt.status = run.status`` is only
+            # reached for a status the enum recognises, so an unrecognised string is
+            # never copied onto the attempt.
+            if run is not None and parse_run_status(run.status) in TERMINAL:
                 attempt.status = run.status
                 attempt.error_code = run.last_error_code
                 attempt.finished_at = ensure_aware(run.finished_at) or now

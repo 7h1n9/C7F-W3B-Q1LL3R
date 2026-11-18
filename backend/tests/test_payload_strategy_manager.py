@@ -1,4 +1,4 @@
-from app.services.payload_strategy import payload_strategy_manager, payload_family
+from app.services.payload_strategy import payload_family, payload_strategy_manager
 
 
 def _args(**values):

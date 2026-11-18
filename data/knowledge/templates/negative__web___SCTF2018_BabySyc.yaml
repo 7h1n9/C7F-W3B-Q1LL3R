@@ -1,0 +1,14 @@
+name: '[SCTF2018]BabySyc'
+category: web
+keywords:
+- sctf2018
+- babysyc
+steps:
+- RACE_WORKER_TIMEOUT
+- RECOVERY_CANDIDATES_REJECTED 2 value(s) under the challenge banner did not satisfy
+  the gate
+evidence_chain: []
+success_format: CTF2\{[^}]+\}
+source: 0b34aa27-7ee7-4e9e-9bf8-1154f1b1890d (run b7e57f9d-c89c-4ce3-81c6-51a0043c4290)
+notes: NO_VERIFIED_FLAG
+kind: negative

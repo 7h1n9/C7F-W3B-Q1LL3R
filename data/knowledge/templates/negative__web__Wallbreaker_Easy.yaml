@@ -1,0 +1,11 @@
+name: Wallbreaker_Easy
+category: web
+keywords:
+- wallbreaker_easy
+steps:
+- RACE_WORKER_TIMEOUT
+evidence_chain: []
+success_format: CTF2\{[^}]+\}
+source: 396a150c-1ea4-42b6-a0e9-5fc34404abff (run c2991212-9354-4797-b927-f8c26bd084af)
+notes: NO_VERIFIED_FLAG
+kind: negative

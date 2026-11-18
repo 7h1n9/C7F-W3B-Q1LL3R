@@ -1,0 +1,33 @@
+name: 培正集团 ee68e7c2e090
+category: web
+keywords:
+- dmz
+- pzctf
+- shell
+- hint
+steps:
+- '[codex] Root is a Peizheng portal homepage. Let me pull the full body and check
+  the team board for existing findings.'
+- Native Worker completed a bounded evidence-backed observation
+- /console/exec POST h=DMZ-WEB&cmd=<cmd> executes REAL commands on the container (uid=0
+  root), with PWD=/data/fs/srv/oa/upload and CTF_FS_ROOT=/data/fs. Not simulated for
+  fs access.
+- '/srv/oa/config.php: db_host=127.0.0.1 db_user=root db_pass=A1b2@C3d4# db_name=toa
+  (OA site config)'
+- '/srv/core/www/OA系统交接说明.txt: OA at http://172.16.1.18/ initial account q11ng / 1qaz@WSX2023'
+- '/srv/core/www/readme.txt: core backup platform http://172.16.1.49/?page=<filename>
+  (LFI candidate)'
+- Decoy flag <FLAG> found in /home/Administrator/Desktop/shell.20230201-094834.log
+  — NOT the target flag (real flag is in core-region OA DB)
+- '[claude] Confirmed via `/test/search.php` PHP `eval` (`__db(''select * from flag'')`
+  → `[(1, ''<FLAG>'')]`), reading the core-region OA database table `flag`.'
+evidence_chain:
+- '[claude] Confirmed via `/test/search.php` PHP `eval` (`__db(''select * from flag'')`
+  → `[(1, ''<FLAG>'')]`), reading the core-region OA database table `flag`.'
+success_format: pzctf\{[^}]+\}
+source: ee68e7c2-e090-40d2-bd1e-ff02c7983c2e (solver 5e52c794-685b-4eac-ad68-200f01906087)
+notes: ''
+flag_evidence_chains:
+  'flag #2':
+  - '[claude] Confirmed via `/test/search.php` PHP `eval` (`__db(''select * from flag'')`
+    → `[(1, ''<FLAG>'')]`), reading the core-region OA database table `flag`.'

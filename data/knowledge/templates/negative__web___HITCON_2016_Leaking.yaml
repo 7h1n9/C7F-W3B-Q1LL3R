@@ -1,0 +1,13 @@
+name: '[HITCON 2016]Leaking'
+category: web
+keywords:
+- hitcon
+- leaking
+steps:
+- RACE_WORKER_TIMEOUT
+- ROUND_BUDGET_EXHAUSTED_BEFORE_REASON
+evidence_chain: []
+success_format: CTF2\{[^}]+\}
+source: ed22f7ad-fb7b-4f8f-a650-2d58f1eeeff8 (run ebdd82ea-1120-431b-9e69-d6a7b8f0451f)
+notes: NO_VERIFIED_FLAG
+kind: negative

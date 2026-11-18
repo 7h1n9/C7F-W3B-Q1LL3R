@@ -1,0 +1,12 @@
+name: '[HCTF 2018]Hideandseek'
+category: web
+keywords:
+- hctf
+- hideandseek
+steps:
+- NO_HEALTHY_WORKER_PROFILE
+evidence_chain: []
+success_format: CTF2\{[^}]+\}
+source: 29d00841-cb51-434a-b89e-5ffaf66e2b4d (run fae35c16-bead-414c-b6dc-8045f5c0c8c6)
+notes: NO_HEALTHY_WORKER_PROFILE
+kind: negative

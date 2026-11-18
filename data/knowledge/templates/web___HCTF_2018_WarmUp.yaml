@@ -1,0 +1,23 @@
+name: '[HCTF 2018]WarmUp'
+category: web
+keywords:
+- hctf
+- warmup
+steps:
+- '[claude] File inclusion bypass via query string trick: source.php?/../path allows
+  whitelist check on source.php but include executes full path with traversal'
+- '[claude] Flag file location: ffffllllaaaagggg in root directory'
+- '[claude] Challenge exploited LFI vulnerability in PHP whitelist check logic where
+  ? character extraction happens before include() execution'
+- '[claude] The vulnerability was in the `emmm::checkFile()` function that validated
+  filenames against a whitelist. By appending `?/../../../../../ffffllllaaaagggg`
+  to a whitelisted filename like `source.php`, th'
+- Native Worker completed a bounded evidence-backed observation
+evidence_chain:
+- '[claude] Flag file location: ffffllllaaaagggg in root directory'
+- '[claude] The vulnerability was in the `emmm::checkFile()` function that validated
+  filenames against a whitelist. By appending `?/../../../../../ffffllllaaaagggg`
+  to a whitelisted filename like `source.php`, th'
+success_format: CTF2\{[^}]+\}
+source: 0ca083cb-3528-441f-b40b-b41f2562b895 (solver 57d67098-1f19-4ecb-b54b-1591a349ab42)
+notes: ''

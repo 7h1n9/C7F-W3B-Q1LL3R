@@ -63,7 +63,7 @@ services:
       asset-warranty-db:
         condition: service_healthy
     ports:
-      - "127.0.0.1:28037:5000"
+      - "127.0.0.1:${WARRANTY_WEB_PORT:-28037}:5000"
     networks:
       - asset-warranty-net
     cap_drop:

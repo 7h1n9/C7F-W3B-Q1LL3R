@@ -1,0 +1,18 @@
+name: bestphp's revenge
+category: web
+keywords:
+- bestphp
+- revenge
+steps:
+- '[claude] 最佳路径解决方案链有效：R1 `POST /?f=session_start&name=|O:10:"SoapClient"...` + body
+  `serialize_handler=php_serialize` 注入了 SoapClient；R2 `POST /?f=extract` + body `b=call_user_func`
+  覆盖了 `$b`，使得 `call_user_func('''
+- '[claude] 两个独立的会话是必需的（触发请求会在关机时覆盖其自身的会话文件）；保存 SoapClient 的会话和使用 CRLF cookie 接收 flag
+  的会话必须是不同的 PHPSESSID。'
+- '[claude] 实际的 flag 格式为 CTF2{uuid}，而不是本框描述中所称的 `flag{...}`。'
+- '[claude] FOUND_FLAG=<FLAG>'
+evidence_chain:
+- '[claude] FOUND_FLAG=<FLAG>'
+success_format: CTF2\{[^}]+\}
+source: 5a56306b-24f1-49e4-a7f4-a1e0aca723ac (solver a5859b55-5745-4cf3-a568-8485b403b18b)
+notes: ''

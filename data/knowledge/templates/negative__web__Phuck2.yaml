@@ -1,0 +1,26 @@
+name: Phuck2
+category: web
+keywords:
+- phuck2
+steps:
+- 'php:// wrapper (any encoding/case) blocked: ''php'' substring filter runs on decoded
+  value. Same for data:// expect:// (allow_url_include off, data returns 0). file://
+  works but include executes .php so source cannot be read.'
+- 'No upload endpoint (upload/save/put/api/etc all 404); PUT /users/x.php ->404; /users/
+  stays empty. No session (no PHPSESSID set), so no session-file LFI. Log poisoning
+  dead: /var/log/apache2/*.log 0 (640 root:adm, www-data denied).'
+- 'Flag not at any standard path readable by www-data: swept /flag,/flag.txt,/root/*,/home/*,/opt,/srv,/tmp,/var/www,/var/www/html,/data,/app,/code
+  x {flag,flag.txt,fl4g,f1ag,fla9,.flag,secret,...} -> all 0. /root + /etc/sudoers
+  + /etc/shadow denied (perm). Kernel 5.15, seccomp=2, NoNewPrivs=1 -> no local privesc
+  from LFI-only.'
+- 'RECON LANE CONCLUSION: public surface fully mapped. LFI include with ''php'' substring
+  + literal ''../'' + %00 deny. Only world-readable files retrievable. No upload,
+  no session, no writable-readable log, no wrapper, no source disclosure. Flag not
+  in any www-data-readable path. Next lanes should pursue RCE via a NON-http write
+  path or elevated read; recon/public-endpoints lane is exhausted.'
+- RACE_WORKER_TIMEOUT
+evidence_chain: []
+success_format: CTF2\{[^}]+\}
+source: 1311c502-d746-439a-9dc0-fbcac4192d17 (run a9cfaf15-4c9a-446c-9e4d-efd77f74848f)
+notes: NO_VERIFIED_FLAG
+kind: negative

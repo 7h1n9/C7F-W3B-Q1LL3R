@@ -106,7 +106,7 @@ async def test_solver_loop_uses_worker_manager_and_reducer_chain() -> None:
         state_machine=TaskStateMachine(),
         planner=DeterministicPlanner(),
         policy=ActionPolicyValidator(),
-        worker_manager=WorkerManager(workers={"mock": worker}),
+        worker_manager=WorkerManager(workers={"runner": worker}),
     )
 
     step = await loop.step("adapter-test")
