@@ -274,6 +274,35 @@ body::before { position: fixed; inset: 0; z-index: -1; content: ""; opacity: .58
 .muteki-worker-row { align-items: flex-start; }
 .muteki-worker-row strong, .muteki-artifact-row strong { display: block; overflow: hidden; color: #2b665d; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
 .muteki-artifact-row { align-items: center; justify-content: space-between; }
+/* ---- Agent 工作台 ------------------------------------------------------ */
+/* One card per Worker. The grid is the point: a Run with six lanes has to be
+   scannable at a glance instead of read line by line. */
+.muteki-agent-board-card .ant-card-body { padding: 12px 16px 16px; }
+.muteki-agent-board { display: grid; grid-template-columns: repeat(auto-fill, minmax(268px, 1fr)); gap: 10px; }
+.muteki-agent-card { display: flex; flex-direction: column; min-width: 0; padding: 10px 11px; background: #f8fdfb; border: 1px solid #dcefe9; border-radius: 10px; }
+.muteki-agent-card.is-running { background: #f4fffc; border-color: #9eddd0; box-shadow: 0 0 0 1px #b7e8dd0f inset; }
+.muteki-agent-card.is-finished { background: #f7f9f8; border-color: #e2ebe8; }
+.muteki-agent-head { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.muteki-agent-head strong { overflow: hidden; color: #1d6057; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.muteki-agent-head .ant-tag { margin-inline-end: 0; font-family: Consolas, monospace; font-size: 9px; line-height: 16px; }
+.muteki-agent-clock { margin-left: auto; color: #7ca59d; font-family: Consolas, monospace; font-size: 10px; white-space: nowrap; }
+.muteki-agent-clock.is-live { color: #0c9279; }
+.muteki-agent-metrics { display: flex; flex-wrap: wrap; gap: 9px; margin-top: 7px; color: #86a7a0; font-family: Consolas, monospace; font-size: 9px; }
+.muteki-agent-metrics b { color: #2a665d; font-size: 12px; font-weight: 600; }
+.muteki-agent-metrics .muteki-agent-tools { overflow: hidden; max-width: 100%; text-overflow: ellipsis; white-space: nowrap; }
+.muteki-agent-metrics .muteki-agent-code { padding: 0 5px; color: #a4442f; background: #fff1ec; border-radius: 4px; }
+/* The command is the only line an operator reads under time pressure: keep it
+   monospace and give it its own row so it never competes with metadata. */
+.muteki-agent-command { display: flex; gap: 5px; margin-top: 8px; padding: 6px 7px; background: #0f2e2a08; border: 1px solid #e2f0eb; border-radius: 7px; }
+.muteki-agent-prompt { flex: 0 0 auto; color: #00a88e; font-family: Consolas, monospace; font-size: 10px; line-height: 1.5; }
+.muteki-agent-command-text { color: #1f4f48; font-family: Consolas, monospace; font-size: 10px; line-height: 1.5; }
+.muteki-agent-result { margin-top: 4px; color: #6f8f88; font-family: Consolas, monospace; font-size: 9px; line-height: 1.45; }
+.muteki-agent-idle { margin-top: 8px; color: #9bb6b0; font-size: 10px; }
+.muteki-agent-route { margin: 6px 0 0; padding: 0 0 0 14px; list-style: decimal; }
+.muteki-agent-route li { margin-bottom: 4px; color: #7ba299; font-family: Consolas, monospace; font-size: 9px; line-height: 1.45; overflow-wrap: anywhere; }
+.muteki-agent-route li code { display: block; color: #2b665d; white-space: pre-wrap; }
+.muteki-agent-route li small { display: block; color: #94b0aa; white-space: pre-wrap; }
+.muteki-agent-foot { display: flex; flex-wrap: wrap; gap: 8px; margin-top: auto; padding-top: 8px; color: #9bb6b0; font-family: Consolas, monospace; font-size: 8px; }
 .muteki-context-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin-top: 16px; }
 .muteki-context-grid .ant-statistic { padding: 8px; background: #f3fbf8; border: 1px solid #e0f0eb; border-radius: 8px; }
 .muteki-context-grid .ant-statistic-title { color: #80a49c; font-size: 9px; }

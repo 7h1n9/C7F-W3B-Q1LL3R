@@ -18,7 +18,7 @@ const runEventTypes = [
   "muteki.fact_added", "muteki.dead_end", "muteki.intent_proposed", "muteki.intent_claimed",
   "muteki.intent_released", "muteki.intent_concluded", "muteki.flag_candidate", "muteki.flag_found",
   "muteki.poc_saved", "muteki.resource_locked", "muteki.resource_released", "muteki.worker_started",
-  "muteki.worker_step", "muteki.worker_finished", "muteki.review_finding", "muteki.review_proposal",
+  "muteki.worker_step", "muteki.worker_command", "muteki.worker_finished", "muteki.review_finding", "muteki.review_proposal",
   "muteki.branch_split", "muteki.branch_resolved", "muteki.lane_locked", "muteki.lane_released",
   "muteki.intent_lane_deferred", "muteki.fact_challenged", "muteki.fact_revalidated",
   "muteki.fact_rejected", "muteki.fact_merged", "muteki.fact_superseded", "muteki.fact_pinned",

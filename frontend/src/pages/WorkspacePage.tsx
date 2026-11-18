@@ -30,7 +30,28 @@ import { isTerminalRunStatus, solverModeLabel } from "../utils/run";
 
 type EventPayload = Record<string, unknown>;
 type NormalizedEvent = { type: string; actor: string; payload: EventPayload; verified: boolean };
-type WorkerState = { id: string; role: string; engine: string; status: "running" | "finished"; intentId?: string };
+/** One published ``worker_command``: the only record of what an agent ran. */
+type WorkerCommandRecord = { sequence: number; command: string; result: string; at: string };
+type WorkerState = {
+  id: string;
+  role: string;
+  engine: string;
+  status: "running" | "finished";
+  intentId?: string;
+  branchId?: string;
+  startedAt?: string;
+  finishedAt?: string;
+  /** Last event timestamp for this worker; silence is the "frozen" signal. */
+  lastSeenAt?: string;
+  steps: number;
+  toolSteps: number;
+  distinctTools: string[];
+  /** Bounded tail of the agent's action trail (newest last). */
+  commands: WorkerCommandRecord[];
+  commandCount: number;
+  factCount: number;
+  resultCode?: string;
+};
 type IntentState = { id: string; description: string; status: "open" | "claimed" | "done"; worker?: string; tool?: string; classification?: string; result?: string };
 type FactState = { sequence: number; content: string; verified: boolean; evidenceCount: number; state?: "unresolved" | "challenged" | "revalidated" };
 type BoardState = { phase: string; flagFound: boolean; workers: WorkerState[]; intents: IntentState[]; facts: FactState[]; reviewCount: number };
@@ -381,10 +402,10 @@ function formatCost(value?: number): string {
   return value === undefined ? "—" : `$${value.toFixed(4)}`;
 }
 
-function formatDuration(startedAt?: string | null, finishedAt?: string | null): string {
+function formatDuration(startedAt?: string | null, finishedAt?: string | null, now: number = Date.now()): string {
   if (!startedAt) return "—";
   const start = Date.parse(startedAt);
-  const finish = finishedAt ? Date.parse(finishedAt) : Date.now();
+  const finish = finishedAt ? Date.parse(finishedAt) : now;
   if (Number.isNaN(start) || Number.isNaN(finish) || finish < start) return "—";
   const total = Math.floor((finish - start) / 1000);
   const hours = Math.floor(total / 3600);
@@ -393,10 +414,144 @@ function formatDuration(startedAt?: string | null, finishedAt?: string | null): 
   return `${hours ? `${hours}:` : ""}${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
 }
 
-function projectBoard(events: RunEvent[], nativeState?: MutekiGraphState): BoardState {
+// A Worker emits one ``worker_command`` per shell tool call, capped upstream by
+// ``WORKER_COMMAND_MAX_PER_WORKER``.  Keeping the whole tail would make the
+// board as noisy as the raw log, but keeping none of it means the "thinking
+// route" is unavailable after the fact -- so keep a bounded tail.
+const WORKER_ROUTE_LIMIT = 8;
+
+/**
+ * Tick only the agent board while any worker is live.
+ *
+ * The elapsed clock has to advance even when the Run is silent -- a wall clock
+ * frozen at "4:12" for six minutes is indistinguishable from a stalled agent,
+ * which is exactly the question this board exists to answer.  The tick lives
+ * inside the board so the case-board canvas and the event stream are not
+ * re-rendered once a second.
+ */
+function useElapsedTick(active: boolean): number {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!active) return;
+    const timer = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, [active]);
+  return now;
+}
+
+function silenceLabel(lastSeenAt: string | undefined, now: number): string {
+  if (!lastSeenAt) return "";
+  const seen = Date.parse(lastSeenAt);
+  if (Number.isNaN(seen)) return "";
+  const seconds = Math.max(0, Math.floor((now - seen) / 1000));
+  if (seconds < 60) return `${seconds} 秒前有动作`;
+  return `${Math.floor(seconds / 60)} 分 ${String(seconds % 60).padStart(2, "0")} 秒前有动作`;
+}
+
+/**
+ * Per-agent board: identity, live state, and the action trail.
+ *
+ * The old row said "role · engine · 活动中" and nothing else, so a Run that
+ * burned 20 minutes produced a board that could not answer the only questions
+ * an operator has -- what is each agent doing, what did it just run, did that
+ * produce anything, and is it still alive.  Every number here comes from an
+ * event the backend actually emits (``worker_step`` / ``worker_command``);
+ * nothing is inferred.
+ */
+function AgentBoard({ workers }: { workers: WorkerState[] }) {
+  const [openRoutes, setOpenRoutes] = useState<Record<string, boolean>>({});
+  const now = useElapsedTick(workers.some((worker) => worker.status === "running"));
+  if (!workers.length) return <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无 Worker" />;
+  return (
+    <div className="muteki-agent-board">
+      {workers.map((worker) => {
+        const running = worker.status === "running";
+        const last = worker.commands[worker.commands.length - 1];
+        const routeOpen = Boolean(openRoutes[worker.id]);
+        return (
+          <div className={`muteki-agent-card ${running ? "is-running" : "is-finished"}`} key={worker.id}>
+            <div className="muteki-agent-head">
+              <Badge status={running ? "processing" : "default"} />
+              <strong>{worker.role}</strong>
+              <Tag>{worker.engine}</Tag>
+              <span className={`muteki-agent-clock ${running ? "is-live" : ""}`}>{formatDuration(worker.startedAt, worker.finishedAt, now)}</span>
+            </div>
+            <div className="muteki-agent-metrics">
+              <span><b>{worker.steps}</b> 步</span>
+              <span><b>{worker.toolSteps}</b> 工具</span>
+              <span><b>{worker.commandCount}</b> 命令</span>
+              <span><b>{worker.factCount}</b> fact</span>
+              {worker.distinctTools.length > 0 && <span className="muteki-agent-tools">{worker.distinctTools.slice(0, 3).join(" / ")}</span>}
+              {worker.resultCode && <span className="muteki-agent-code">{worker.resultCode}</span>}
+            </div>
+            {last ? (
+              <>
+                <div className="muteki-agent-command">
+                  <span className="muteki-agent-prompt">$</span>
+                  <ExpandableText value={last.command} lines={2} className="muteki-agent-command-text" />
+                </div>
+                {last.result && <ExpandableText value={last.result} lines={2} className="muteki-agent-result" />}
+              </>
+            ) : (
+              <div className="muteki-agent-idle">{running ? "已启动 · 尚未发出命令（思考中）" : "本轮未记录任何命令"}</div>
+            )}
+            {worker.commands.length > 1 && (
+              <button type="button" className="muteki-expand-toggle" onClick={() => setOpenRoutes((current) => ({ ...current, [worker.id]: !current[worker.id] }))}>
+                {routeOpen ? "收起行动路线" : `行动路线 · ${worker.commands.length} 步`}
+              </button>
+            )}
+            {routeOpen && (
+              <ol className="muteki-agent-route">
+                {[...worker.commands].reverse().map((record) => (
+                  <li key={record.sequence}>
+                    <code>{record.command}</code>
+                    {record.result && <small>{record.result}</small>}
+                  </li>
+                ))}
+              </ol>
+            )}
+            <div className="muteki-agent-foot">
+              <span>{worker.intentId ? `intent ${worker.intentId}` : "无绑定 intent"}</span>
+              {worker.branchId && <span>branch {worker.branchId}</span>}
+              <span>{running ? silenceLabel(worker.lastSeenAt, now) : "已结束"}</span>
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function emptyWorker(id: string): WorkerState {
+  return { id, role: "worker", engine: "—", status: "running", steps: 0, toolSteps: 0, distinctTools: [], commands: [], commandCount: 0, factCount: 0 };
+}
+
+/**
+ * Running agents first, then most recent activity.
+ *
+ * Insertion order alone put a finished worker from 40 minutes ago above the one
+ * that is working right now, which is the opposite of what the board is for.
+ */
+function orderWorkers(workers: Map<string, WorkerState>, factOwners: Map<string, number>): WorkerState[] {
+  return [...workers.values()]
+    .map((worker) => ({ ...worker, factCount: factOwners.get(worker.id) ?? 0 }))
+    .sort((left, right) => {
+      const running = Number(right.status === "running") - Number(left.status === "running");
+      if (running !== 0) return running;
+      return String(right.lastSeenAt ?? "").localeCompare(String(left.lastSeenAt ?? ""));
+    });
+}
+
+// Exported for the projection harness: the Worker board is only correct if it
+// survives a real Run's event stream, and that is checked off-line against
+// events dumped from ``run_events`` rather than by eyeballing a screenshot.
+export function projectBoard(events: RunEvent[], nativeState?: MutekiGraphState): BoardState {
   const workers = new Map<string, WorkerState>();
   const intents = new Map<string, IntentState>();
   const facts: FactState[] = [];
+  // Facts are attributed by the emitting actor; recorded separately so a fact
+  // that arrives before its worker_started still lands on the right agent.
+  const factOwners = new Map<string, number>();
   let phase = "prepare";
   let flagFound = false;
   let reviewCount = 0;
@@ -412,16 +567,79 @@ function projectBoard(events: RunEvent[], nativeState?: MutekiGraphState): Board
     if (type === "flag_found" && verified === true) flagFound = true;
     if (type.startsWith("review_")) reviewCount += 1;
 
-    if (type === "worker_started" || type === "worker_step" || type === "worker_finished") {
+    if (type === "worker_started" || type === "worker_step" || type === "worker_command" || type === "worker_finished") {
       const workerId = text(payload.worker_id, actor);
-      const previous = workers.get(workerId);
-      workers.set(workerId, {
-        id: workerId,
-        role: text(payload.role, previous?.role ?? "worker"),
-        engine: text(payload.engine_id, previous?.engine ?? "—"),
-        status: type === "worker_finished" ? "finished" : "running",
-        intentId: text(payload.intent_id, previous?.intentId),
-      });
+      // Worker ids are reused within a Run: ``worker-1`` came back three times
+      // in one measured Run (04:59 known-path, 05:01 route:9d21, 05:10
+      // route:4922) and 73 of 3,864 ids restart at least once.  Those are
+      // separate shifts -- different branch, different counters -- so the card
+      // must show the current one, not a lifetime average that no agent ever
+      // lived.  A repeat start on the *same* branch is a retry: also a reset.
+      const existing = workers.get(workerId);
+      const incomingBranch = text(payload.branch_id);
+      const restart = type === "worker_started" && existing !== undefined
+        && (existing.status === "finished" || Boolean(incomingBranch && existing.branchId && incomingBranch !== existing.branchId));
+      const previous = (restart ? undefined : existing) ?? emptyWorker(workerId);
+      const next: WorkerState = { ...previous, lastSeenAt: event.created_at };
+      next.role = text(payload.role, previous.role);
+      next.engine = text(payload.engine_id, previous.engine);
+      next.intentId = text(payload.intent_id, previous.intentId);
+      next.branchId = text(payload.branch_id, previous.branchId);
+      if (type === "worker_started") {
+        next.status = "running";
+        next.startedAt = event.created_at;
+        next.finishedAt = undefined;
+        next.resultCode = undefined;
+      }
+      if (type === "worker_step") {
+        // Snapshots carry cumulative totals; the aggregate is coalesced, so a
+        // delta would undercount when several steps land inside one window.
+        const total = Number(payload.steps_total);
+        if (Number.isFinite(total) && total > 0) next.steps = Math.max(previous.steps, total);
+        const toolSteps = Number(payload.tool_steps);
+        if (Number.isFinite(toolSteps) && toolSteps >= 0) next.toolSteps = Math.max(previous.toolSteps, toolSteps);
+        if (Array.isArray(payload.distinct_tools)) {
+          next.distinctTools = payload.distinct_tools.filter((item): item is string => typeof item === "string" && Boolean(item));
+        }
+        // A returning worker's trailing aggregate is published as a
+        // ``worker_step`` whose kind is ``worker_finished``; for a coalesced
+        // worker that is the only close signal it ever sends.
+        if (text(payload.kind) === "worker_finished") {
+          next.status = "finished";
+          next.finishedAt = event.created_at;
+          next.resultCode = text(payload.worker_result_code, previous.resultCode);
+        }
+      }
+      if (type === "worker_command") {
+        const command = text(payload.command);
+        const result = text(payload.result_excerpt);
+        const kind = text(payload.kind);
+        const tail = previous.commands[previous.commands.length - 1];
+        // One shell call is published twice: ``kind="tool"`` with the command
+        // and an empty excerpt, then ``kind="tool_result"`` with the same
+        // command plus the output.  Measured on a real Run: 89 and 90 events
+        // for 44 and 45 actual calls.  Folding the pair is what keeps
+        // "命令 N" equal to the number of commands actually run -- and a
+        // stray tool_result must never be counted as a new command.
+        // The result event also has to be recognised when its excerpt is
+        // empty: keying the fold on "has output" under-counted the fold and
+        // left a duplicate record for every silent tool call.
+        const closesTail = kind === "tool_result"
+          || (!command && Boolean(result))
+          || (!kind && Boolean(result) && Boolean(tail) && !tail?.result);
+        if (closesTail) {
+          if (tail && !tail.result) next.commands = [...previous.commands.slice(0, -1), { ...tail, result }];
+        } else if (command) {
+          next.commands = [...previous.commands, { sequence: event.sequence, command, result, at: event.created_at }].slice(-WORKER_ROUTE_LIMIT);
+          next.commandCount = previous.commandCount + 1;
+        }
+      }
+      if (type === "worker_finished") {
+        next.status = "finished";
+        next.finishedAt = event.created_at;
+        next.resultCode = text(payload.worker_result_code, previous.resultCode);
+      }
+      workers.set(workerId, next);
     }
     if (type === "intent_proposed") {
       const intentId = text(payload.intent_id, `intent-${event.sequence}`);
@@ -448,6 +666,7 @@ function projectBoard(events: RunEvent[], nativeState?: MutekiGraphState): Board
     if (type === "fact_added") {
       const refs = Array.isArray(payload.evidence_refs) ? payload.evidence_refs : [];
       facts.push({ sequence: event.sequence, content: text(payload.content, "未命名事实"), verified: Boolean(payload.verified ?? verified), evidenceCount: refs.length, state: "unresolved" });
+      factOwners.set(actor, (factOwners.get(actor) ?? 0) + 1);
     }
     // Fact lifecycle. A rejected/merged/superseded fact is a conclusion: it
     // must leave the pending list instead of sitting there as "待验证"
@@ -472,10 +691,17 @@ function projectBoard(events: RunEvent[], nativeState?: MutekiGraphState): Board
   // for facts/intents/flags whenever it is available so the Workspace cannot
   // display an empty Blackboard while the run-scoped graph is populated.
   if (nativeState?.available) {
+    // The graph is authoritative for fact ownership too: the SSE window is
+    // bounded, so an event-only count under-reports a long round.
+    const nativeOwners = new Map<string, number>();
+    for (const fact of nativeState.facts) {
+      const owner = text(fact.source_worker_id);
+      if (owner) nativeOwners.set(owner, (nativeOwners.get(owner) ?? 0) + 1);
+    }
     return {
       phase,
       flagFound: flagFound || nativeState.flags.some((item) => item.verified),
-      workers: [...workers.values()].reverse(),
+      workers: orderWorkers(workers, nativeOwners),
       intents: [...nativeState.intents].sort((left, right) => (right.sequence ?? 0) - (left.sequence ?? 0)).map((intent) => ({
         id: intent.id,
         description: intent.description || "未命名 Intent",
@@ -498,7 +724,7 @@ function projectBoard(events: RunEvent[], nativeState?: MutekiGraphState): Board
       reviewCount,
     };
   }
-  return { phase, flagFound, workers: [...workers.values()].reverse(), intents: [...intents.values()].reverse(), facts: [...facts].sort((left, right) => Number(right.verified) - Number(left.verified) || right.sequence - left.sequence), reviewCount };
+  return { phase, flagFound, workers: orderWorkers(workers, factOwners), intents: [...intents.values()].reverse(), facts: [...facts].sort((left, right) => Number(right.verified) - Number(left.verified) || right.sequence - left.sequence), reviewCount };
 }
 
 type CaseBoardFact = {
@@ -1128,6 +1354,14 @@ export function WorkspacePage() {
                 );
               }) : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="等待 Blackboard 事件" />}
             </div>
+          </Card>
+
+          <Card
+            className="muteki-agent-board-card"
+            title={<Space><UserOutlined /> Agent 工作台</Space>}
+            extra={<span className="muteki-event-count">{activeWorkerCount} 个在跑 · 共 {workerTotal} 个</span>}
+          >
+            <AgentBoard workers={board.workers} />
           </Card>
 
           <Card
