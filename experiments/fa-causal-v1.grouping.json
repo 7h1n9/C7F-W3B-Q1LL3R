@@ -1,0 +1,193 @@
+{
+  "experiment": "fa-causal-v1",
+  "generated_at": "2026-11-18T08:46:04.883459+00:00",
+  "practice_ground_id": "b9bbb32f-f186-458f-b90b-12440c0f6aea",
+  "dry_run": false,
+  "rule": "strata=has_cve; order=sha256(challenge_id); even->treatment, odd->control",
+  "summary": {
+    "pool_size": 29,
+    "eligible_no_fa": 29,
+    "excluded_for_prior_fa": 0,
+    "treatment": {
+      "n": 10,
+      "with_prior_runs": 10,
+      "median_prior_runs": 5,
+      "cve": 0
+    },
+    "control": {
+      "n": 10,
+      "with_prior_runs": 10,
+      "median_prior_runs": 4,
+      "cve": 0
+    }
+  },
+  "treatment": [
+    {
+      "challenge_id": "6872b381-4a21-4632-bc5d-be5abf8074eb",
+      "name": "[CISCN2019 华东南赛区]Web9",
+      "run_count": 3,
+      "fa_seen": false,
+      "has_cve": false
+    },
+    {
+      "challenge_id": "49b0fd5b-426d-40c5-a3d1-b72c904ae57a",
+      "name": "TheMatrix",
+      "run_count": 4,
+      "fa_seen": false,
+      "has_cve": false
+    },
+    {
+      "challenge_id": "680e036b-6dce-4030-90eb-5c63e2f0eb93",
+      "name": "PyCalX 1&2",
+      "run_count": 5,
+      "fa_seen": false,
+      "has_cve": false
+    },
+    {
+      "challenge_id": "2c7220d0-b541-4041-911c-bdf29f755a4a",
+      "name": "[STARCTF2019]996game",
+      "run_count": 6,
+      "fa_seen": false,
+      "has_cve": false
+    },
+    {
+      "challenge_id": "08234edd-2358-46fb-a54f-81c04d923db8",
+      "name": "[De1CTF 2019]cloudmusic_rev",
+      "run_count": 4,
+      "fa_seen": false,
+      "has_cve": false
+    },
+    {
+      "challenge_id": "b8ddfa83-7250-4a3a-b75d-0aedabac6ecb",
+      "name": "ctf473831530_2018_web_virink_web",
+      "run_count": 5,
+      "fa_seen": false,
+      "has_cve": false
+    },
+    {
+      "challenge_id": "81cbff31-1fdd-43dd-a90e-36a3602a6315",
+      "name": "[RCTF2019]calcalcalc",
+      "run_count": 5,
+      "fa_seen": false,
+      "has_cve": false
+    },
+    {
+      "challenge_id": "186069b6-5d30-4c6d-a8b0-f3c8efaba75a",
+      "name": "[RWCTF2018]Bookhub",
+      "run_count": 6,
+      "fa_seen": false,
+      "has_cve": false
+    },
+    {
+      "challenge_id": "01526db6-a2ad-47fa-85cc-2f0fb1f02cfa",
+      "name": "Unkonwn Web 1",
+      "run_count": 3,
+      "fa_seen": false,
+      "has_cve": false
+    },
+    {
+      "challenge_id": "bbd4fa95-6df2-46f6-8c3d-8fc91573f1ed",
+      "name": "[CISCN2019 总决赛 Day1 Web5]Markdown Note",
+      "run_count": 4,
+      "fa_seen": false,
+      "has_cve": false
+    }
+  ],
+  "control": [
+    {
+      "challenge_id": "73ca736e-1dab-408c-8574-c9a52732ab05",
+      "name": "kzone",
+      "run_count": 4,
+      "fa_seen": false,
+      "has_cve": false
+    },
+    {
+      "challenge_id": "cf3a7bb1-c7e8-40cc-b5ad-2fa28c71f6ed",
+      "name": "[CISCN2019 总决赛 Day1 Web4]Laravel1",
+      "run_count": 4,
+      "fa_seen": false,
+      "has_cve": false
+    },
+    {
+      "challenge_id": "c29c7c3e-f76b-4cdc-b684-0db5fa5e1ff8",
+      "name": "[网鼎杯 2018]Comment",
+      "run_count": 6,
+      "fa_seen": false,
+      "has_cve": false
+    },
+    {
+      "challenge_id": "750d0f96-dab5-440b-bb3f-091746a054f4",
+      "name": "[CISCN2019 华北赛区 Day1 Web1]Dropbox",
+      "run_count": 5,
+      "fa_seen": false,
+      "has_cve": false
+    },
+    {
+      "challenge_id": "396a150c-1ea4-42b6-a0e9-5fc34404abff",
+      "name": "Wallbreaker_Easy",
+      "run_count": 4,
+      "fa_seen": false,
+      "has_cve": false
+    },
+    {
+      "challenge_id": "e38229a2-48ea-40ca-87a0-eef4d314bb10",
+      "name": "[CISCN2019 总决赛 Day1 Web2]Homebrew Dubbo",
+      "run_count": 4,
+      "fa_seen": false,
+      "has_cve": false
+    },
+    {
+      "challenge_id": "93317e53-f6f0-4f76-99fb-a11566956a5f",
+      "name": "[CISCN2019 东北赛区 Day2 Web3]Point System",
+      "run_count": 3,
+      "fa_seen": false,
+      "has_cve": false
+    },
+    {
+      "challenge_id": "02efda9e-cfd9-49aa-9e99-ca0f0e7916a7",
+      "name": "[StarCTF2019]EchoHub",
+      "run_count": 4,
+      "fa_seen": false,
+      "has_cve": false
+    },
+    {
+      "challenge_id": "fcdea538-603c-4e4e-aedd-1225f21cca9d",
+      "name": "[CISCN2019 华东北赛区]Web2",
+      "run_count": 3,
+      "fa_seen": false,
+      "has_cve": false
+    },
+    {
+      "challenge_id": "1311c502-d746-439a-9dc0-fbcac4192d17",
+      "name": "Phuck2",
+      "run_count": 7,
+      "fa_seen": false,
+      "has_cve": false
+    }
+  ],
+  "excluded_for_prior_fa": [],
+  "markdown_table": [
+    "| 组 | challenge_id | 题名 | CVE | 历史 Run |",
+    "|---|---|---|---|---|",
+    "| trea | `6872b381` | [CISCN2019 华东南赛区]Web9 | - | 3 |",
+    "| trea | `49b0fd5b` | TheMatrix | - | 4 |",
+    "| trea | `680e036b` | PyCalX 1&2 | - | 5 |",
+    "| trea | `2c7220d0` | [STARCTF2019]996game | - | 6 |",
+    "| trea | `08234edd` | [De1CTF 2019]cloudmusic_rev | - | 4 |",
+    "| trea | `b8ddfa83` | ctf473831530_2018_web_virink_web | - | 5 |",
+    "| trea | `81cbff31` | [RCTF2019]calcalcalc | - | 5 |",
+    "| trea | `186069b6` | [RWCTF2018]Bookhub | - | 6 |",
+    "| trea | `01526db6` | Unkonwn Web 1 | - | 3 |",
+    "| trea | `bbd4fa95` | [CISCN2019 总决赛 Day1 Web5]Markdown  | - | 4 |",
+    "| cont | `73ca736e` | kzone | - | 4 |",
+    "| cont | `cf3a7bb1` | [CISCN2019 总决赛 Day1 Web4]Laravel1 | - | 4 |",
+    "| cont | `c29c7c3e` | [网鼎杯 2018]Comment | - | 6 |",
+    "| cont | `750d0f96` | [CISCN2019 华北赛区 Day1 Web1]Dropbox | - | 5 |",
+    "| cont | `396a150c` | Wallbreaker_Easy | - | 4 |",
+    "| cont | `e38229a2` | [CISCN2019 总决赛 Day1 Web2]Homebrew  | - | 4 |",
+    "| cont | `93317e53` | [CISCN2019 东北赛区 Day2 Web3]Point Sy | - | 3 |",
+    "| cont | `02efda9e` | [StarCTF2019]EchoHub | - | 4 |",
+    "| cont | `fcdea538` | [CISCN2019 华东北赛区]Web2 | - | 3 |",
+    "| cont | `1311c502` | Phuck2 | - | 7 |"
+  ]
+}

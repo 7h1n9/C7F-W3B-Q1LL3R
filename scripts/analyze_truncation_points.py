@@ -17,10 +17,15 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import sys
 from collections import Counter, defaultdict
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from _metrics_boot import record_analysis  # noqa: E402
+
 DEFAULT_SRC = ROOT / "data" / "training" / "transitions-20261103T161417Z.jsonl"
 
 # 「浅层侦察」的形态：看目录、看 banner、看源码、扫端口。
@@ -80,10 +85,10 @@ def main() -> int:
     unsolved = [v for v in runs.values() if v[0]["labels"]["final_status"] != "COMPLETED_SOLVED"]
     solved = [v for v in runs.values() if v[0]["labels"]["final_status"] == "COMPLETED_SOLVED"]
 
-    def profile(rows_list: list[list[dict]], label: str) -> None:
+    def profile(rows_list: list[list[dict]], label: str) -> dict[str, int] | None:
         n = len(rows_list)
         if not n:
-            return
+            return None
         growing = 0
         recon_end = 0
         exploit_end = 0
@@ -114,9 +119,18 @@ def main() -> int:
             f"| 末{args.tail}条含动手={exploit_end}/{n} ({100 * exploit_end // n}%) "
             f"| 末窗≥50%为重复命令={looping}/{n} ({100 * looping // n}%)"
         )
+        # 返回值只给快照用；上面的输出逐字不变。
+        return {
+            "n": n,
+            "median_commands": lens[n // 2],
+            "fact_growth_tail": growing,
+            "all_recon_tail": recon_end,
+            "exploit_tail": exploit_end,
+            "looping_tail": looping,
+        }
 
-    profile(unsolved, "未解/引擎失败")
-    profile(solved, "已解（对照）")
+    unsolved_stats = profile(unsolved, "未解/引擎失败")
+    solved_stats = profile(solved, "已解（对照）")
 
     # 四象限：末窗是否仍在产出 × 结尾形态
     quad = Counter()
@@ -147,6 +161,26 @@ def main() -> int:
             print("结论倾向：多数未解 Run 在被截断时仍在做浅层侦察且无新事实 ⇒ 加时间的收益存疑，优先改方法。")
         else:
             print("结论倾向：相当比例未解 Run 在被截断时仍在推进 ⇒ 时间预算可能是约束，值得做 1.5× 取证重跑。")
+
+    # 本次出数的溯源行：口径 = 这个 jsonl 的哪一份、有没有截断行。
+    record_analysis(
+        "analyze_truncation_points",
+        f"transitions jsonl: {args.src.as_posix()} | 行数限制: 无（读取全文件 {total} 行）",
+        {
+            "runs": len(runs),
+            "transitions": total,
+            "status_histogram": dict(by_status),
+            "unsolved": unsolved_stats,
+            "solved": solved_stats,
+            "quadrant": dict(quad),
+            "stuck_fact0_recon": quad.get("fact0 / recon", 0) if n else None,
+            "advancing": (
+                quad.get("fact+ / exploit", 0) + quad.get("fact+ / mixed", 0) if n else None
+            ),
+        },
+        filters={"window": args.window, "tail": args.tail, "src": args.src.name},
+        data_window=f"{args.src.name} 全量（{total} 行 / {len(runs)} runs）",
+    )
     return 0
 
 

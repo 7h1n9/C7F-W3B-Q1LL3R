@@ -1,6 +1,7 @@
 """Export run history as (state, action, observation, label) transitions.
 
-Read-only against MySQL, write-only against ``data/training/``.  This is the
+Read-only against MySQL, write-only against ``data/training/`` plus one
+provenance row appended to ``data/logs/metrics-snapshots.jsonl``.  This is the
 data front door of the strategy-layer self-evolution loop: it never mutates a
 run, never touches the queue, and can be re-run at any time -- the same inputs
 with the same ``--seed`` reproduce byte-identical splits.
@@ -35,6 +36,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "backend"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from _metrics_boot import record_analysis  # noqa: E402
 
 from app.training.transitions import (  # noqa: E402
     EventInput,
@@ -305,6 +309,32 @@ def main() -> int:
     }
 
     print(json.dumps(manifest, indent=2, ensure_ascii=False))
+
+    # 溯源行：这份数据由哪几条查询、什么参数、哪版代码产出。--dry-run 也记，
+    # 因为它同样在汇报数字（filters.dry_run 表明这次没有落盘）。
+    record_analysis(
+        "export_training_transitions",
+        "mysql(docker c7f-w3b-q1ll3r-mysql-1): solve_runs + arena_solve_queue + "
+        "arena_submissions + run_events -> transitions/runs/manifest jsonl",
+        {
+            "runs_total": manifest["runs_total"],
+            "runs_included": manifest["runs_included"],
+            "runs_excluded": manifest["runs_excluded"],
+            "transitions": manifest["transitions"],
+            "split_histogram": manifest["split_histogram"],
+            "exclude_reasons": manifest["exclude_reasons"],
+            "redactions_total": manifest["redactions_total"],
+        },
+        filters={
+            "since": args.since or None,
+            "limit": args.limit or None,
+            "run_id": args.run_id or None,
+            "seed": args.seed,
+            "dry_run": args.dry_run,
+        },
+        data_window=args.since or "solve_runs 全表（无时间过滤）",
+    )
+
     if args.dry_run:
         return 0
 
