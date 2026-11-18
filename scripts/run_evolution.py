@@ -44,6 +44,8 @@ from app.training.evolve import (  # noqa: E402
     EVOLUTION_LIMITS,
     MIN_PARENT_SIMILARITY,
     SEED_LAYERS,
+    added_rules_text,
+    cosine,
     dumps,
     evolve,
     layer_distribution,
@@ -111,6 +113,7 @@ def _write(result: Any, out_root: Path) -> Path:
                         "text": rule.text,
                         "tags": list(rule.tags),
                         "group": rule.group,
+                        "origin": rule.origin,
                     }
                     for rule in SEED_LAYERS[layer].rules
                 ],
@@ -139,18 +142,27 @@ def _print_generation(generation: Any) -> None:
     print(f"\n-- gen{generation.generation}: {len(generation.variants)} variant(s) --")
     header = (
         f"{'variant':10s} {'parent':10s} {'layers':12s} {'rules':>5s} "
-        f"{'fit':>6s} {'prog':>6s} {'evid':>4s}  operators"
+        f"{'fit':>6s} {'prog':>6s} {'evid':>4s} {'sib_add':>7s}  operators"
     )
     print(header)
     print("-" * len(header))
+    added = {variant.variant_id: added_rules_text(variant.layers) for variant in generation.variants}
     for variant in generation.variants:
         layers = ",".join(variant.mutated_layers)
         rules = sum(len(variant.layers[layer].rules) for layer in LAYERS)
         applied = ",".join(op.operator for op in variant.op_log if op.applied)
+        # Closest sibling on added rules only: the number that says whether this
+        # "accepted" variant is a distinct hypothesis or a rewording of another.
+        siblings = [
+            cosine(added[variant.variant_id], text)
+            for other, text in added.items()
+            if other != variant.variant_id
+        ]
+        sibling_value = f"{min(siblings):7.3f}" if siblings else f"{'-':>7s}"
         print(
             f"{variant.variant_id:10s} {str(variant.parent_id or '-'):10s} {layers:12s} "
             f"{rules:5d} {variant.fitness.score:6.3f} {variant.fitness.mean_progress_score:6.1f} "
-            f"{len(variant.evidence_run_ids):4d}  {applied}"
+            f"{len(variant.evidence_run_ids):4d} {sibling_value}  {applied}"
         )
     for rejection in generation.rejected:
         print(
@@ -161,6 +173,18 @@ def _print_generation(generation: Any) -> None:
     print("  similarity " + _fmt_summary("all", similarity["scaffold"]))
     for layer in LAYERS:
         print("             " + _fmt_summary(layer, similarity["per_layer"][layer]))
+    diversity = generation.diversity
+    added_summary = diversity["pairwise_added_rule_cosine"]
+    print(
+        f"  diversity  seed_chars={diversity['seed_chars']} "
+        f"min_full={diversity['min_full_cosine']:.3f} "
+        f"seed_overlap={diversity['seed_overlap']['min']:.3f}"
+        f"-{diversity['seed_overlap']['max']:.3f} "
+        f"min_added={diversity['min_added_rule_cosine']:.3f} "
+        f"added(min/med/max)={added_summary['min']:.3f}/"
+        f"{added_summary['median']:.3f}/{added_summary['max']:.3f}"
+    )
+    print(f"  VERDICT: {diversity['verdict']}")
     activation = {layer: 0 for layer in LAYERS}
     for variant in generation.variants:
         for layer in variant.mutated_layers:

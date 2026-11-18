@@ -51,3 +51,8 @@ data/mysql-acceptance2/
 # Both are regeneration artefacts, not sources, so they stay on disk only.
 data/backups/*.sql
 data/training/transitions-*.jsonl
+
+# Scaffold variants produced by ``scripts/run_evolution.py`` (P3.3).
+# Generated artifacts, not sources: every file is reproducible from the
+# archived export plus a fixed policy version, and none of them is ship-ready.
+data/training/variants/

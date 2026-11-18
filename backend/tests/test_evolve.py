@@ -19,6 +19,7 @@ from app.training.evolve import (
     SEED_LAYERS,
     LayerText,
     Rule,
+    added_rules_text,
     char_ngrams,
     content_digest,
     corpus_digest,
@@ -394,3 +395,62 @@ def test_rejections_are_reported_in_the_json() -> None:
     assert payload["parent_similarity_floor"] == 0.999
     assert len(payload["generations"][0]["rejected"]) == 2
     assert payload["generations"][0]["variants"] == []
+
+
+# ---------------------------------------------------------------------------
+# Diversity report: a diagnosis, not a pass/fail flag
+# ---------------------------------------------------------------------------
+
+
+def test_added_rules_text_excludes_the_seed() -> None:
+    assert added_rules_text(SEED_LAYERS) == ""
+    result = evolve(corpus(), generations=1, population=2)
+    variant = result.generations[0].variants[0]
+    added = added_rules_text(variant.layers)
+    assert added
+    assert added not in render_scaffold(SEED_LAYERS)
+
+
+def test_diversity_block_reports_the_diagnosis_and_is_deterministic() -> None:
+    first = evolve(corpus(), generations=3, population=4)
+    second = evolve(corpus(), generations=3, population=4)
+    # The report itself must be reproducible, not only the variant files.
+    assert dumps(first) == dumps(second)
+
+    block = first.generations[0].diversity
+    assert block["seed_chars"] == len(render_scaffold(SEED_LAYERS))
+    assert block["accepted"] == 4
+    assert 0.0 <= block["min_full_cosine"] <= 1.0
+    assert block["seed_overlap"]["n_pairs"] == 4.0
+    # Regression of the observed ordering: the variants are at least as close
+    # to each other as to the seed they inherited.  If a future operator makes
+    # them diverge, this fires and the verdict text has to be revisited.
+    assert block["min_full_cosine"] >= block["seed_overlap"]["min"]
+    added = block["pairwise_added_rule_cosine"]
+    assert added["n_pairs"] == 6.0
+    assert added["min"] <= added["median"] <= added["max"]
+    assert block["min_added_rule_cosine"] == added["min"]
+    assert block["ship_ready"] is False
+    assert "near-duplicates" in block["verdict"]
+    # The same block reaches the artifact readers actually open.
+    assert first.generations[0].to_dict()["diversity"]["verdict"] == block["verdict"]
+
+
+def test_diversity_block_refuses_to_call_one_variant_a_population() -> None:
+    result = evolve(corpus(), generations=1, population=1)
+    block = result.generations[0].diversity
+    assert block["accepted"] == 1
+    assert block["min_full_cosine"] == 0.0
+    assert "unmeasurable" in block["verdict"]
+    assert block["ship_ready"] is False
+
+
+def test_variant_json_carries_rule_origin() -> None:
+    payload = json.loads(dumps(evolve(corpus(), generations=1, population=2)))
+    origins = {
+        rule["origin"]
+        for variant in payload["generations"][0]["variants"]
+        for layer in LAYERS
+        for rule in variant["layers"][layer]["rules"]
+    }
+    assert origins == {"seed", "generated"}

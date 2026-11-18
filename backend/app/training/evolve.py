@@ -51,7 +51,7 @@ import hashlib
 import json
 import math
 from collections import Counter
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import Any, Iterable, Mapping, Sequence
 
 from app.training.diagnosis import (
@@ -85,6 +85,10 @@ class Rule:
     text: str
     tags: tuple[str, ...] = ()
     group: str = "must"
+    #: ``seed`` for the four seed layers, ``generated`` for anything an
+    #: operator added.  The diversity report needs this to answer "how much of
+    #: this variant is new" without re-deriving it from rule ids.
+    origin: str = "seed"
 
 
 @dataclass(frozen=True)
@@ -463,6 +467,7 @@ def densify(layer: LayerText, diagnoses: Sequence[Diagnosis]) -> OpResult:
                 rule_id=f"{layer.layer.lower()}.dn.{diagnosis.run_id[:8]}.{len(added)}",
                 text=text,
                 tags=("densified", f"from:{diagnosis.layer}"),
+                origin="generated",
             )
         )
         cited.append(diagnosis.run_id)
@@ -971,6 +976,92 @@ def similarity_report(variants: Sequence["Variant"], n: int = 3) -> dict[str, An
     }
 
 
+def added_rules_text(layers: Mapping[str, LayerText]) -> str:
+    """Only the rules an operator produced, seed rules excluded."""
+
+    return "\n".join(
+        rule.text
+        for layer in LAYERS
+        for rule in layers[layer].rules
+        if rule.origin != "seed"
+    )
+
+
+def diversity_report(
+    variants: Sequence["Variant"],
+    seed_layers: Mapping[str, LayerText],
+    n: int = 3,
+) -> dict[str, Any]:
+    """Diversity as a *measurement with a verdict*, not a pass/fail flag.
+
+    The P3.3 acceptance bar (pairwise cosine <= 0.4) is reported as failed
+    rather than waived: the numbers below say why.  Three quantities are kept
+    separate on purpose.
+
+    ``min_full_cosine``
+        Whole-scaffold pairwise cosine.  This is what the acceptance criterion
+        names.
+    ``seed_overlap``
+        ``cosine(variant, seed)`` per variant: how much of the variant *is* the
+        untouched seed.  Read it against ``min_full_cosine``.  A variant at
+        0.78 from the seed that sits at 0.90 from its siblings is closer to
+        them than to the scaffold it came from, so the extra similarity has to
+        come from the additions, not from inherited text.
+
+        A tighter-looking "floor" was tried first: count only the n-grams the
+        two variants share *and* the seed contains.  It returned 0.23 for the
+        numbers below, while a control of seed plus two fully disjoint 900-char
+        additions scored 0.77 against the same seed.  The bound is therefore
+        too loose to mean anything, and reporting it next to a 0.90 would have
+        implied the seed explains almost none of the similarity.  It is not
+        reported.
+    ``pairwise_added_rule_cosine``
+        The same cosine over *only* the rules an operator added.  This is the
+        number that answers "is the mutation actually producing distinct
+        hypotheses", and the one to read before trusting a generation.
+    """
+
+    seed_text = render_scaffold(seed_layers)
+    seed_chars = len(seed_text)
+    full = [render_scaffold(variant.layers) for variant in variants]
+    added = [added_rules_text(variant.layers) for variant in variants]
+
+    full_pairs: list[float] = []
+    added_pairs: list[float] = []
+    for i in range(len(variants)):
+        for j in range(i + 1, len(variants)):
+            full_pairs.append(cosine(full[i], full[j], n))
+            added_pairs.append(cosine(added[i], added[j], n))
+    seed_overlap = _summary([cosine(text, seed_text, n) for text in full])
+
+    full_summary = _summary(full_pairs)
+    added_summary = _summary(added_pairs)
+    if len(variants) < 2:
+        verdict = (
+            f"only {len(variants)} variant(s) accepted: pairwise diversity is "
+            "unmeasurable, and a single variant is not a population."
+        )
+    else:
+        verdict = (
+            f"{len(variants)} accepted variants share {seed_chars} chars of seed; "
+            f"each is {seed_overlap['min']:.3f}-{seed_overlap['max']:.3f} similar to "
+            f"the untouched seed, yet {full_summary['min']:.3f}-{full_summary['max']:.3f} "
+            f"similar to each other and {added_summary['min']:.3f}-{added_summary['max']:.3f} "
+            "on their added rules alone -- they are near-duplicates of each other, "
+            "not independent hypotheses."
+        )
+    return {
+        "seed_chars": seed_chars,
+        "accepted": len(variants),
+        "min_full_cosine": full_summary["min"],
+        "seed_overlap": seed_overlap,
+        "min_added_rule_cosine": added_summary["min"],
+        "pairwise_added_rule_cosine": added_summary,
+        "verdict": verdict,
+        "ship_ready": False,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Variants and the loop
 # ---------------------------------------------------------------------------
@@ -1023,6 +1114,7 @@ class Variant:
                             "text": rule.text,
                             "tags": list(rule.tags),
                             "group": rule.group,
+                            "origin": rule.origin,
                         }
                         for rule in self.layers[layer].rules
                     ],
@@ -1162,6 +1254,7 @@ class GenerationResult:
     variants: tuple[Variant, ...]
     similarity: Mapping[str, Any]
     rejected: tuple[Rejection, ...] = ()
+    diversity: Mapping[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -1169,6 +1262,7 @@ class GenerationResult:
             "variants": [variant.to_dict() for variant in self.variants],
             "rejected": [item.to_dict() for item in self.rejected],
             "similarity": self.similarity,
+            "diversity": self.diversity,
             "layer_activation": layer_activation(self.variants),
         }
 
@@ -1319,6 +1413,7 @@ def evolve(
                         variants=(),
                         similarity=similarity_report(()),
                         rejected=tuple(rejected),
+                        diversity=diversity_report((), base),
                     )
                 )
                 previous = ()
@@ -1399,6 +1494,7 @@ def evolve(
                 variants=tuple(unique),
                 similarity=similarity_report(unique),
                 rejected=tuple(rejected),
+                diversity=diversity_report(unique, base),
             )
         )
         previous = tuple(unique)
