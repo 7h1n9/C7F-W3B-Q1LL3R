@@ -303,6 +303,24 @@ body::before { position: fixed; inset: 0; z-index: -1; content: ""; opacity: .58
 .muteki-agent-route li code { display: block; color: #2b665d; white-space: pre-wrap; }
 .muteki-agent-route li small { display: block; color: #94b0aa; white-space: pre-wrap; }
 .muteki-agent-foot { display: flex; flex-wrap: wrap; gap: 8px; margin-top: auto; padding-top: 8px; color: #9bb6b0; font-family: Consolas, monospace; font-size: 8px; }
+/* ---- 下一步方向 -------------------------------------------------------- */
+/* This block exists because a failed Run used to say only "failed". It is the
+   one place on the page that answers "so what do I do now". */
+.muteki-direction-card { display: grid; gap: 6px; margin: 10px 0; padding: 10px 11px; background: #f7fbfa; border: 1px solid #d7e9e4; border-left: 3px solid #b9c9c4; border-radius: 9px; }
+.muteki-direction-card.is-high { background: #f2fdf7; border-color: #b7e3c9; border-left-color: #16a35c; }
+.muteki-direction-card.is-medium { background: #fffdf3; border-color: #e6dcb6; border-left-color: #d7a12a; }
+.muteki-direction-card.is-low { background: #f8f9f9; border-color: #dde5e3; border-left-color: #a8b6b3; }
+.muteki-direction-card.is-infra { background: #fff6f4; border-color: #f0d3cb; border-left-color: #c84b55; }
+.muteki-direction-card.is-quiet { background: #fafbfb; border-left-color: #d8e2e0; }
+.muteki-direction-head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; color: #2b665d; font-size: 11px; font-weight: 600; }
+.muteki-direction-head .ant-tag { margin-inline-end: 0; font-size: 9px; line-height: 16px; }
+.muteki-direction-card.is-infra .muteki-direction-head { color: #a4442f; }
+.muteki-direction-body { color: #1d5048; font-size: 12px; line-height: 1.55; }
+.muteki-direction-rationale { color: #5d857d; font-size: 10px; line-height: 1.5; }
+.muteki-direction-card small { color: #93564a; font-size: 9px; line-height: 1.45; }
+.muteki-direction-evidence { margin-top: 2px; }
+.muteki-direction-evidence summary { color: #7ba299; font-family: Consolas, monospace; font-size: 9px; cursor: pointer; }
+.muteki-direction-evidence div { margin-top: 4px; padding: 5px 6px; color: #5f8079; font-family: Consolas, monospace; font-size: 9px; line-height: 1.45; background: #ffffffb0; border-radius: 6px; overflow-wrap: anywhere; }
 .muteki-context-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin-top: 16px; }
 .muteki-context-grid .ant-statistic { padding: 8px; background: #f3fbf8; border: 1px solid #e0f0eb; border-radius: 8px; }
 .muteki-context-grid .ant-statistic-title { color: #80a49c; font-size: 9px; }

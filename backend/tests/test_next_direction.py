@@ -416,3 +416,34 @@ def test_dead_end_evidence_is_bounded_too():
     assert direction.source == "dead_end_review"
     assert len(direction.evidence) <= 5
     assert all(len(item) <= 300 for item in direction.evidence)
+
+
+# --------------------------------------------------------------------------- #
+# coverage-gap degeneracy: a blind detector must not be reported as a gap
+# --------------------------------------------------------------------------- #
+
+
+def test_full_coverage_gap_is_reported_as_an_unknown_not_a_checklist():
+    """Every class untried means the detector saw nothing, not that the Run
+    tried nothing. Measured on 15,111 real shell invocations the keyword
+    detector matches a class in 4.1% of command lines, so this branch is the
+    common case and it must not emit fifteen items of advice."""
+    direction = compose_next_direction(outcome=SOLVER_OUTCOME, untried_classes=VULN_CLASSES)
+
+    assert direction is not None
+    assert direction.source == "coverage_unknown"
+    assert direction.confidence == "low"
+    # And it must not smuggle the full list back in through the action text.
+    assert not any(vuln in direction.action for vuln in VULN_CLASSES)
+
+
+def test_untried_class_action_is_bounded_to_four_items():
+    direction = compose_next_direction(
+        outcome=SOLVER_OUTCOME,
+        untried_classes=("ssrf", "xxe", "ssti", "deserialization", "xss", "idor"),
+    )
+
+    assert direction is not None
+    assert direction.source == "untried_class"
+    assert len(direction.evidence) == 4
+    assert "xss" not in direction.action and "idor" not in direction.action

@@ -2,6 +2,7 @@ import {
   CaretRightOutlined,
   CheckCircleFilled,
   ClockCircleOutlined,
+  CompassOutlined,
   DownloadOutlined,
   EyeOutlined,
   ExperimentOutlined,
@@ -1023,6 +1024,14 @@ function flagMeta(state: FlagCandidate["review_state"]) {
   return { color: "gold", label: "待复核" };
 }
 
+// Confidence is about how close the evidence is to a flag, not how sure the
+// model feels, so the wording says what to do with it rather than "90%".
+function directionLabel(confidence: "high" | "medium" | "low") {
+  if (confidence === "high") return "优先做";
+  if (confidence === "medium") return "值得一试";
+  return "证据不足";
+}
+
 function StageRail({ phase, terminal }: { phase: string; terminal: boolean }) {
   const active = Math.max(0, stages.findIndex((stage) => stage.key === phase));
   return (
@@ -1099,6 +1108,16 @@ export function WorkspacePage() {
     queryFn: () => api.getReport(id),
     retry: false,
     refetchInterval: boardSemantic?.status === "running" ? 1500 : false,
+  });
+  // Diagnostics scan every event, tool output and observation of the Run, so
+  // this is deliberately *not* polled: it is fetched once the Run is over,
+  // which is the only moment a "what should we do next" answer is meaningful.
+  const diagnostics = useQuery({
+    queryKey: ["run-diagnostics", id],
+    queryFn: () => api.getRunDiagnostics(id),
+    enabled: terminal,
+    retry: false,
+    staleTime: 60_000,
   });
   const board = useMemo(() => projectBoard(events, mutekiState.data), [events, mutekiState.data]);
   const keyMoments = useMemo(() => projectKeyMoments(events, runMessages.data ?? []), [events, runMessages.data]);
@@ -1289,6 +1308,8 @@ export function WorkspacePage() {
   }, [caseBoardFullscreen]);
 
   const flagRows = flags.data ?? [];
+  const outcome = diagnostics.data?.outcome ?? null;
+  const direction = diagnostics.data?.next_direction ?? null;
   const verifiedCount = Math.max(board.facts.filter((fact) => fact.verified).length, flagRows.filter((item) => item.review_state === "VALID").length);
   const candidateCount = Math.max(events.filter((event) => event.event_type === "muteki.flag_candidate" || event.event_type === "flag.candidate_found").length, flagRows.filter((item) => item.review_state === "OPEN").length);
   const deadEndCount = events.filter((event) => event.event_type === "muteki.dead_end").length;
@@ -1405,6 +1426,32 @@ export function WorkspacePage() {
                       {canonicalFlag ? <CheckCircleFilled /> : <ClockCircleOutlined />}
                       <div><strong>{canonicalFlag ? "FLAG 已验证" : pendingVerifiedFlag ? "已记录验证事件" : terminal ? "运行已结束" : "等待证据"}</strong><span>{canonicalFlag ? "Completion Gate 已确认结果" : pendingVerifiedFlag ? "已收到验证事件，但当前 Run 尚未完成正式结果落盘" : health.data?.next_action ?? "Coordinator 等待下一条有效观察"}</span></div>
                     </div>
+                    {!canonicalFlag && outcome?.outcome_class === "aborted_infra" && (
+                      <div className="muteki-direction-card is-infra">
+                        <div className="muteki-direction-head"><WarningOutlined /> 基础设施失败 · 不计入解题率</div>
+                        <div className="muteki-direction-body">这不是解法问题：{outcome.infra_reasons.length ? outcome.infra_reasons.join("；") : "运行环境不可用"}。</div>
+                        <small>该 Run 已排除出解题率分母；基础设施失败不产生研究方向，重跑即可。</small>
+                      </div>
+                    )}
+                    {!canonicalFlag && direction && (
+                      <div className={`muteki-direction-card is-${direction.confidence}`}>
+                        <div className="muteki-direction-head">
+                          <CompassOutlined /> 下一步最有价值的方向
+                          <Tag color={direction.confidence === "high" ? "green" : direction.confidence === "medium" ? "gold" : "default"}>{directionLabel(direction.confidence)}</Tag>
+                        </div>
+                        <div className="muteki-direction-body"><ExpandableText value={direction.action} lines={4} /></div>
+                        <div className="muteki-direction-rationale"><ExpandableText value={direction.rationale} lines={3} /></div>
+                        {direction.evidence.length > 0 && (
+                          <details className="muteki-direction-evidence">
+                            <summary>依据 · {direction.evidence.length} 条（{direction.source}）</summary>
+                            {direction.evidence.map((item, index) => <div key={`${index}-${item.slice(0, 12)}`}><ExpandableText value={item} lines={2} /></div>)}
+                          </details>
+                        )}
+                      </div>
+                    )}
+                    {!canonicalFlag && terminal && diagnostics.isFetching && !diagnostics.data && (
+                      <div className="muteki-direction-card is-quiet"><div className="muteki-direction-head"><CompassOutlined /> 正在评估下一步方向…</div></div>
+                    )}
                     {canonicalFlag && <div className="muteki-canonical-flag">
                       <div className="muteki-canonical-flag-label"><CheckCircleFilled /> 已验证 Flag <Tag color="green">含证据支撑</Tag></div>
                       <Typography.Text className="muteki-canonical-flag-value" copyable={{ text: canonicalFlag }}>{canonicalFlag}</Typography.Text>

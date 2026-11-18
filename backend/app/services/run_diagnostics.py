@@ -24,7 +24,57 @@ from app.models.skill import Skill
 from app.orchestration.state_machine import RunStatus
 from app.schemas.model_config import WORKER_ENGINE_TYPES
 from app.services.events import event_service
+from app.services.next_direction import (
+    classify_outcome,
+    compose_next_direction,
+    untried_vuln_classes,
+)
 from app.services.solver_state import solver_state_service
+
+
+def _event_body(event: RunEvent) -> dict:
+    """Return the inner payload of one audit event.
+
+    ``EventBridge`` wraps every Muteki event as ``{"actor", "payload",
+    "verified", "muteki_event_type"}``, so the fields an event actually carries
+    live one level down.  Reading the root instead of the body silently yields
+    nothing, which is how a diagnostic can look "empty" while the data is there.
+    """
+    root = event.payload_json if isinstance(event.payload_json, dict) else {}
+    body = root.get("payload")
+    return body if isinstance(body, dict) else root
+
+
+def _event_texts(events: list[RunEvent], event_type: str, *keys: str) -> list[str]:
+    items: list[str] = []
+    for event in events:
+        if event.event_type != event_type:
+            continue
+        body = _event_body(event)
+        for key in keys:
+            value = body.get(key)
+            if isinstance(value, str) and value.strip():
+                items.append(value.strip())
+                break
+    return items
+
+
+def _verified_fact_texts(events: list[RunEvent]) -> list[str]:
+    """Facts the board marked verified. ``verified`` sits on the envelope."""
+    items: list[str] = []
+    for event in events:
+        if event.event_type != "muteki.fact_added":
+            continue
+        root = event.payload_json if isinstance(event.payload_json, dict) else {}
+        if not root.get("verified"):
+            continue
+        body = _event_body(event)
+        for key in ("content", "fact", "description"):
+            value = body.get(key)
+            if isinstance(value, str) and value.strip():
+                items.append(value.strip())
+                break
+    return items
 
 
 def _blob(*values: object) -> str:
@@ -228,10 +278,64 @@ class RunDiagnosticsService:
 
         active_skill_names = await self._active_skill_names(session, state)
         diagnostic_summary = anomalies[0]["summary"] if anomalies else run.last_error_message
+
+        # ---- Outcome and the next research direction ----------------------
+        # A run that died because the harness itself failed (upstream balance
+        # exhausted, 402/429, provider denial, proxy down, target 502/503,
+        # operator shutdown) is not a solver failure.  It must produce no
+        # direction at all -- advice derived from it would describe what to do
+        # when the model has no quota -- and it must stay out of the solve-rate
+        # denominator.  The user asked for exactly this split: infrastructure
+        # failures are skipped, not analysed.
+        dead_end_texts = _event_texts(events, "muteki.dead_end", "reason", "description")
+        verified_fact_texts = _verified_fact_texts(events)
+        all_fact_texts = _event_texts(events, "muteki.fact_added", "content", "fact", "description")
+        # Class coverage is a claim about what the run *tried*, so it has to be
+        # read from actions, not from conclusions.  Bounded to the tail: the
+        # keyword scan is cheap but a 3,000-command run is not the population
+        # whose coverage we care about, and a bounded window keeps the
+        # diagnostic deterministic.
+        attempted_texts = list(dead_end_texts)
+        attempted_texts.extend(
+            json.dumps(call.arguments_json, ensure_ascii=False, default=str)
+            for call in tool_calls[-400:]
+            if call.arguments_json
+        )
+        attempted_texts.extend(obs.summary for obs in observations[-200:] if obs.summary)
+
+        outcome = classify_outcome(
+            status=str(run.status),
+            error_code=run.last_error_code,
+            error_message=run.last_error_message,
+            has_flag=any(item.review_state == "VALID" for item in flag_candidates),
+            command_count=len(tool_calls),
+        )
+        direction = compose_next_direction(
+            outcome=outcome,
+            dead_ends=dead_end_texts,
+            verified_facts=verified_fact_texts,
+            untried_classes=untried_vuln_classes(attempted_texts),
+            open_flag_candidates=[item.candidate for item in flag_candidates if item.review_state == "OPEN"],
+            total_facts=len(all_fact_texts),
+            command_count=len(tool_calls),
+        )
+
         return {
             "diagnostic_tags": list(dict.fromkeys(tags)),
             "diagnostic_summary": diagnostic_summary,
             "anomalies": anomalies,
+            "outcome": {
+                "outcome_class": outcome.outcome_class,
+                "infra_reasons": list(outcome.infra_reasons),
+                "excluded_from_solve_rate": outcome.excluded_from_solve_rate,
+            },
+            "next_direction": None if direction is None else {
+                "action": direction.action,
+                "rationale": direction.rationale,
+                "evidence": list(direction.evidence),
+                "confidence": direction.confidence,
+                "source": direction.source,
+            },
             "state": {
                 "current_phase": state.current_phase if state else run.current_phase,
                 "no_progress_count": no_progress_count,

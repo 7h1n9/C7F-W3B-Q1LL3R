@@ -396,18 +396,39 @@ def compose_next_direction(
         )
 
     classes = tuple(dict.fromkeys(str(c).strip() for c in untried_classes if str(c).strip()))
+    # Measured on 15,111 real shell invocations: the keyword detector matches a
+    # technique class in only 4.1% of command lines, so "every class is
+    # untried" is usually the *detector* being blind, not the run having tried
+    # nothing.  Reporting all fifteen as a coverage gap is a checklist, not a
+    # direction, and it is what every unsolved Run was getting.  Say what is
+    # actually true instead.
+    if classes and len(classes) >= len(VULN_CLASSES):
+        return NextDirection(
+            action="先补一次带明确技术特征的探针，让本轮攻击面可被识别",
+            rationale=(
+                "本轮没有任何可识别的攻击类命中记录，既不能证明试过哪些类，"
+                "也不能据此断言缺口在哪；先产出带技术特征的证据（请求方法、参数、载荷形态），"
+                "再谈研究方向。"
+            ),
+            evidence=_bounded_evidence((f"untried_classes={len(classes)}", f"total_facts={total_facts}", f"command_count={command_count}")),
+            confidence="low",
+            source="coverage_unknown",
+        )
     if classes:
+        # Four is the most a person can act on at once, and the action string
+        # has to stay readable in a 390px sidebar.
+        shown = classes[:4]
         return NextDirection(
             action=(
-                f"先确认目标是否具备以下未尝试类的前置条件：{'、'.join(classes)}，"
+                f"先确认目标是否具备以下未尝试类的前置条件：{'、'.join(shown)}，"
                 "再决定是否投入测试"
             ),
             rationale=(
                 "这些类是整个运行从未尝试过的覆盖缺口，不是针对本靶标的推荐；"
                 "它们只应作为排查清单，先用前置条件筛掉不适用项，避免为了覆盖而覆盖。"
             ),
-            evidence=_bounded_evidence(classes),
-            confidence="medium" if len(classes) >= 2 else "low",
+            evidence=_bounded_evidence(shown),
+            confidence="medium" if len(shown) >= 2 else "low",
             source="untried_class",
         )
 
